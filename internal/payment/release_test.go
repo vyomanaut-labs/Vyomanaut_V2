@@ -82,6 +82,49 @@ func TestComputeMonthlyReleaseSkipsStaleScore(t *testing.T) {
 	}
 }
 
+// TestShouldRunReleaseFiresAcrossYearBoundary is the regression test for
+// Finding #6 (M10 corrections review): a calendar-driven release loop that
+// runs continuously past its first anniversary must still fire on the 23rd
+// every month, including when the current month number matches a month
+// number from a full year earlier. Simulates two ticks exactly 12 months
+// apart on the 23rd — the exact scenario the pre-fix int(now.Month())
+// comparison got wrong (Jan 2027 vs. a stale lastRunMonth of 1 from Jan
+// 2026 compared equal, silently skipping the run).
+func TestShouldRunReleaseFiresAcrossYearBoundary(t *testing.T) {
+	first := time.Date(2026, time.January, releaseComputationDayOfMonth, 10, 0, 0, 0, time.UTC)
+	run, lastRun := shouldRunRelease(first, "")
+	if !run {
+		t.Fatalf("shouldRunRelease(%v, \"\") run = false, want true (first-ever run on the 23rd)", first)
+	}
+
+	// Same-month re-poll (the ticker fires hourly — calendarPollInterval —
+	// so the 23rd is checked many times) must NOT re-fire.
+	sameDayLater := first.Add(3 * time.Hour)
+	if run, _ := shouldRunRelease(sameDayLater, lastRun); run {
+		t.Errorf("shouldRunRelease(%v, %q) run = true, want false (already ran this month)", sameDayLater, lastRun)
+	}
+
+	// Exactly 12 months later, same day of month — must fire again. This is
+	// the case the pre-fix "int(now.Month()) != lastRunMonth" comparison
+	// got wrong: January's month number (1) is identical a year apart.
+	secondYear := time.Date(2027, time.January, releaseComputationDayOfMonth, 10, 0, 0, 0, time.UTC)
+	run2, lastRun2 := shouldRunRelease(secondYear, lastRun)
+	if !run2 {
+		t.Errorf("shouldRunRelease(%v, %q) run = false, want true (a full year has passed since the last "+
+			"run — this is the exact bug Finding #6 describes: the month number alone repeats every year)",
+			secondYear, lastRun)
+	}
+	if lastRun2 != "2027-01" {
+		t.Errorf("newLastRun = %q, want %q", lastRun2, "2027-01")
+	}
+
+	// Not the 23rd at all -> never fires, regardless of lastRun.
+	notThe23rd := time.Date(2027, time.February, 1, 0, 0, 0, 0, time.UTC)
+	if run, _ := shouldRunRelease(notThe23rd, lastRun2); run {
+		t.Errorf("shouldRunRelease(%v, %q) run = true, want false (not the 23rd)", notThe23rd, lastRun2)
+	}
+}
+
 // ── Live-database fixtures shared by the remaining tests ──────────────────────
 
 func insertTestAuditReceiptForRelease(t *testing.T, verify *sql.DB, providerID uuid.UUID, challengeTS time.Time, result string) {

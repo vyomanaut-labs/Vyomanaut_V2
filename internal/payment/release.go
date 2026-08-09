@@ -182,7 +182,7 @@ func computeReleaseForProvider(ctx context.Context, db, primaryDB *sql.DB, provi
 	releaseAmountPaise := balancePaise * multiplierBP / basisPointsDivisor
 
 	if releaseAmountPaise > 0 {
-		idempotencyKey := releaseIdempotencyKey(providerID, auditPeriodID)
+		idempotencyKey := ReleaseIdempotencyKey(providerID, auditPeriodID)
 		if err := provider.ReleaseEscrow(ctx, providerID, releaseAmountPaise, auditPeriodID, idempotencyKey); err != nil {
 			return fmt.Errorf("release escrow: %w", err)
 		}
@@ -202,9 +202,35 @@ func markReleaseComputed(ctx context.Context, db *sql.DB, auditPeriodID uuid.UUI
 	return nil
 }
 
-// releaseIdempotencyKey computes SHA-256(providerID || auditPeriodID) as 64
-// lowercase hex characters (ADR-012, FR-047).
-func releaseIdempotencyKey(providerID, auditPeriodID uuid.UUID) string {
+// MarkReleaseComputed sets audit_periods.release_computed = TRUE for
+// auditPeriodID, so this exact period is never re-selected by
+// pendingReleaseCandidates' WHERE release_computed = FALSE filter. Exported
+// so internal/api's departure handler (HandleDepart) can call the same
+// function ComputeMonthlyRelease itself uses, rather than growing a second,
+// possibly-drifting implementation of the same one-line UPDATE.
+//
+// [Added, M10 corrections review Finding #8] HandleDepart previously never
+// set this at all, so a departed provider's still-open audit period was
+// queried, scored, and silently discarded by ComputeMonthlyRelease on every
+// future cycle, forever.
+func MarkReleaseComputed(ctx context.Context, db *sql.DB, auditPeriodID uuid.UUID) error {
+	return markReleaseComputed(ctx, db, auditPeriodID)
+}
+
+// ReleaseIdempotencyKey computes SHA-256(providerID || auditPeriodID) as 64
+// lowercase hex characters (ADR-012, FR-047). Exported so every code path
+// that releases escrow against a given (providerID, auditPeriodID) pair —
+// currently ComputeMonthlyRelease and internal/api's HandleDepart — derives
+// the SAME idempotency key for the SAME logical event.
+//
+// [Fixed, M10 corrections review Finding #8] internal/api/provider.go's
+// HandleDepart previously minted its own, differently-derived key
+// (announcedDepartureIdempotencyKey) for a release against the same audit
+// period ComputeMonthlyRelease could also select — defeating the
+// escrow_events.idempotency_key UNIQUE constraint's "one release per
+// provider per audit period" guarantee this key format exists to enforce.
+// Both paths now call this one function.
+func ReleaseIdempotencyKey(providerID, auditPeriodID uuid.UUID) string {
 	h := sha256.New()
 	h.Write(providerID[:])
 	h.Write(auditPeriodID[:])
@@ -255,17 +281,43 @@ func runReleaseOnTicker(ctx context.Context, db, primaryDB *sql.DB, profile conf
 func runReleaseOnCalendarDate(ctx context.Context, db, primaryDB *sql.DB, profile config.NetworkProfile, provider PaymentProvider) {
 	ticker := time.NewTicker(calendarPollInterval)
 	defer ticker.Stop()
-	lastRunMonth := -1
+	lastRun := "" // year-month key of the last successful run; see shouldRunRelease
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			now := time.Now()
-			if now.Day() == releaseComputationDayOfMonth && int(now.Month()) != lastRunMonth {
+			if run, newLastRun := shouldRunRelease(time.Now(), lastRun); run {
 				_ = ComputeMonthlyRelease(ctx, db, primaryDB, profile, provider)
-				lastRunMonth = int(now.Month())
+				lastRun = newLastRun
 			}
 		}
 	}
+}
+
+// shouldRunRelease reports whether now is a day runReleaseOnCalendarDate
+// should fire ComputeMonthlyRelease, given lastRun (the year-month key
+// returned by the previous call that fired, or "" if it has never fired).
+// Extracted into its own pure function so the exact month-rollover
+// comparison can be unit-tested without waiting a real year for the bug to
+// reproduce.
+//
+// [Fixed, M10 corrections review Finding #6] runReleaseOnCalendarDate
+// previously compared only int(now.Month()) (range 1-12) against the
+// month of its last run. A process that runs continuously past its first
+// anniversary — the expected steady state for this persistent,
+// long-running loop, not an edge case — would compare e.g. January 2027
+// against a lastRunMonth of 1 left over from January 2026, see 1 == 1, and
+// silently skip that entire month's release computation. now.Format is
+// monotonic across year boundaries (and, as a side benefit, lexicographically
+// sortable) where a bare month number is not.
+func shouldRunRelease(now time.Time, lastRun string) (run bool, newLastRun string) {
+	if now.Day() != releaseComputationDayOfMonth {
+		return false, lastRun
+	}
+	current := now.Format("2006-01")
+	if current == lastRun {
+		return false, lastRun
+	}
+	return true, current
 }
