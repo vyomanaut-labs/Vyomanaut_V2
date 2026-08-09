@@ -84,7 +84,7 @@ var ProductionProfile = NetworkProfile{
 	ReleaseComputationInterval: 0,
 
 	// ── Charge computation cycle ──────────────────────────────────────────────
-	// 0 = calendar-driven (1st of each month, in arrears). [REF: ADR-059]
+	// 0 = calendar-driven (1st of each month, in arrears). [REF: ADR-061]
 	ChargeComputationInterval: 0,
 
 	// ── GC retry backoff (IC §4.5) ────────────────────────────────────────────
@@ -177,8 +177,11 @@ var DemoProfile = NetworkProfile{
 	// Non-zero = ticker-driven (every 90 seconds — deliberately different from
 	// ReleaseComputationInterval's 2 minutes so the two loops' log output and
 	// idempotency-key collisions, if any, are distinguishable during demo
-	// testing). [REF: ADR-059]
+	// testing). [REF: ADR-061]
 	ChargeComputationInterval: 90 * time.Second,
+
+	// ── Authenticated mutation-protocol freshness (ADR-036) ──────────────────
+	AuthRequestFreshnessWindow: 120 * time.Second,
 
 	// ── GC retry backoff (IC §4.5) ────────────────────────────────────────────
 	GCRetryBackoff: [3]time.Duration{

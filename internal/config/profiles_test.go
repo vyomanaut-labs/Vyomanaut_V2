@@ -247,6 +247,7 @@ func TestDemoDiffersFromProduction(t *testing.T) {
 			{"HeartbeatInterval", prod.HeartbeatInterval, demo.HeartbeatInterval},
 			{"HeartbeatJitter", prod.HeartbeatJitter, demo.HeartbeatJitter},
 			{"PollingInterval", prod.PollingInterval, demo.PollingInterval},
+			{"DeparturePollingInterval", prod.DeparturePollingInterval, demo.DeparturePollingInterval},
 			{"DHTRepublishInterval", prod.DHTRepublishInterval, demo.DHTRepublishInterval},
 			{"DHTExpiryDuration", prod.DHTExpiryDuration, demo.DHTExpiryDuration},
 			{"DepartureThreshold", prod.DepartureThreshold, demo.DepartureThreshold},
