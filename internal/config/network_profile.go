@@ -127,9 +127,9 @@ type NetworkProfile struct {
 	// `profile.ChargeComputationInterval == 0`, mirroring
 	// ReleaseComputationInterval exactly — a deliberately separate field, not
 	// a shared one, so charge and release cadences can be tuned independently
-	// (ADR-059: the charge job has no audit-period-closed precondition to
+	// (ADR-061: the charge job has no audit-period-closed precondition to
 	// wait for, unlike release, so nothing requires them to share a cadence).
-	// [REF: ADR-059]
+	// [REF: ADR-061]
 	ChargeComputationInterval time.Duration
 
 	// ── Authenticated mutation-protocol freshness ────────────────────────────

@@ -93,8 +93,8 @@ func TestProfileBothFullySpecified(t *testing.T) {
 				// calendar month, in arrears, not on a ticker. Callers
 				// branch on `profile.ChargeComputationInterval == 0`,
 				// mirroring ReleaseComputationInterval's own pattern.
-				// Zero is correct per ADR-059.
-				"ChargeComputationInterval": "zero is correct: calendar-driven charge fires on the 1st, in arrears (ADR-059)",
+				// Zero is correct per ADR-061.
+				"ChargeComputationInterval": "zero is correct: calendar-driven charge fires on the 1st, in arrears (ADR-061)",
 
 				// SkipMnemonicConfirm = false means production always demands
 				// the two-word mnemonic confirmation step.
@@ -330,6 +330,9 @@ func TestDemoDiffersFromProduction(t *testing.T) {
 		}
 		if prod.ReleaseComputationInterval == demo.ReleaseComputationInterval {
 			t.Errorf("ReleaseComputationInterval must differ: both=%v", prod.ReleaseComputationInterval)
+		}
+		if prod.ChargeComputationInterval == demo.ChargeComputationInterval {
+			t.Errorf("ChargeComputationInterval must differ: both=%v", prod.ChargeComputationInterval)
 		}
 		if prod.Mode == demo.Mode {
 			t.Errorf("Mode must differ: both=%q", prod.Mode)
