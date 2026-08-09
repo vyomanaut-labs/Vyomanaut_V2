@@ -92,10 +92,39 @@ func newReadyEvaluator(t *testing.T, db *sql.DB, profile config.NetworkProfile) 
 // DemoProfile's readiness gate (MinActiveProviders=5, MinDistinctASNs=5,
 // MinMetroRegions=1, MinCooledAccounts=5) and, not coincidentally, exactly
 // enough for one demo segment's 5 shards at demo's 1-shard-per-ASN cap.
+//
+// quarantineOtherActiveProviders runs first because openTestDB's
+// accumulating database (see otherActiveProviderIDs below) means earlier
+// tests' leftover ACTIVE providers don't just make "only 5 ASNs exist"
+// false — repair.SelectReplacementProvider's Power-of-Two-Choices draw
+// (bounded to maxReplacementSelectionAttempts=5 attempts of 2 random
+// candidates each) can fail outright against a large, ASN-skewed
+// accumulated pool, well before this test's own 5-ASN cap is anywhere
+// near exhausted. Confirmed in CI: "Current distinct ASNs: 13" — far more
+// than this test seeds itself.
 func seedReadyDemoProviderPool(t *testing.T, db *sql.DB) {
 	t.Helper()
+	quarantineOtherActiveProviders(t, db)
 	for i := 1; i <= config.DemoProfile.MinDistinctASNs; i++ {
 		insertActiveProviderWithASN(t, db, fmt.Sprintf("SIM-AS%d", i))
+	}
+}
+
+// quarantineOtherActiveProviders marks every currently-ACTIVE provider as
+// DEPARTED so this test's own freshly-seeded pool is the only one
+// repair.SelectReplacementProvider's random candidate draw can select
+// from — the same "isolate against the accumulating test DB" need
+// otherActiveProviderIDs exists for, applied here via status flip since
+// HandleAssign (unlike a direct SelectReplacementProvider call) offers no
+// exclude-list injection point. Safe because every test in this file
+// seeds its own fresh ACTIVE providers rather than depending on another
+// test's leftover ones remaining ACTIVE — confirmed DemoProfile.
+// MinActiveProviders (5) exactly matches MinDistinctASNs (5), so this
+// test's own 5 still satisfy the readiness gate on their own.
+func quarantineOtherActiveProviders(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if _, err := db.Exec(`UPDATE providers SET status = 'DEPARTED' WHERE status = 'ACTIVE'`); err != nil {
+		t.Fatalf("quarantineOtherActiveProviders: %v", err)
 	}
 }
 
