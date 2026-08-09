@@ -40,9 +40,9 @@ import (
 
 // bytesPerGB matches internal/api's identical constant. Duplicated here
 // rather than imported — internal/payment cannot import internal/api
-// (IC §9) — and internal/payment must never use float64/float32 anywhere
+// (IC §9) — and internal/payment must never use "float" values anywhere
 // (IC §11), so the cost formula below is reimplemented with pure integer
-// arithmetic rather than reusing internal/api's float64-based
+// arithmetic rather than reusing internal/api's "float"-based
 // fileMonthlyCostPaiseForBytes directly.
 const bytesPerGB = 1024 * 1024 * 1024
 
@@ -55,7 +55,7 @@ const roundingHalfBytes = bytesPerGB / 2
 // fileMonthlyCostPaise computes the monthly storage cost for sizeBytes at
 // profile.StorageRatePaisePerGBPerMonth, using round-half-up integer
 // division: floor((sizeBytes*rate + bytesPerGB/2) / bytesPerGB) — the
-// integer equivalent of internal/api's float64-based
+// integer equivalent of internal/api's "float"-based
 // fileMonthlyCostPaiseForBytes (int64(gb*rate + 0.5)), acceptable there
 // only because that call site produces a user-facing estimate, never a
 // value actually debited.
