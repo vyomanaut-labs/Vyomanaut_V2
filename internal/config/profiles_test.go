@@ -88,6 +88,14 @@ func TestProfileBothFullySpecified(t *testing.T) {
 				// Zero is correct per MVP §5.2, ADR-024, ADR-031.
 				"ReleaseComputationInterval": "zero is correct: calendar-driven release fires on the 23rd (ADR-024, ADR-031)",
 
+				// ChargeComputationInterval = 0 means calendar-driven: the
+				// charge/distribution engine fires on the 1st of each
+				// calendar month, in arrears, not on a ticker. Callers
+				// branch on `profile.ChargeComputationInterval == 0`,
+				// mirroring ReleaseComputationInterval's own pattern.
+				// Zero is correct per ADR-059.
+				"ChargeComputationInterval": "zero is correct: calendar-driven charge fires on the 1st, in arrears (ADR-059)",
+
 				// SkipMnemonicConfirm = false means production always demands
 				// the two-word mnemonic confirmation step.
 				// Zero (false) is correct per MVP §5.2, MVP §3.5.
@@ -239,7 +247,6 @@ func TestDemoDiffersFromProduction(t *testing.T) {
 			{"HeartbeatInterval", prod.HeartbeatInterval, demo.HeartbeatInterval},
 			{"HeartbeatJitter", prod.HeartbeatJitter, demo.HeartbeatJitter},
 			{"PollingInterval", prod.PollingInterval, demo.PollingInterval},
-			{"DeparturePollingInterval", prod.DeparturePollingInterval, demo.DeparturePollingInterval},
 			{"DHTRepublishInterval", prod.DHTRepublishInterval, demo.DHTRepublishInterval},
 			{"DHTExpiryDuration", prod.DHTExpiryDuration, demo.DHTExpiryDuration},
 			{"DepartureThreshold", prod.DepartureThreshold, demo.DepartureThreshold},
