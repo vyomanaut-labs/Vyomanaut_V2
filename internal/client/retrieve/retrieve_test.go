@@ -190,14 +190,6 @@ func (h *fakeDownloadHost) SetStreamHandler(p2p.ProtocolID, p2p.StreamHandler) {
 func (h *fakeDownloadHost) NATType() p2p.NATStatus                             { return 0 }
 func (h *fakeDownloadHost) Close() error                                       { return nil }
 
-func (h *fakeDownloadHost) requestedChunks() []string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	out := make([]string, len(h.requested))
-	copy(out, h.requested)
-	return out
-}
-
 type fakeDownloadStream struct {
 	host *fakeDownloadHost
 	resp *bytes.Reader

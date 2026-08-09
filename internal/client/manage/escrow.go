@@ -135,7 +135,7 @@ var ErrWithdrawBlockedUploadInFlight = errors.New("manage: withdrawal blocked: a
 // stable, not cache the derived key itself) rather than something a caller
 // could get wrong by regenerating a key inline.
 func withdrawIdempotencyKey(ownerID uuid.UUID, withdrawalRequestID WithdrawalRequestID) string {
-	input := make([]byte, 0, 32)
+	input := make([]byte, 0, len(ownerID)+len(withdrawalRequestID))
 	input = append(input, ownerID[:]...)
 	input = append(input, withdrawalRequestID[:]...)
 	sum := sha256.Sum256(input)

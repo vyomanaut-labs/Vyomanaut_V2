@@ -41,6 +41,14 @@ import (
 
 // ── Shared authenticated-JSON HTTP client (package-local twin) ────────────
 
+const (
+	uuidSize              = 16
+	uint32Size            = 4
+	fileKeySize           = 32
+	chunkIDSize           = 32
+	numSegmentsHeaderSize = 4
+)
+
 type apiClient struct {
 	baseURL string
 	token   string
@@ -142,15 +150,15 @@ type pointerFilePlaintext struct {
 //	  provider_ids[erasure_n](16 bytes each, shard_index order)
 //	  chunk_ids[erasure_n](32 bytes each, shard_index order)
 func unmarshalPointerFilePlaintext(data []byte) (pointerFilePlaintext, error) {
-	if len(data) < 4 {
+	if len(data) < numSegmentsHeaderSize {
 		return pointerFilePlaintext{}, fmt.Errorf("unmarshalPointerFilePlaintext: too short for num_segments header")
 	}
 	numSegments := binary.BigEndian.Uint32(data[0:4])
-	offset := 4
+	offset := numSegmentsHeaderSize
 
 	segments := make([]pointerFileSegment, 0, numSegments)
 	for i := uint32(0); i < numSegments; i++ {
-		const fixedHeaderSize = 16 + 4 + 32 + 4 + 4 + 4 + 4
+		const fixedHeaderSize = uuidSize + uint32Size + fileKeySize + uint32Size + uint32Size + uint32Size + uint32Size
 		if offset+fixedHeaderSize > len(data) {
 			return pointerFilePlaintext{}, fmt.Errorf("unmarshalPointerFilePlaintext: segment %d: truncated fixed header", i)
 		}
@@ -170,7 +178,7 @@ func unmarshalPointerFilePlaintext(data []byte) (pointerFilePlaintext, error) {
 		lf := binary.BigEndian.Uint32(data[offset : offset+4])
 		offset += 4
 
-		needed := int(n)*16 + int(n)*32
+		needed := int(n)*uuidSize + int(n)*chunkIDSize
 		if offset+needed > len(data) {
 			return pointerFilePlaintext{}, fmt.Errorf("unmarshalPointerFilePlaintext: segment %d: truncated provider/chunk IDs", i)
 		}
@@ -225,10 +233,10 @@ const pointerFileSchemaVersion = 1
 // decryption fails closed with ErrPointerTagMismatch (the whole point of
 // an AAD binding).
 func pointerAAD(ownerID, fileID uuid.UUID) []byte {
-	aad := make([]byte, 0, 16+16+4)
+	var schemaVersionBytes [4]byte
+	aad := make([]byte, 0, len(ownerID)+len(fileID)+len(schemaVersionBytes))
 	aad = append(aad, ownerID[:]...)
 	aad = append(aad, fileID[:]...)
-	var schemaVersionBytes [4]byte
 	binary.BigEndian.PutUint32(schemaVersionBytes[:], pointerFileSchemaVersion)
 	aad = append(aad, schemaVersionBytes[:]...)
 	return aad

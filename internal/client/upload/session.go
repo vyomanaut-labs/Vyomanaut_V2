@@ -26,6 +26,11 @@ import (
 	"github.com/google/uuid"
 )
 
+const (
+	sessionDirPerm  = 0o700
+	sessionFilePerm = 0o600
+)
+
 // SessionState is the on-disk crash-recovery record for one in-progress
 // upload (FR-060). ack_status is segment-major: AckStatus[segmentIndex] has
 // exactly TotalShards entries, mirroring IC §5.9's "ack_status[TotalShards]"
@@ -94,7 +99,7 @@ func sessionFileName(fileID uuid.UUID) string {
 // batch of newly-acknowledged shards, so a crash mid-transfer loses at most
 // the most recent partial batch, not the whole upload's progress.
 func SaveSessionState(sessionDir string, state SessionState) error {
-	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+	if err := os.MkdirAll(sessionDir, sessionDirPerm); err != nil {
 		return fmt.Errorf("upload: SaveSessionState: create session dir: %w", err)
 	}
 	data, err := json.Marshal(state)
@@ -103,7 +108,7 @@ func SaveSessionState(sessionDir string, state SessionState) error {
 	}
 	path := filepath.Join(sessionDir, sessionFileName(state.FileID))
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	if err := os.WriteFile(tmp, data, sessionFilePerm); err != nil {
 		return fmt.Errorf("upload: SaveSessionState: write: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil { // atomic on the same filesystem

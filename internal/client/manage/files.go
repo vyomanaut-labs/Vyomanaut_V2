@@ -240,10 +240,10 @@ func deriveFilenameKey(masterSecret, ownerID, fileID []byte) [32]byte {
 // closed if this does not match exactly.
 func filenameAAD(ownerID, fileID uuid.UUID) []byte {
 	const pointerFileSchemaVersion = 1
-	aad := make([]byte, 0, 16+16+4)
+	var schemaVersionBytes [4]byte
+	aad := make([]byte, 0, len(ownerID)+len(fileID)+len(schemaVersionBytes))
 	aad = append(aad, ownerID[:]...)
 	aad = append(aad, fileID[:]...)
-	var schemaVersionBytes [4]byte
 	binary.BigEndian.PutUint32(schemaVersionBytes[:], pointerFileSchemaVersion)
 	aad = append(aad, schemaVersionBytes[:]...)
 	return aad

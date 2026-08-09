@@ -32,7 +32,6 @@ package upload
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -368,12 +367,4 @@ func readUploadResponse(s p2p.Stream) (status byte, err error) {
 		return 0, fmt.Errorf("UploadResponse: empty body")
 	}
 	return body[0], nil
-}
-
-// verifyContentAddress is used by tests and available for defensive use at
-// call sites that build task.data from an untrusted source; production
-// task.data is always freshly RS-encoded locally (orchestrator.go), so its
-// content address is correct by construction there.
-func verifyContentAddress(chunkID [32]byte, data []byte) bool {
-	return sha256.Sum256(data) == chunkID
 }

@@ -51,6 +51,9 @@ import (
 	"github.com/masamasaowl/Vyomanaut_V2/internal/crypto"
 )
 
+const poly1305TagSize = 16
+const pointerFileNumSegmentsSize = 4
+
 // ── PointerFilePlaintextSegment (OAS — informational, client-side only) ────
 
 // erasureParamsInfo mirrors OAS ErasureParamsInfo. s/r/n are read from the
@@ -168,7 +171,7 @@ func (o *Orchestrator) registerPointerFile(
 	// EncryptAEAD/EncryptPointerFile append the 16-byte Poly1305 tag to the
 	// ciphertext; OAS transmits pointer_ciphertext and pointer_tag as
 	// separate fields, so split them here.
-	if len(pointerCiphertext) < 16 {
+	if len(pointerCiphertext) < poly1305TagSize {
 		return fmt.Errorf("upload: registerPointerFile: pointer ciphertext shorter than the 16-byte tag")
 	}
 	pointerTag := pointerCiphertext[len(pointerCiphertext)-16:]
@@ -188,7 +191,7 @@ func (o *Orchestrator) registerPointerFile(
 		if err != nil {
 			return fmt.Errorf("upload: registerPointerFile: encrypt display name: %w", err)
 		}
-		if len(full) < 16 {
+		if len(full) < poly1305TagSize {
 			return fmt.Errorf("upload: registerPointerFile: display name ciphertext shorter than the 16-byte tag")
 		}
 		displayNameTag = full[len(full)-16:]
@@ -246,10 +249,10 @@ func (o *Orchestrator) registerPointerFile(
 // display-name ciphertext: len(aad) > 0 is EncryptPointerFile's own
 // pre-condition ("must include ownerID || fileID || schemaVersion").
 func pointerAAD(ownerID, fileID uuid.UUID) []byte {
-	aad := make([]byte, 0, 16+16+4)
+	var schemaVersionBytes [4]byte
+	aad := make([]byte, 0, len(ownerID)+len(fileID)+len(schemaVersionBytes))
 	aad = append(aad, ownerID[:]...)
 	aad = append(aad, fileID[:]...)
-	var schemaVersionBytes [4]byte
 	binary.BigEndian.PutUint32(schemaVersionBytes[:], pointerFileSchemaVersion)
 	aad = append(aad, schemaVersionBytes[:]...)
 	return aad
@@ -332,7 +335,7 @@ func concatBytes(parts ...[]byte) []byte {
 //	  provider_ids[erasure_n](16 bytes each, shard_index order)
 //	  chunk_ids[erasure_n](32 bytes each, shard_index order)
 func marshalPointerFilePlaintext(p pointerFilePlaintext) ([]byte, error) {
-	buf := make([]byte, 0, 4+len(p.Segments)*128)
+	buf := make([]byte, 0, pointerFileNumSegmentsSize+len(p.Segments)*128)
 
 	var numSegBytes [4]byte
 	binary.BigEndian.PutUint32(numSegBytes[:], uint32(len(p.Segments)))
