@@ -5,6 +5,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"database/sql"
@@ -1057,14 +1058,14 @@ func TestProviderDepartReleasesProratedEscrow(t *testing.T) {
 	}
 }
 
-func TestProviderDepartUsesDistinctIdempotencyKey(t *testing.T) {
+func TestProviderDepartUsesUnifiedReleaseIdempotencyKey(t *testing.T) {
 	db := openTestDB(t)
 	pub, priv, _ := ed25519.GenerateKey(nil)
 	providerID := insertTestProviderDirect(t, db, pub, "ACTIVE")
 
 	periodStart := time.Now().Add(-10 * 24 * time.Hour)
 	periodEnd := time.Now().Add(20 * 24 * time.Hour)
-	insertAuditPeriod(t, db, providerID, periodStart, periodEnd)
+	auditPeriodID := insertAuditPeriod(t, db, providerID, periodStart, periodEnd)
 	insertEscrowDeposit(t, db, providerID, 100000, uuid.New().String())
 	refreshEscrowBalance(t)
 
@@ -1083,8 +1084,12 @@ func TestProviderDepartUsesDistinctIdempotencyKey(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
 
-	parsedDepartAt, _ := time.Parse(time.RFC3339, departAt)
-	wantKey := announcedDepartureIdempotencyKey(providerID, parsedDepartAt.UTC())
+	// [M10 corrections review Finding #8] the departure release path and
+	// ComputeMonthlyRelease must derive the SAME idempotency key for a
+	// release against the same (providerID, auditPeriodID) pair — a
+	// client-supplied depart_at can no longer influence this formula, since
+	// ComputeMonthlyRelease has no such input to agree with.
+	wantKey := payment.ReleaseIdempotencyKey(providerID, auditPeriodID)
 
 	var storedKey string
 	if err := db.QueryRow(`SELECT idempotency_key FROM escrow_events WHERE provider_id = $1 AND event_type = 'RELEASE'`, providerID).
@@ -1092,7 +1097,104 @@ func TestProviderDepartUsesDistinctIdempotencyKey(t *testing.T) {
 		t.Fatalf("query escrow_events: %v", err)
 	}
 	if storedKey != wantKey {
-		t.Fatalf("idempotency_key = %q, want %q (SHA-256(providerID || \"announced-departure\" || departureTimestamp))", storedKey, wantKey)
+		t.Fatalf("idempotency_key = %q, want %q (payment.ReleaseIdempotencyKey(providerID, auditPeriodID) — "+
+			"the same formula ComputeMonthlyRelease uses for this exact audit period)", storedKey, wantKey)
+	}
+}
+
+// TestProviderDepartMarksReleaseComputedPreventingReselection is the
+// regression test for the second half of Finding #8 (M10 corrections
+// review): HandleDepart previously never set audit_periods.release_computed
+// on the period it released against, so ComputeMonthlyRelease's
+// pendingReleaseCandidates query (WHERE release_computed = FALSE) would
+// keep re-selecting this same, now-departed provider's audit period on
+// every future cycle, indefinitely.
+func TestProviderDepartMarksReleaseComputedPreventingReselection(t *testing.T) {
+	db := openTestDB(t)
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	providerID := insertTestProviderDirect(t, db, pub, "ACTIVE")
+
+	periodStart := time.Now().Add(-10 * 24 * time.Hour)
+	periodEnd := time.Now().Add(20 * 24 * time.Hour)
+	auditPeriodID := insertAuditPeriod(t, db, providerID, periodStart, periodEnd)
+	insertEscrowDeposit(t, db, providerID, 100000, uuid.New().String())
+	refreshEscrowBalance(t)
+
+	req := providerDepartRequestBody{}
+	req = signDepartRequest(t, priv, req)
+	body, _ := json.Marshal(req)
+
+	r := withClaims(httptest.NewRequest(http.MethodPost, "/api/v1/provider/depart", bytes.NewReader(body)),
+		VerifiedClaims{Subject: providerID, Role: "provider"})
+	w := httptest.NewRecorder()
+
+	h := NewProviderDepartHandler(db, config.DemoProfile, payment.NewMockProvider(db))
+	h.HandleDepart(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	var releaseComputed bool
+	if err := db.QueryRow(`SELECT release_computed FROM audit_periods WHERE id = $1`, auditPeriodID).Scan(&releaseComputed); err != nil {
+		t.Fatalf("query audit_periods: %v", err)
+	}
+	if !releaseComputed {
+		t.Error("release_computed = false after HandleDepart, want true (otherwise ComputeMonthlyRelease " +
+			"re-selects this departed provider's audit period on every future cycle, forever)")
+	}
+}
+
+// TestProviderDepartRaceWithMonthlyReleaseIsIdempotent is the regression
+// test for the race Finding #8 describes: if ComputeMonthlyRelease already
+// released against this exact audit period (e.g. a scheduler race, or a
+// retry) before HandleDepart runs, HandleDepart's own release attempt must
+// be a no-op — not a duplicate RELEASE row, and not a user-facing error —
+// because both paths now derive the identical idempotency key and rely on
+// the SAME mechanism InsertEscrowEvent's callers already use for retries:
+// the database's UNIQUE(idempotency_key) constraint, not application
+// logic, is what prevents the duplicate.
+func TestProviderDepartRaceWithMonthlyReleaseIsIdempotent(t *testing.T) {
+	db := openTestDB(t)
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	providerID := insertTestProviderDirect(t, db, pub, "ACTIVE")
+
+	periodStart := time.Now().Add(-10 * 24 * time.Hour)
+	periodEnd := time.Now().Add(20 * 24 * time.Hour)
+	auditPeriodID := insertAuditPeriod(t, db, providerID, periodStart, periodEnd)
+	insertEscrowDeposit(t, db, providerID, 100000, uuid.New().String())
+	refreshEscrowBalance(t)
+
+	// Simulate ComputeMonthlyRelease having already won this exact race,
+	// inserting a RELEASE row under the SAME key HandleDepart will now
+	// independently derive for the same (providerID, auditPeriodID) pair.
+	racingKey := payment.ReleaseIdempotencyKey(providerID, auditPeriodID)
+	if err := payment.InsertEscrowEvent(context.Background(), db, providerID, payment.EscrowRelease, 30000, racingKey, &auditPeriodID); err != nil {
+		t.Fatalf("seed racing RELEASE: %v", err)
+	}
+
+	req := providerDepartRequestBody{}
+	req = signDepartRequest(t, priv, req)
+	body, _ := json.Marshal(req)
+
+	r := withClaims(httptest.NewRequest(http.MethodPost, "/api/v1/provider/depart", bytes.NewReader(body)),
+		VerifiedClaims{Subject: providerID, Role: "provider"})
+	w := httptest.NewRecorder()
+
+	h := NewProviderDepartHandler(db, config.DemoProfile, payment.NewMockProvider(db))
+	h.HandleDepart(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s (a raced release must be an idempotent no-op, not a user-facing error)",
+			w.Code, w.Body.String())
+	}
+
+	var rows int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM escrow_events WHERE provider_id = $1 AND event_type = 'RELEASE'`, providerID).
+		Scan(&rows); err != nil {
+		t.Fatalf("count escrow_events: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("RELEASE rows after the race = %d, want exactly 1 (the DB's UNIQUE(idempotency_key) "+
+			"constraint, not application logic, must be what prevents a second row)", rows)
 	}
 }
 

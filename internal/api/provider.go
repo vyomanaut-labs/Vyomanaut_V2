@@ -48,7 +48,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
@@ -1341,14 +1340,18 @@ func (h *ProviderDepartHandler) HandleDepart(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	departureTimestamp := time.Now().UTC()
+	// depart_at is part of the signed payload (canonicalDepartSigningInput)
+	// and, when present, must be a valid ISO 8601 timestamp — format
+	// validation only. [M10 corrections review Finding #8] The parsed value
+	// itself is no longer threaded into the release idempotency key (see
+	// below): both release paths must derive the same key from
+	// (providerID, auditPeriodID) alone, so a client-supplied departure
+	// timestamp can no longer be part of that formula.
 	if req.DepartAt != nil {
-		parsed, err := time.Parse(time.RFC3339, *req.DepartAt)
-		if err != nil {
+		if _, err := time.Parse(time.RFC3339, *req.DepartAt); err != nil {
 			WriteError(w, http.StatusBadRequest, ErrInvalidRequest, "depart_at must be ISO 8601", nil, "depart_at", nil)
 			return
 		}
-		departureTimestamp = parsed.UTC()
 	}
 
 	releaseAmountPaise, auditPeriodID, err := h.computeAnnouncedDepartureRelease(ctx, providerID)
@@ -1357,9 +1360,33 @@ func (h *ProviderDepartHandler) HandleDepart(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if releaseAmountPaise > 0 && auditPeriodID != nil && h.payment != nil {
-		idempotencyKey := announcedDepartureIdempotencyKey(providerID, departureTimestamp)
+		// [Fixed, M10 corrections review Finding #8] this idempotency key was
+		// previously derived from announcedDepartureIdempotencyKey — a
+		// different formula from payment.ReleaseIdempotencyKey, which
+		// ComputeMonthlyRelease uses for a release against the exact same
+		// (providerID, auditPeriodID) pair. That let both paths successfully
+		// release against the same period, defeating the
+		// escrow_events.idempotency_key UNIQUE constraint's "one release per
+		// provider per audit period" guarantee. Both paths now derive the
+		// same key for the same logical event.
+		idempotencyKey := payment.ReleaseIdempotencyKey(providerID, *auditPeriodID)
 		if err := h.payment.ReleaseEscrow(ctx, providerID, releaseAmountPaise, *auditPeriodID, idempotencyKey); err != nil {
 			WriteError(w, http.StatusInternalServerError, ErrInternal, "escrow release failed", nil, "", nil)
+			return
+		}
+		// [Added, M10 corrections review Finding #8] mark this audit period
+		// released so ComputeMonthlyRelease's pendingReleaseCandidates query
+		// (WHERE release_computed = FALSE) stops re-selecting it. Not
+		// wrapped in the same DB transaction as the ReleaseEscrow call above
+		// — PaymentProvider's interface does not expose transaction control
+		// to its callers (MockProvider/RazorpayProvider each own their DB
+		// handle internally) — but errors here are surfaced to the caller
+		// rather than silently dropped, unlike this package's established
+		// best-effort "non-fatal cleanup" pattern elsewhere: a stuck
+		// release_computed = FALSE row has an ongoing cost (re-queried every
+		// cycle, forever), unlike a stale pending-registration row.
+		if err := payment.MarkReleaseComputed(ctx, h.db, *auditPeriodID); err != nil {
+			WriteError(w, http.StatusInternalServerError, ErrInternal, "failed to finalize escrow release", nil, "", nil)
 			return
 		}
 	}
@@ -1433,12 +1460,4 @@ func (h *ProviderDepartHandler) computeAnnouncedDepartureRelease(ctx context.Con
 	fraction := float64(elapsed) / float64(total)
 	release := int64(float64(balance) * fraction)
 	return release, &auditPeriodID, nil
-}
-
-// announcedDepartureIdempotencyKey implements this session's specified
-// formula: SHA-256(providerID || "announced-departure" || departureTimestamp).
-func announcedDepartureIdempotencyKey(providerID uuid.UUID, departureTimestamp time.Time) string {
-	input := providerID.String() + "announced-departure" + departureTimestamp.Format(time.RFC3339)
-	sum := sha256.Sum256([]byte(input))
-	return hex.EncodeToString(sum[:])
 }
