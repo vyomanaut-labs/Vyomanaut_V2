@@ -282,11 +282,11 @@ func TestReversalWebhookInsertsReversalEvent(t *testing.T) {
 	}
 }
 
-// releaseIdempotencyKeyForTest delegates to the real releaseIdempotencyKey
+// releaseIdempotencyKeyForTest delegates to the real ReleaseIdempotencyKey
 // (release.go) so this fixture can never drift from the actual
 // implementation it is standing in for.
 func releaseIdempotencyKeyForTest(providerID, auditPeriodID uuid.UUID) string {
-	return releaseIdempotencyKey(providerID, auditPeriodID)
+	return ReleaseIdempotencyKey(providerID, auditPeriodID)
 }
 
 func insertTestAuditPeriod(t *testing.T, db *sql.DB, providerID uuid.UUID) uuid.UUID {
@@ -301,6 +301,375 @@ func insertTestAuditPeriod(t *testing.T, db *sql.DB, providerID uuid.UUID) uuid.
 		t.Fatalf("insertTestAuditPeriod: %v", err)
 	}
 	return id
+}
+
+// insertTestOwnerNoVPA inserts an owner row with smart_collect_vpa left
+// SQL NULL — the "registered without ever depositing" state
+// ownerUPIHandle's error branch exists for (Finding #7).
+func insertTestOwnerNoVPA(t *testing.T, db *sql.DB) uuid.UUID {
+	t.Helper()
+	id := uuid.New()
+	_, err := db.Exec(`INSERT INTO owners (owner_id, phone_number, ed25519_public_key, smart_collect_vpa) VALUES ($1,$2,$3,NULL)`,
+		id, randPhone(), randPubKey())
+	if err != nil {
+		t.Fatalf("insertTestOwnerNoVPA: %v", err)
+	}
+	return id
+}
+
+// ── fakeRazorpayClient: test double for razorpayClient ───────────────────────
+//
+// [Added, M10 corrections review Finding #7] Before this file, the ONLY
+// tests in this package exercised the three free-standing webhook handler
+// functions (HandleDepositCaptured, HandlePayoutReversed,
+// HandleAccountCreated). RazorpayProvider's actual PaymentProvider methods
+// — InitiateEscrow / ReleaseEscrow / Penalise / GetBalance /
+// WithdrawOwnerEscrow, the implementation actually used in production — had
+// zero direct tests anywhere, because no fake razorpayClient existed for
+// them to run against. This type closes that gap.
+type fakeRazorpayClient struct {
+	createVirtualAccountErr error
+	createTransferErr       error
+	createPayoutErr         error
+
+	vpaToReturn      string
+	qrURLToReturn    string
+	payoutIDToReturn string
+
+	createVirtualAccountCalls int
+	createTransferCalls       int
+	createPayoutCalls         int
+
+	lastLinkedAccountID string
+	lastOnHoldUntil     time.Time
+	lastTransferKey     string
+	lastUPIHandle       string
+	lastPayoutKey       string
+}
+
+func (f *fakeRazorpayClient) CreateVirtualAccount(_ context.Context, _ uuid.UUID, _ int64, contractID uuid.UUID) (string, string, error) {
+	f.createVirtualAccountCalls++
+	if f.createVirtualAccountErr != nil {
+		return "", "", f.createVirtualAccountErr
+	}
+	vpa := f.vpaToReturn
+	if vpa == "" {
+		vpa = "fake.vpa@icici"
+	}
+	qrURL := f.qrURLToReturn
+	if qrURL == "" {
+		qrURL = "https://fake.razorpay.test/qr/" + contractID.String()
+	}
+	return vpa, qrURL, nil
+}
+
+func (f *fakeRazorpayClient) CreateTransfer(_ context.Context, linkedAccountID string, _ int64, idempotencyKey string, onHoldUntil time.Time) error {
+	f.createTransferCalls++
+	f.lastLinkedAccountID = linkedAccountID
+	f.lastOnHoldUntil = onHoldUntil
+	f.lastTransferKey = idempotencyKey
+	return f.createTransferErr
+}
+
+func (f *fakeRazorpayClient) CreatePayout(_ context.Context, destinationUPI string, _ int64, idempotencyKey string) (string, error) {
+	f.createPayoutCalls++
+	f.lastUPIHandle = destinationUPI
+	f.lastPayoutKey = idempotencyKey
+	if f.createPayoutErr != nil {
+		return "", f.createPayoutErr
+	}
+	payoutID := f.payoutIDToReturn
+	if payoutID == "" {
+		payoutID = "fake-payout-id"
+	}
+	return payoutID, nil
+}
+
+var _ razorpayClient = (*fakeRazorpayClient)(nil)
+
+// ── RazorpayProvider.InitiateEscrow ───────────────────────────────────────────
+
+func TestRazorpayProviderInitiateEscrowDelegatesToClientAndTouchesNoLedger(t *testing.T) {
+	db := openTestDB(t)
+	verify := openVerifyDB(t)
+	client := &fakeRazorpayClient{vpaToReturn: "owner.deposit@icici", qrURLToReturn: "https://razorpay.test/qr/abc"}
+	provider := NewRazorpayProvider(db, client)
+	ownerID := insertTestOwner(t, db, "")
+	contractID := uuid.New()
+
+	vpa, qrURL, err := provider.InitiateEscrow(context.Background(), ownerID, 60000, contractID)
+	if err != nil {
+		t.Fatalf("InitiateEscrow: %v", err)
+	}
+	if vpa != "owner.deposit@icici" || qrURL != "https://razorpay.test/qr/abc" {
+		t.Errorf("got (%q, %q), want values straight from the client", vpa, qrURL)
+	}
+	if client.createVirtualAccountCalls != 1 {
+		t.Errorf("CreateVirtualAccount calls = %d, want 1", client.createVirtualAccountCalls)
+	}
+
+	// [REF: this method's own doc comment] InitiateEscrow does not itself
+	// credit any ledger — the DEPOSIT event is recorded asynchronously by
+	// HandleDepositCaptured once Razorpay's webhook fires.
+	var rows int
+	if err := verify.QueryRow(`SELECT COUNT(*) FROM owner_escrow_events WHERE owner_id = $1`, ownerID).Scan(&rows); err != nil {
+		t.Fatalf("query owner_escrow_events: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("owner_escrow_events rows after InitiateEscrow alone = %d, want 0", rows)
+	}
+}
+
+func TestRazorpayProviderInitiateEscrowPropagatesClientError(t *testing.T) {
+	db := openTestDB(t)
+	client := &fakeRazorpayClient{createVirtualAccountErr: errors.New("razorpay: 503")}
+	provider := NewRazorpayProvider(db, client)
+	ownerID := insertTestOwner(t, db, "")
+
+	if _, _, err := provider.InitiateEscrow(context.Background(), ownerID, 60000, uuid.New()); err == nil {
+		t.Fatal("InitiateEscrow: want error when the client fails, got nil")
+	}
+}
+
+// ── RazorpayProvider.ReleaseEscrow ────────────────────────────────────────────
+
+func TestRazorpayProviderReleaseEscrowWritesRealRow(t *testing.T) {
+	db := openTestDB(t)
+	verify := openVerifyDB(t)
+	client := &fakeRazorpayClient{}
+	provider := NewRazorpayProvider(db, client)
+	providerID := insertTestProvider(t, db, testProviderSpec{linkedAccountID: "acc_fakeXYZ"})
+	auditPeriodID := insertTestAuditPeriod(t, db, providerID)
+	key := releaseIdempotencyKeyForTest(providerID, auditPeriodID)
+
+	if err := provider.ReleaseEscrow(context.Background(), providerID, 45000, auditPeriodID, key); err != nil {
+		t.Fatalf("ReleaseEscrow: %v", err)
+	}
+	if client.createTransferCalls != 1 {
+		t.Errorf("CreateTransfer calls = %d, want 1", client.createTransferCalls)
+	}
+	if client.lastLinkedAccountID != "acc_fakeXYZ" {
+		t.Errorf("CreateTransfer linkedAccountID = %q, want %q", client.lastLinkedAccountID, "acc_fakeXYZ")
+	}
+	if client.lastTransferKey != key {
+		t.Errorf("CreateTransfer idempotencyKey = %q, want %q (must be the SAME key used for the local ledger row)",
+			client.lastTransferKey, key)
+	}
+
+	var rows int
+	var amount int64
+	if err := verify.QueryRow(`SELECT COUNT(*), COALESCE(MAX(amount_paise),0) FROM escrow_events WHERE provider_id=$1 AND event_type='RELEASE'`,
+		providerID).Scan(&rows, &amount); err != nil {
+		t.Fatalf("query escrow_events: %v", err)
+	}
+	if rows != 1 || amount != 45000 {
+		t.Errorf("escrow_events RELEASE = (rows=%d, amount=%d), want (1, 45000)", rows, amount)
+	}
+}
+
+// TestRazorpayProviderReleaseEscrowNoLinkedAccountYet is the regression
+// test for one of the two previously-untested error branches Finding #7
+// names explicitly: a provider that hasn't completed Razorpay Route
+// onboarding yet (razorpay_linked_account_id IS NULL) — a plausible
+// real-world state, not a hypothetical.
+func TestRazorpayProviderReleaseEscrowNoLinkedAccountYet(t *testing.T) {
+	db := openTestDB(t)
+	verify := openVerifyDB(t)
+	client := &fakeRazorpayClient{}
+	provider := NewRazorpayProvider(db, client)
+	providerID := insertTestProvider(t, db, testProviderSpec{}) // linkedAccountID "" -> NULL
+	auditPeriodID := insertTestAuditPeriod(t, db, providerID)
+	key := releaseIdempotencyKeyForTest(providerID, auditPeriodID)
+
+	if err := provider.ReleaseEscrow(context.Background(), providerID, 45000, auditPeriodID, key); err == nil {
+		t.Fatal("ReleaseEscrow: want error when the provider has no razorpay_linked_account_id yet, got nil")
+	}
+	if client.createTransferCalls != 0 {
+		t.Errorf("CreateTransfer calls = %d, want 0 (must fail before ever reaching the client)", client.createTransferCalls)
+	}
+	var rows int
+	if err := verify.QueryRow(`SELECT COUNT(*) FROM escrow_events WHERE provider_id=$1`, providerID).Scan(&rows); err != nil {
+		t.Fatalf("query escrow_events: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("escrow_events rows = %d, want 0 (no ledger write on a failed release)", rows)
+	}
+}
+
+func TestRazorpayProviderReleaseEscrowClientErrorPropagates(t *testing.T) {
+	db := openTestDB(t)
+	verify := openVerifyDB(t)
+	client := &fakeRazorpayClient{createTransferErr: errors.New("razorpay: transfer rejected")}
+	provider := NewRazorpayProvider(db, client)
+	providerID := insertTestProvider(t, db, testProviderSpec{linkedAccountID: "acc_fakeXYZ"})
+	auditPeriodID := insertTestAuditPeriod(t, db, providerID)
+	key := releaseIdempotencyKeyForTest(providerID, auditPeriodID)
+
+	if err := provider.ReleaseEscrow(context.Background(), providerID, 45000, auditPeriodID, key); err == nil {
+		t.Fatal("ReleaseEscrow: want error when the client's CreateTransfer fails, got nil")
+	}
+	var rows int
+	if err := verify.QueryRow(`SELECT COUNT(*) FROM escrow_events WHERE provider_id=$1`, providerID).Scan(&rows); err != nil {
+		t.Fatalf("query escrow_events: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("escrow_events rows = %d, want 0 (a failed transfer must not still write a RELEASE row)", rows)
+	}
+}
+
+// ── RazorpayProvider.Penalise ─────────────────────────────────────────────────
+
+func TestRazorpayProviderPenaliseWritesRealRowAndNeverTouchesClient(t *testing.T) {
+	db := openTestDB(t)
+	verify := openVerifyDB(t)
+	client := &fakeRazorpayClient{}
+	provider := NewRazorpayProvider(db, client)
+	providerID := insertTestProvider(t, db, testProviderSpec{})
+	key := testEscrowSeedKey()
+
+	if err := provider.Penalise(context.Background(), providerID, 22000, key); err != nil {
+		t.Fatalf("Penalise: %v", err)
+	}
+	// Penalise records a local ledger event only — no gateway call.
+	if client.createTransferCalls != 0 || client.createPayoutCalls != 0 || client.createVirtualAccountCalls != 0 {
+		t.Errorf("client calls after Penalise: transfer=%d payout=%d virtualAccount=%d, want all 0",
+			client.createTransferCalls, client.createPayoutCalls, client.createVirtualAccountCalls)
+	}
+
+	var rows int
+	var amount int64
+	if err := verify.QueryRow(`SELECT COUNT(*), COALESCE(MAX(amount_paise),0) FROM escrow_events WHERE provider_id=$1 AND event_type='SEIZURE'`,
+		providerID).Scan(&rows, &amount); err != nil {
+		t.Fatalf("query escrow_events: %v", err)
+	}
+	if rows != 1 || amount != 22000 {
+		t.Errorf("escrow_events SEIZURE = (rows=%d, amount=%d), want (1, 22000)", rows, amount)
+	}
+}
+
+func TestRazorpayProviderPenaliseNoOpsOnZeroOrNegativeAmount(t *testing.T) {
+	db := openTestDB(t)
+	verify := openVerifyDB(t)
+	provider := NewRazorpayProvider(db, &fakeRazorpayClient{})
+	providerID := insertTestProvider(t, db, testProviderSpec{})
+
+	for _, amount := range []int64{0, -500} {
+		if err := provider.Penalise(context.Background(), providerID, amount, testEscrowSeedKey()); err != nil {
+			t.Fatalf("Penalise(%d): %v", amount, err)
+		}
+	}
+	var rows int
+	if err := verify.QueryRow(`SELECT COUNT(*) FROM escrow_events WHERE provider_id=$1`, providerID).Scan(&rows); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("escrow_events rows = %d, want 0", rows)
+	}
+}
+
+// ── RazorpayProvider.GetBalance ───────────────────────────────────────────────
+
+func TestRazorpayProviderGetBalanceMatchesRealView(t *testing.T) {
+	db := openTestDB(t)
+	verify := openVerifyDB(t)
+	provider := NewRazorpayProvider(db, &fakeRazorpayClient{})
+	providerID := insertTestProvider(t, db, testProviderSpec{})
+
+	if err := InsertEscrowEvent(context.Background(), db, providerID, EscrowDeposit, 17000, testEscrowSeedKey(), nil); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := verify.Exec(`REFRESH MATERIALIZED VIEW mv_provider_escrow_balance`); err != nil {
+		t.Fatalf("refresh view: %v", err)
+	}
+
+	got, err := provider.GetBalance(context.Background(), providerID)
+	if err != nil {
+		t.Fatalf("GetBalance: %v", err)
+	}
+	if got != 17000 {
+		t.Errorf("GetBalance = %d, want 17000", got)
+	}
+}
+
+// ── RazorpayProvider.WithdrawOwnerEscrow ──────────────────────────────────────
+
+func TestRazorpayProviderWithdrawOwnerEscrowDelegatesToClient(t *testing.T) {
+	db := openTestDB(t)
+	verify := openVerifyDB(t)
+	client := &fakeRazorpayClient{payoutIDToReturn: "pout_fake123"}
+	provider := NewRazorpayProvider(db, client)
+	ownerID := insertTestOwner(t, db, "owner.payout@icici")
+	key := testEscrowSeedKey()
+
+	payoutID, err := provider.WithdrawOwnerEscrow(context.Background(), ownerID, 8000, key)
+	if err != nil {
+		t.Fatalf("WithdrawOwnerEscrow: %v", err)
+	}
+	if payoutID != "pout_fake123" {
+		t.Errorf("payoutID = %q, want %q", payoutID, "pout_fake123")
+	}
+	if client.lastUPIHandle != "owner.payout@icici" {
+		t.Errorf("CreatePayout destinationUPI = %q, want the owner's smart_collect_vpa", client.lastUPIHandle)
+	}
+	if client.lastPayoutKey != key {
+		t.Errorf("CreatePayout idempotencyKey = %q, want %q", client.lastPayoutKey, key)
+	}
+
+	var rows int
+	var amount int64
+	if err := verify.QueryRow(`SELECT COUNT(*), COALESCE(MAX(amount_paise),0) FROM owner_escrow_events WHERE owner_id=$1 AND event_type='WITHDRAWAL'`,
+		ownerID).Scan(&rows, &amount); err != nil {
+		t.Fatalf("query owner_escrow_events: %v", err)
+	}
+	if rows != 1 || amount != 8000 {
+		t.Errorf("owner_escrow_events WITHDRAWAL = (rows=%d, amount=%d), want (1, 8000)", rows, amount)
+	}
+}
+
+// TestRazorpayProviderWithdrawOwnerEscrowNoVPAYet is the regression test for
+// the second previously-untested error branch Finding #7 names explicitly:
+// an owner who registered without ever depositing (smart_collect_vpa IS
+// NULL) — plausible since ownerUPIHandle reuses the deposit VPA column for
+// withdrawals rather than a separate payout-destination field.
+func TestRazorpayProviderWithdrawOwnerEscrowNoVPAYet(t *testing.T) {
+	db := openTestDB(t)
+	verify := openVerifyDB(t)
+	client := &fakeRazorpayClient{}
+	provider := NewRazorpayProvider(db, client)
+	ownerID := insertTestOwnerNoVPA(t, db)
+
+	if _, err := provider.WithdrawOwnerEscrow(context.Background(), ownerID, 8000, testEscrowSeedKey()); err == nil {
+		t.Fatal("WithdrawOwnerEscrow: want error when the owner has no smart_collect_vpa yet, got nil")
+	}
+	if client.createPayoutCalls != 0 {
+		t.Errorf("CreatePayout calls = %d, want 0 (must fail before ever reaching the client)", client.createPayoutCalls)
+	}
+	var rows int
+	if err := verify.QueryRow(`SELECT COUNT(*) FROM owner_escrow_events WHERE owner_id=$1`, ownerID).Scan(&rows); err != nil {
+		t.Fatalf("query owner_escrow_events: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("owner_escrow_events rows = %d, want 0", rows)
+	}
+}
+
+func TestRazorpayProviderWithdrawOwnerEscrowClientErrorPropagates(t *testing.T) {
+	db := openTestDB(t)
+	verify := openVerifyDB(t)
+	client := &fakeRazorpayClient{createPayoutErr: errors.New("razorpay: payout rejected")}
+	provider := NewRazorpayProvider(db, client)
+	ownerID := insertTestOwner(t, db, "owner.payout2@icici")
+
+	if _, err := provider.WithdrawOwnerEscrow(context.Background(), ownerID, 8000, testEscrowSeedKey()); err == nil {
+		t.Fatal("WithdrawOwnerEscrow: want error when the client's CreatePayout fails, got nil")
+	}
+	var rows int
+	if err := verify.QueryRow(`SELECT COUNT(*) FROM owner_escrow_events WHERE owner_id=$1`, ownerID).Scan(&rows); err != nil {
+		t.Fatalf("query owner_escrow_events: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("owner_escrow_events rows = %d, want 0 (a failed payout must not still write a WITHDRAWAL row)", rows)
+	}
 }
 
 // ── account.created webhook ─────────────────────────────────────────────────────
