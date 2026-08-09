@@ -190,9 +190,21 @@ RETURNING departed_at`
 		return fmt.Errorf("compute sealed balance: %w", err)
 	}
 
-	idempotencyKey := seizureIdempotencyKey(c.providerID, departedAt)
-	if err := d.penalise(ctx, c.providerID, sealedBalance, idempotencyKey); err != nil {
-		return fmt.Errorf("penalise: %w", err)
+	// [Fixed, M10 corrections review Finding #3] escrow_events.amount_paise
+	// has CHECK (amount_paise > 0) (DM §4.8) — calling penalise
+	// unconditionally with a zero balance (the common case: see Finding #1,
+	// nothing currently funds the provider ledger in production) surfaced
+	// that constraint as a raw, unhandled error out of every silent
+	// departure. Guarded here to match the existing "amount > 0" gate
+	// already used at every other call site in this codebase
+	// (release.go's computeReleaseForProvider, api/provider.go's
+	// HandleDepart) — there is nothing to seize, so the ledger write (and
+	// the injected callback) is skipped entirely rather than attempted.
+	if sealedBalance > 0 {
+		idempotencyKey := seizureIdempotencyKey(c.providerID, departedAt)
+		if err := d.penalise(ctx, c.providerID, sealedBalance, idempotencyKey); err != nil {
+			return fmt.Errorf("penalise: %w", err)
+		}
 	}
 	return nil
 }
