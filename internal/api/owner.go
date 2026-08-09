@@ -137,6 +137,20 @@ func verifyOwnerSig(pubKey []byte, ed25519PublicKeyHex, sigHex string) bool {
 
 type depositInitiateRequestBody struct {
 	AmountPaise int64 `json:"amount_paise"`
+	// IdempotencyKey is a client-supplied 64-lowercase-hex-char token — the
+	// SAME shape and validation withdrawRequestBody.IdempotencyKey already
+	// uses below.
+	//
+	// [Added, M10 corrections review Finding #4] MockProvider.InitiateEscrow
+	// credits owner_escrow_events SYNCHRONOUSLY ("because there is no real
+	// Razorpay webhook to wait for in demo mode" — see its own doc comment)
+	// and derives its idempotency key from (ownerID, contractID). Before
+	// this field existed, HandleDeposit minted a fresh contractID on every
+	// call, so every retry of this HTTP request in demo mode credited the
+	// owner's balance again, with no protection at all — unlike
+	// /owner/withdraw, a structurally identical money-moving endpoint built
+	// in this same milestone, which already required a client-supplied key.
+	IdempotencyKey string `json:"idempotency_key"`
 }
 
 type depositInitiateResponseBody struct {
@@ -187,8 +201,30 @@ func (h *OwnerDepositHandler) HandleDeposit(w http.ResponseWriter, r *http.Reque
 		WriteError(w, http.StatusBadRequest, ErrInvalidAmount, "amount_paise must be a positive integer", nil, "amount_paise", nil)
 		return
 	}
+	if !idempotencyKeyPattern.MatchString(req.IdempotencyKey) {
+		WriteError(w, http.StatusBadRequest, ErrInvalidRequest, "idempotency_key must be 64 hex chars", nil, "idempotency_key", nil)
+		return
+	}
 
-	contractID := uuid.New() // opaque correlation ID (payment.PaymentProvider.InitiateEscrow's own contract)
+	// [Fixed, M10 corrections review Finding #4] contractID is derived
+	// DETERMINISTICALLY from (ownerID, req.IdempotencyKey) — a version-5
+	// (SHA-1 name-based) UUID, RFC 4122 §4.3 — rather than uuid.New()'s
+	// fresh-every-call random value. A retry with the same idempotency_key
+	// therefore reproduces the exact same contractID, which
+	// MockProvider.InitiateEscrow's own idempotency key
+	// (mockDepositIdempotencyKey(ownerID, contractID)) is derived from —
+	// so a retried deposit hits owner_escrow_events' UNIQUE(idempotency_key)
+	// constraint and is treated as an already-credited no-op, instead of
+	// crediting the owner's balance a second time. Passing a deterministic
+	// contractID to RazorpayProvider.InitiateEscrow is likewise safe (and a
+	// welcome side effect): it forwards unchanged to
+	// razorpayClient.CreateVirtualAccount, which callers should be able to
+	// retry with the same correlation ID without side effects, matching how
+	// idempotencyKey is already used for ReleaseEscrow/Penalise/
+	// WithdrawOwnerEscrow's underlying gateway calls elsewhere in this
+	// package.
+	depositContractNamespace := uuid.Nil
+	contractID := uuid.NewSHA1(depositContractNamespace, []byte("vyomanaut-deposit:"+claims.Subject.String()+":"+req.IdempotencyKey))
 	vpa, qrURL, err := h.provider.InitiateEscrow(r.Context(), claims.Subject, req.AmountPaise, contractID)
 	if err != nil {
 		WriteError(w, http.StatusServiceUnavailable, ErrRazorpayUnavailable, "escrow initiation failed", nil, "", nil)

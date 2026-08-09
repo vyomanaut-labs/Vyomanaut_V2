@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -231,7 +232,7 @@ func TestDepositInitiateReturnsVPAAndQR(t *testing.T) {
 	handler := NewOwnerDepositHandler(provider)
 	ownerID := insertTestOwnerForOwnerTests(t, db, "")
 
-	reqBody, _ := json.Marshal(depositInitiateRequestBody{AmountPaise: 50000})
+	reqBody, _ := json.Marshal(depositInitiateRequestBody{AmountPaise: 50000, IdempotencyKey: testSeedIdempotencyKey()})
 	req := httptest.NewRequest("POST", "/api/v1/owner/deposit", bytes.NewReader(reqBody))
 	req = withClaims(req, VerifiedClaims{Subject: ownerID, Role: "owner"})
 	rec := httptest.NewRecorder()
@@ -246,6 +247,105 @@ func TestDepositInitiateReturnsVPAAndQR(t *testing.T) {
 	}
 	if resp.VPA == "" || resp.QRCodeURL == "" {
 		t.Errorf("empty vpa/qr_code_url: %+v", resp)
+	}
+}
+
+func TestDepositInitiateRejectsMissingOrMalformedIdempotencyKey(t *testing.T) {
+	db := openTestDB(t)
+	provider := payment.NewMockProvider(db)
+	handler := NewOwnerDepositHandler(provider)
+	ownerID := insertTestOwnerForOwnerTests(t, db, "")
+
+	for _, tc := range []struct {
+		name string
+		key  string
+	}{
+		{"missing", ""},
+		{"too short", "abc123"},
+		{"uppercase", strings.ToUpper(testSeedIdempotencyKey())},
+		{"not hex", strings.Repeat("z", 64)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reqBody, _ := json.Marshal(depositInitiateRequestBody{AmountPaise: 50000, IdempotencyKey: tc.key})
+			req := httptest.NewRequest("POST", "/api/v1/owner/deposit", bytes.NewReader(reqBody))
+			req = withClaims(req, VerifiedClaims{Subject: ownerID, Role: "owner"})
+			rec := httptest.NewRecorder()
+			handler.HandleDeposit(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400 (idempotency_key = %q)", rec.Code, tc.key)
+			}
+		})
+	}
+}
+
+// TestDepositInitiateIdempotentOnRetry is the regression test for Finding
+// #4 (M10 corrections review): MockProvider.InitiateEscrow credits
+// owner_escrow_events SYNCHRONOUSLY (demo mode has no real webhook to wait
+// for), so before this fix, every retry of a deposit HTTP request with a
+// fresh contractID credited the owner's balance again — a demo user could
+// inflate their own balance by double-clicking deposit. Calling the
+// handler twice with the SAME client-supplied idempotency_key must credit
+// the owner's balance exactly once.
+func TestDepositInitiateIdempotentOnRetry(t *testing.T) {
+	db := openTestDB(t)
+	verify := openVerifyDB(t)
+	provider := payment.NewMockProvider(db)
+	handler := NewOwnerDepositHandler(provider)
+	ownerID := insertTestOwnerForOwnerTests(t, db, "")
+	key := testSeedIdempotencyKey()
+
+	for i := 0; i < 2; i++ {
+		reqBody, _ := json.Marshal(depositInitiateRequestBody{AmountPaise: 40000, IdempotencyKey: key})
+		req := httptest.NewRequest("POST", "/api/v1/owner/deposit", bytes.NewReader(reqBody))
+		req = withClaims(req, VerifiedClaims{Subject: ownerID, Role: "owner"})
+		rec := httptest.NewRecorder()
+		handler.HandleDeposit(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("call #%d: status = %d, body = %s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+
+	var rows int
+	var total int64
+	if err := verify.QueryRow(`SELECT COUNT(*), COALESCE(SUM(amount_paise), 0) FROM owner_escrow_events WHERE owner_id = $1 AND event_type = 'DEPOSIT'`,
+		ownerID).Scan(&rows, &total); err != nil {
+		t.Fatalf("query owner_escrow_events: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("owner_escrow_events DEPOSIT rows after 2 identical retries = %d, want 1 (same idempotency_key "+
+			"must not credit the balance twice — Finding #4)", rows)
+	}
+	if total != 40000 {
+		t.Errorf("total credited = %d, want 40000 (must reflect exactly one deposit, not two)", total)
+	}
+}
+
+func TestDepositInitiateDistinctKeysCreditIndependently(t *testing.T) {
+	db := openTestDB(t)
+	verify := openVerifyDB(t)
+	provider := payment.NewMockProvider(db)
+	handler := NewOwnerDepositHandler(provider)
+	ownerID := insertTestOwnerForOwnerTests(t, db, "")
+
+	for i := 0; i < 2; i++ {
+		reqBody, _ := json.Marshal(depositInitiateRequestBody{AmountPaise: 15000, IdempotencyKey: testSeedIdempotencyKey()})
+		req := httptest.NewRequest("POST", "/api/v1/owner/deposit", bytes.NewReader(reqBody))
+		req = withClaims(req, VerifiedClaims{Subject: ownerID, Role: "owner"})
+		rec := httptest.NewRecorder()
+		handler.HandleDeposit(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("call #%d: status = %d, body = %s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+
+	var rows int
+	if err := verify.QueryRow(`SELECT COUNT(*) FROM owner_escrow_events WHERE owner_id = $1 AND event_type = 'DEPOSIT'`,
+		ownerID).Scan(&rows); err != nil {
+		t.Fatalf("query owner_escrow_events: %v", err)
+	}
+	if rows != 2 {
+		t.Errorf("owner_escrow_events DEPOSIT rows after 2 DIFFERENT idempotency keys = %d, want 2 (a fix for "+
+			"Finding #4 must not accidentally collapse genuinely distinct deposits together)", rows)
 	}
 }
 
@@ -267,7 +367,7 @@ func TestDepositInitiateWritesNoLedgerRow(t *testing.T) {
 		t.Fatalf("count before: %v", err)
 	}
 
-	reqBody, _ := json.Marshal(depositInitiateRequestBody{AmountPaise: 25000})
+	reqBody, _ := json.Marshal(depositInitiateRequestBody{AmountPaise: 25000, IdempotencyKey: testSeedIdempotencyKey()})
 	req := httptest.NewRequest("POST", "/api/v1/owner/deposit", bytes.NewReader(reqBody))
 	req = withClaims(req, VerifiedClaims{Subject: ownerID, Role: "owner"})
 	rec := httptest.NewRecorder()
