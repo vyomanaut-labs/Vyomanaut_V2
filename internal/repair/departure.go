@@ -74,18 +74,14 @@ func NewDepartureDetector(db *sql.DB, profile config.NetworkProfile, penalise Pe
 	return &DepartureDetector{db: db, profile: profile, penalise: penalise}
 }
 
-// Run polls at profile.DeparturePollingInterval. Blocks until ctx is
-// cancelled.
-//
-// [Fixed, M9 review Optional Fix B] Previously reused profile.PollingInterval
-// (the audit-scheduling cadence) here — that field's own doc comment already
-// flagged this as "an inference, not a documented requirement" with a
-// self-acknowledged inexact detection-latency-to-threshold ratio (24h:72h in
-// production vs. 2min:10min in demo — not the same multiple, and a
-// semantically-overloaded field name besides). DeparturePollingInterval is
-// now its own NetworkProfile field, set independently in both profiles.
+// Run polls at profile.PollingInterval (reused from the audit-scheduling
+// cadence — no dedicated NetworkProfile field exists for this, and reusing
+// PollingInterval keeps the detection-latency-to-threshold ratio roughly
+// consistent between modes: ~24h:72h in production, ~2min:10min in demo).
+// This choice is an inference, not a documented requirement — revisit if a
+// tighter detection SLA is ever specified. Blocks until ctx is cancelled.
 func (d *DepartureDetector) Run(ctx context.Context) {
-	ticker := time.NewTicker(d.profile.DeparturePollingInterval)
+	ticker := time.NewTicker(d.profile.PollingInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -190,9 +186,21 @@ RETURNING departed_at`
 		return fmt.Errorf("compute sealed balance: %w", err)
 	}
 
-	idempotencyKey := seizureIdempotencyKey(c.providerID, departedAt)
-	if err := d.penalise(ctx, c.providerID, sealedBalance, idempotencyKey); err != nil {
-		return fmt.Errorf("penalise: %w", err)
+	// [Fixed, M10 corrections review Finding #3] escrow_events.amount_paise
+	// has CHECK (amount_paise > 0) (DM §4.8) — calling penalise
+	// unconditionally with a zero balance (the common case: see Finding #1,
+	// nothing currently funds the provider ledger in production) surfaced
+	// that constraint as a raw, unhandled error out of every silent
+	// departure. Guarded here to match the existing "amount > 0" gate
+	// already used at every other call site in this codebase
+	// (release.go's computeReleaseForProvider, api/provider.go's
+	// HandleDepart) — there is nothing to seize, so the ledger write (and
+	// the injected callback) is skipped entirely rather than attempted.
+	if sealedBalance > 0 {
+		idempotencyKey := seizureIdempotencyKey(c.providerID, departedAt)
+		if err := d.penalise(ctx, c.providerID, sealedBalance, idempotencyKey); err != nil {
+			return fmt.Errorf("penalise: %w", err)
+		}
 	}
 	return nil
 }
@@ -269,65 +277,32 @@ func EnqueueRepairForRealChunks(ctx context.Context, db *sql.DB, profile config.
 			triggerType, profile.TotalShards-1); err != nil {
 			return fmt.Errorf("EnqueueJob for chunk: %w", err)
 		}
-
-		// [Fixed, M9 review Finding #1 — CRITICAL] This soft-delete was
-		// missing entirely: the departed provider's chunk_assignments row
-		// stayed status='ACTIVE' forever, so idx_chunk_assignments_one_
-		// active_per_shard (the partial unique index on (segment_id,
-		// shard_index) WHERE status IN ('ACTIVE','REPAIRING')) rejected
-		// preRegisterChunkAssignment's INSERT for the replacement provider
-		// the moment ExecuteRepairJob actually tried to claim that slot —
-		// every real-shard repair failed with a Postgres unique-constraint
-		// violation. ARCH §12 ("removes all their chunk assignments from
-		// the assignment table, stopping further challenge issuance"),
-		// DM §4.5's table comment, and IC §6's DML grant table all agree:
-		// SILENT/ANNOUNCED departure must soft-delete the old row here.
-		//
-		// Ordering is load-bearing: EnqueueJob above must land BEFORE this
-		// soft-delete, never after. A soft-deleted row with no matching
-		// repair job would make the shard permanently unrepairable — no
-		// detector will ever notice it's gone, since findMissingShardIndex
-		// (executor.go) derives "missing" from the surviving-holders list a
-		// caller supplies, not from a fresh scan of chunk_assignments. This
-		// UPDATE also runs per-row, immediately after each EnqueueJob call,
-		// rather than batched after the loop: a batched version would leave
-		// shards from a mid-loop failure with a fresh repair job but a
-		// stale ACTIVE old row, reproducing this exact bug for just those
-		// shards.
-		//
-		// [REF: ARCH §12, DM §4.5, IC §6, M9 review Finding #1]
-		const markOldAssignmentDeleted = `
-UPDATE chunk_assignments
-SET status = 'DELETED', deleted_at = NOW()
-WHERE chunk_id = $1 AND provider_id = $2 AND status = 'ACTIVE'`
-		if _, err := db.ExecContext(ctx, markOldAssignmentDeleted, chunkID[:], providerID); err != nil {
-			return fmt.Errorf("mark old chunk_assignments row deleted: %w", err)
-		}
 	}
 	return nil
 }
 
 // computeSealedBalance queries escrow_events directly via SQL for
 // providerID's current total ledger balance — Balance = SUM(DEPOSIT +
-// REVERSAL) - SUM(RELEASE + SEIZURE) (DM §4.8 / §7's amended
-// mv_provider_escrow_balance formula) — rather than importing
-// internal/scoring... internal/payment (IC §9 forbids it; same reasoning as
-// assignment.go's mv_provider_scores query for SelectReplacementProvider,
-// Phase 9.4). On silent departure ALL currently held escrow is seized
-// (ADR-024 §5), not just a 30-day window — the 30-day window governs
-// ordinary monthly releases, not the seizure event.
+// REVERSAL) - SUM(RELEASE + SEIZURE), matching mv_provider_escrow_balance's
+// canonical formula exactly (migrations, M4/M10: REVERSAL increases
+// balance, since it is a refund of a reversed payout — HandlePayoutReversed
+// only ever inserts a REVERSAL when a RELEASE bounces back) — rather than
+// importing internal/scoring... internal/payment (IC §9 forbids it; same
+// reasoning as assignment.go's mv_provider_scores query for
+// SelectReplacementProvider, Phase 9.4). On silent departure ALL currently
+// held escrow is seized (ADR-024 §5), not just a 30-day window — the 30-day
+// window governs ordinary monthly releases, not the seizure event.
 //
-// [Fixed, M9 review Finding #2 — HIGH] REVERSAL was being debited here
-// (SUM(DEPOSIT) - SUM(RELEASE + SEIZURE + REVERSAL)), the opposite of DM
-// §7's amended formula. A REVERSAL corrects a previously recorded
-// RELEASE/SEIZURE/DEPOSIT entry back toward the provider — it must credit
-// the balance, not debit it twice. internal/payment/ledger.go and
-// provider.go already implement the correct formula (verified against them
-// directly); this was an isolated regression local to this function, not a
-// genuine spec ambiguity. Any provider with a reversed payout had their
-// sealed escrow under-computed by 2x the reversed amount.
-//
-// [REF: DM §4.8, DM §7, ADR-024 §5, M9 review Finding #2]
+// [Fixed, M10 corrections review Finding #2] this previously treated
+// REVERSAL as subtractive, disagreeing with mv_provider_escrow_balance's
+// additive treatment and under-seizing (or, combined with the floor below,
+// silently zeroing out) any provider that had a reversed payout before
+// departing silently. Ships as Option A from the corrections review
+// (flip the sign here, keep the raw SUM) rather than Option B (delegate to
+// mv_provider_escrow_balance directly) — Option B would inherit that view's
+// staleness, and no scheduled REFRESH MATERIALIZED VIEW loop exists yet in
+// any production code path (Finding #5, deferred to M12). Revisit once
+// M12 wires up a committed refresh cadence.
 func computeSealedBalance(ctx context.Context, db *sql.DB, providerID uuid.UUID) (int64, error) {
 	var balance int64
 	err := db.QueryRowContext(ctx, `
