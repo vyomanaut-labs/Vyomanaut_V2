@@ -1,11 +1,11 @@
 // Package payment is declared in doc.go.
 // This file implements the charge/distribution engine (M10 corrections
-// review Finding #1, Phase 10.6; ADR-059): computes each ACTIVE file's
+// review Finding #1, Phase 10.6; ADR-061): computes each ACTIVE file's
 // monthly storage cost, debits the owner via a CHARGE event, and credits
 // that file's current shard-holding providers via DEPOSIT events, split
-// evenly by shard count held. ADR-059's flat per-shard model was chosen
+// evenly by shard count held. ADR-061's flat per-shard model was chosen
 // over audit-pass weighting after two design-council sessions — weighting
-// was considered and explicitly deferred, not overlooked (see ADR-059
+// was considered and explicitly deferred, not overlooked (see ADR-061
 // Consequences / Open constraints for what would need to be true before
 // revisiting that).
 //
@@ -19,7 +19,7 @@
 // a freshness-critical value (DM §7); this engine never reads
 // mv_provider_scores at all under the flat model.
 //
-// [REF: ADR-059, DM §4.3-4.9, build.md Phase 10.6]
+// [REF: ADR-061, DM §4.3-4.9, build.md Phase 10.6]
 
 package payment
 
@@ -85,7 +85,7 @@ func ChargeIdempotencyKey(ownerID, fileID uuid.UUID, billingPeriod string) strin
 
 // chargeDepositIdempotencyKey computes SHA-256(providerID || fileID ||
 // billingPeriod) as 64 lowercase hex characters — the DEPOSIT-side key for
-// this engine's distribution step (ADR-059 Decision §3). Named distinctly
+// this engine's distribution step (ADR-061 Decision §3). Named distinctly
 // from razorpay.go's depositIdempotencyKey(ownerID, paymentID) — that one
 // keys an owner's Razorpay-webhook-driven deposit; this one keys a
 // provider's charge-engine-driven credit. Different event, different
@@ -144,7 +144,7 @@ func chargeableFiles(ctx context.Context, db *sql.DB) ([]chargeableFile, error) 
 // than one). Only status = 'ACTIVE' counts, matching the
 // active_chunk_assignments view already granted to vyomanaut_app (DM
 // §4.5) — a REPAIRING assignment belongs to a holder already on its way
-// out and is not credited further here (ADR-059 Decision §5).
+// out and is not credited further here (ADR-061 Decision §5).
 func shardHolderCounts(ctx context.Context, db *sql.DB, fileID uuid.UUID) (map[uuid.UUID]int64, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT ca.provider_id, COUNT(*)
@@ -178,14 +178,14 @@ func shardHolderCounts(ctx context.Context, db *sql.DB, fileID uuid.UUID) (map[u
 // splitByLargestRemainder divides totalPaise among the providers in counts
 // (provider_id -> shard count held), proportional to each provider's share
 // of the total shard count, guaranteeing the returned amounts sum to
-// EXACTLY totalPaise (ADR-059 Decision §3) — never short, never over,
+// EXACTLY totalPaise (ADR-061 Decision §3) — never short, never over,
 // never silently dropping a leftover paise. Returns nil if counts is
 // empty (nothing to split among).
 //
 // Algorithm (largest-remainder method): each provider's base share is
 // floor(totalPaise * theirShards / totalShards); the leftover
 // (totalPaise - sum(baseShares)) paise are handed out one each, in
-// provider_id ascending order for determinism across retries (ADR-059 Open
+// provider_id ascending order for determinism across retries (ADR-061 Open
 // constraints — this ordering must never change without a migration
 // note), breaking ties among equal fractional remainders reproducibly.
 func splitByLargestRemainder(totalPaise int64, counts map[uuid.UUID]int64) map[uuid.UUID]int64 {
@@ -304,9 +304,9 @@ func ComputeMonthlyCharges(ctx context.Context, db *sql.DB, profile config.Netwo
 	return errors.Join(errs...)
 }
 
-// ── Scheduling loop (ADR-059 Decision §4) ─────────────────────────────────
+// ── Scheduling loop (ADR-061 Decision §4) ─────────────────────────────────
 
-// chargeComputationDayOfMonth is the calendar day ADR-059 fixes charge
+// chargeComputationDayOfMonth is the calendar day ADR-061 fixes charge
 // computation to in production — the 1st of each month, charging in
 // arrears for the month that just elapsed. Deliberately different from
 // releaseComputationDayOfMonth (23rd, release.go) so the two
@@ -318,7 +318,7 @@ const chargeComputationDayOfMonth = 1
 const chargeCalendarPollInterval = 1 * time.Hour
 
 // RunChargeComputationLoop drives ComputeMonthlyCharges on the cadence
-// ADR-059 describes: a ticker firing every profile.ChargeComputationInterval
+// ADR-061 describes: a ticker firing every profile.ChargeComputationInterval
 // in demo mode, or a once-a-month check for the 1st of the calendar month
 // in production (profile.ChargeComputationInterval == 0 signals
 // calendar-driven, mirroring RunReleaseComputationLoop exactly — MVP §5.4's
@@ -326,7 +326,7 @@ const chargeCalendarPollInterval = 1 * time.Hour
 // Blocks until ctx is cancelled.
 //
 // Unlike release, the charge job has no audit-period-closed precondition
-// to wait for (ADR-059's whole point, Council Round 2 Q1) — it runs
+// to wait for (ADR-061's whole point, Council Round 2 Q1) — it runs
 // against "now" on a fixed calendar cadence.
 func RunChargeComputationLoop(ctx context.Context, db *sql.DB, profile config.NetworkProfile) {
 	if profile.ChargeComputationInterval == 0 {
@@ -383,7 +383,7 @@ func runChargeOnCalendarDate(ctx context.Context, db *sql.DB, profile config.Net
 // int(now.Month()) comparison would silently skip a month once this
 // process has run continuously past its first anniversary. This charge
 // scheduler reuses that fix from day one — Aryan's explicit direction
-// (ADR-059) — rather than reintroducing the bug class Finding #6 closed in
+// (ADR-061) — rather than reintroducing the bug class Finding #6 closed in
 // a second scheduler.
 func shouldRunCharge(now time.Time, lastRun string) (run bool, billingPeriod string) {
 	if now.Day() != chargeComputationDayOfMonth {
