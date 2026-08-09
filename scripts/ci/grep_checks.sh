@@ -26,10 +26,10 @@
     "(float64|float32|FLOAT|DECIMAL|NUMERIC)" \
     "internal/payment"
 
-  # Check 10: no references to non-existent ADRs (above ADR-031)
-  # Pattern: ADR-0[3-9][2-9]|ADR-[1-9][0-9]{2,}
+  # Check 10: references to ADRs 001 through 100
+  # Pattern matches 001-099 and 100
   check "ADR_REFERENCE" \
-    "ADR-0(3[4-9]|[4-9][0-9])|ADR-[1-9][0-9]{2,}" \
+    "ADR-(0[0-9][1-9]|0[1-9]0|100)" \
     "."
 
   # Check 11: no UPI Collect API endpoint calls
