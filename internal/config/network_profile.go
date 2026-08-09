@@ -119,7 +119,7 @@ type NetworkProfile struct {
 	// Callers branch on `profile.ReleaseComputationInterval == 0`.
 	// [REF: ADR-024, ADR-031]
 	ReleaseComputationInterval time.Duration
-	
+
 	// ── Charge computation cycle ──────────────────────────────────────────────
 	// 0 means calendar-driven (production: computed on the 1st of each month,
 	// in arrears for the month just elapsed). Non-zero means ticker-driven
@@ -131,7 +131,6 @@ type NetworkProfile struct {
 	// wait for, unlike release, so nothing requires them to share a cadence).
 	// [REF: ADR-059]
 	ChargeComputationInterval time.Duration
- 
 
 	// ── Authenticated mutation-protocol freshness ────────────────────────────
 	// AuthRequestFreshnessWindow bounds the age of a signed request_ts_ms on
