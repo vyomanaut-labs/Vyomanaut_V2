@@ -323,7 +323,16 @@ func (r *RazorpayProvider) ReleaseEscrow(ctx context.Context, providerID uuid.UU
 // responsibility (Milestone 9), not this method's — Penalise only seizes
 // the ledger balance; it is called BY that detector via the
 // PenaliseFunc-shaped injection point (internal/repair/departure.go).
+// Penalise seizes amountPaise from providerID's escrow (silent departure).
+//
+// [Fixed, M10 corrections review Finding #3, defense-in-depth] see
+// MockProvider.Penalise's identical guard for the full rationale — both
+// PaymentProvider implementations must be safe against a zero/negative
+// amount independent of the caller.
 func (r *RazorpayProvider) Penalise(ctx context.Context, providerID uuid.UUID, amountPaise int64, idempotencyKey string) error {
+	if amountPaise <= 0 {
+		return nil
+	}
 	if err := InsertEscrowEvent(ctx, r.db, providerID, EscrowSeizure, amountPaise, idempotencyKey, nil); err != nil {
 		if errors.Is(err, ErrDuplicateIdempotencyKey) {
 			return nil
@@ -403,9 +412,7 @@ func (r *RazorpayProvider) ownerUPIHandle(ctx context.Context, ownerID uuid.UUID
 // calendar data this package has no access to. This function is a
 // weekend-only approximation; wiring in the real RBI table is a follow-up
 // once that data is available (same category of honest scope note as
-// internal/repair's departure detector previously reusing PollingInterval
-// before it got its own dedicated DeparturePollingInterval field — M9
-// review Optional Fix B).
+// internal/repair's departure detector reusing PollingInterval, Milestone 9).
 func lastBusinessDayOfMonth(t time.Time) time.Time {
 	firstOfNextMonth := time.Date(t.Year(), t.Month()+1, 1, 0, 0, 0, 0, t.Location())
 	lastDay := firstOfNextMonth.AddDate(0, 0, -1)
