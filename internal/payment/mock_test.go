@@ -6,6 +6,9 @@
 //   - TestMockProviderReleaseEscrowWritesRealRow
 //   - TestMockProviderIdempotencyEnforcedByDBConstraint
 //   - TestMockProviderGetBalanceMatchesRealView
+//   - TestMockProviderPenaliseNoOpsOnZeroOrNegativeAmount
+//   - TestMockProviderPenaliseWritesRealRow
+//   - TestMockProviderWithdrawOwnerEscrowHandlesShortIdempotencyKey
 //
 // [REF: MVP §6.1 CR-10, MVP §7.7, build.md Phase 10.1 Session 10.1.2]
 
@@ -13,6 +16,7 @@ package payment
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/google/uuid"
@@ -135,5 +139,91 @@ func TestMockProviderGetBalanceMatchesRealView(t *testing.T) {
 	}
 	if got != want {
 		t.Errorf("GetBalance = %d, want %d (must match a direct query against mv_provider_escrow_balance exactly)", got, want)
+	}
+}
+
+// TestMockProviderPenaliseNoOpsOnZeroOrNegativeAmount is the
+// defense-in-depth regression test for Finding #3 (M10 corrections
+// review): MockProvider.Penalise must guard against amountPaise <= 0 on
+// its own merits, independent of whether the caller (internal/repair's
+// processDeparture) remembers its own guard — escrow_events has CHECK
+// (amount_paise > 0), so before this fix, a zero-amount call surfaced that
+// constraint as a raw, unhandled Postgres error.
+//
+// This closes the exact gap the audit called out: prior to this session,
+// MockProvider.Penalise had ZERO unit test coverage anywhere in the M10
+// test files, and the only M9/M10 tests exercising DepartureDetector used
+// a fake recordingPenalise stand-in, never this real implementation.
+func TestMockProviderPenaliseNoOpsOnZeroOrNegativeAmount(t *testing.T) {
+	db := openTestDB(t)
+	verify := openVerifyDB(t)
+	provider := NewMockProvider(db)
+	providerID := insertTestProvider(t, db, testProviderSpec{})
+
+	for _, amount := range []int64{0, -100} {
+		t.Run(fmt.Sprintf("amount=%d", amount), func(t *testing.T) {
+			if err := provider.Penalise(context.Background(), providerID, amount, testEscrowSeedKey()); err != nil {
+				t.Fatalf("Penalise(%d): %v (must no-op silently, not surface the amount_paise CHECK constraint)", amount, err)
+			}
+		})
+	}
+
+	var rows int
+	if err := verify.QueryRow(`SELECT COUNT(*) FROM escrow_events WHERE provider_id = $1 AND event_type = 'SEIZURE'`,
+		providerID).Scan(&rows); err != nil {
+		t.Fatalf("query escrow_events: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("SEIZURE rows after zero/negative-amount Penalise calls = %d, want 0", rows)
+	}
+}
+
+func TestMockProviderPenaliseWritesRealRow(t *testing.T) {
+	db := openTestDB(t)
+	verify := openVerifyDB(t)
+	provider := NewMockProvider(db)
+	providerID := insertTestProvider(t, db, testProviderSpec{})
+	key := testEscrowSeedKey()
+
+	if err := provider.Penalise(context.Background(), providerID, 33000, key); err != nil {
+		t.Fatalf("Penalise: %v", err)
+	}
+	// Idempotent retry: same key, must not error and must not duplicate.
+	if err := provider.Penalise(context.Background(), providerID, 33000, key); err != nil {
+		t.Fatalf("Penalise (duplicate key): %v", err)
+	}
+
+	var rows int
+	var amount int64
+	if err := verify.QueryRow(`SELECT COUNT(*), COALESCE(MAX(amount_paise), 0) FROM escrow_events WHERE provider_id = $1 AND event_type = 'SEIZURE'`,
+		providerID).Scan(&rows, &amount); err != nil {
+		t.Fatalf("query escrow_events: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("SEIZURE rows = %d, want 1", rows)
+	}
+	if amount != 33000 {
+		t.Errorf("amount_paise = %d, want 33000", amount)
+	}
+}
+
+// TestMockProviderWithdrawOwnerEscrowHandlesShortIdempotencyKey is the
+// regression test for the minor bounds-check item (M10 corrections
+// review): idempotencyKey[:16] previously had no length guard, currently
+// safe only because the HTTP layer enforces exactly 64 hex chars before
+// this is ever reached. This confirms the payment package itself no longer
+// panics if ever called directly with a shorter key.
+func TestMockProviderWithdrawOwnerEscrowHandlesShortIdempotencyKey(t *testing.T) {
+	db := openTestDB(t)
+	provider := NewMockProvider(db)
+	ownerID := insertTestOwner(t, db, "")
+
+	shortKey := "abc" // well under payoutIDKeyPrefixLen (16)
+	payoutID, err := provider.WithdrawOwnerEscrow(context.Background(), ownerID, 5000, shortKey)
+	if err != nil {
+		t.Fatalf("WithdrawOwnerEscrow(shortKey): %v (must not panic on a key shorter than the prefix length)", err)
+	}
+	if payoutID != "mock-payout-"+shortKey {
+		t.Errorf("payoutID = %q, want %q", payoutID, "mock-payout-"+shortKey)
 	}
 }

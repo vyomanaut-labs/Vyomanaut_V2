@@ -89,7 +89,19 @@ func (m *MockProvider) ReleaseEscrow(ctx context.Context, providerID uuid.UUID, 
 }
 
 // Penalise calls InsertEscrowEvent(..., EscrowSeizure, ...) directly.
+// Penalise seizes amountPaise from providerID's escrow (silent departure).
+//
+// [Fixed, M10 corrections review Finding #3, defense-in-depth] a zero or
+// negative amountPaise would violate escrow_events' CHECK (amount_paise >
+// 0) constraint and surface as a raw Postgres error. The primary fix lives
+// at the caller (internal/repair/departure.go's processDeparture now only
+// calls this when sealedBalance > 0) — this guard exists so this
+// implementation is safe on its own merits too, per the audit's explicit
+// "don't rely solely on the caller remembering the guard."
 func (m *MockProvider) Penalise(ctx context.Context, providerID uuid.UUID, amountPaise int64, idempotencyKey string) error {
+	if amountPaise <= 0 {
+		return nil
+	}
 	if err := InsertEscrowEvent(ctx, m.db, providerID, EscrowSeizure, amountPaise, idempotencyKey, nil); err != nil {
 		if errors.Is(err, ErrDuplicateIdempotencyKey) {
 			return nil
@@ -108,8 +120,22 @@ func (m *MockProvider) GetBalance(ctx context.Context, providerID uuid.UUID) (in
 
 // WithdrawOwnerEscrow calls InsertOwnerEscrowEvent(..., OwnerWithdrawal, ...)
 // directly and returns a synthetic payoutID.
+// payoutIDKeyPrefixLen is how many hex characters of the idempotency key
+// are folded into MockProvider's synthetic payoutID for display/log
+// correlation purposes only — has no bearing on the actual idempotency
+// guarantee, which comes entirely from owner_escrow_events'
+// UNIQUE(idempotency_key) constraint below.
+const payoutIDKeyPrefixLen = 16
+
 func (m *MockProvider) WithdrawOwnerEscrow(ctx context.Context, ownerID uuid.UUID, amountPaise int64, idempotencyKey string) (string, error) {
-	payoutID := "mock-payout-" + idempotencyKey[:16]
+	// [Fixed, M10 corrections review, minor item] idempotencyKey[:16] had no
+	// length guard — currently safe only because the HTTP layer
+	// (idempotencyKeyPattern in internal/api/owner.go) enforces exactly 64
+	// hex chars before this is ever reached, but this package has no
+	// defense of its own if called with a shorter key by some future
+	// internal caller that bypasses that HTTP-layer validation.
+	prefixLen := min(payoutIDKeyPrefixLen, len(idempotencyKey))
+	payoutID := "mock-payout-" + idempotencyKey[:prefixLen]
 	if err := InsertOwnerEscrowEvent(ctx, m.db, ownerID, OwnerWithdrawal, amountPaise, idempotencyKey, nil); err != nil {
 		if errors.Is(err, ErrDuplicateIdempotencyKey) {
 			return payoutID, nil
