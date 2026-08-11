@@ -213,7 +213,7 @@ func (g *generator) GenerateChunk(ctx context.Context, providerID uuid.UUID) (ch
 	// §4.5). IC §4.1's capability_token signing_input always carries 16
 	// file_id bytes regardless; the zero UUID is the natural "no file"
 	// value here.
-	token := mintCapabilityToken(g.signingKey, chunkID, providerID, uuid.Nil, capabilityTokenTTL)
+	token := mintCapabilityToken(g.signingKey, chunkID, providerID, capabilityTokenTTL)
 	if err := writeUploadRequest(stream, chunkID, syntheticChunkShardIndex, token, data); err != nil {
 		return chunkID, fmt.Errorf("vettingchunk: GenerateChunk: %w", err)
 	}
@@ -315,26 +315,33 @@ func parseKnownMultiaddrs(raw []byte) ([]p2p.Multiaddr, error) {
 //	    "vyomanaut-chunk-upload-cap-v1"
 //	    || chunk_id          (32 bytes)
 //	    || provider_id       (16 bytes, UUID bytes, big-endian)
-//	    || file_id           (16 bytes, UUID bytes, big-endian)
 //	    || expiry_unix_ms    (8 bytes, int64 big-endian)
 //	)
 //	capability_token = expiry_unix_ms (8 B) || Ed25519_sign(microservice_signing_key, signing_input)
+//
+// file_id is deliberately NOT part of this signing input — Design Council
+// verdict ("Capability Token: Drop file_id, Not Add It to the Wire
+// Format", ADR-072): chunk_id is 256 bits of fresh, microservice-generated
+// randomness minted once per assignment and never reused across files, so
+// it already carries the exact binding file_id would have provided. This
+// call site already passed uuid.Nil for vetting chunks (they have no
+// file), so this removal has zero behavioral effect here — it's the
+// upload.go/repair paths this closes a real gap for.
 //
 // Uses internal/crypto.SignBytes (IC §3.2's canonical hash-then-sign
 // composition) rather than a manual sha256+ed25519.Sign call — vettingchunk
 // is permitted to import internal/crypto (IC §9), so this reuses the
 // project's own signing primitive instead of re-deriving it, matching
 // internal/api/upload.go's own generateCapabilityToken.
-func mintCapabilityToken(signingKey ed25519.PrivateKey, chunkID [32]byte, providerID, fileID uuid.UUID, ttl time.Duration) [uploadCapabilityTokenSize]byte {
+func mintCapabilityToken(signingKey ed25519.PrivateKey, chunkID [32]byte, providerID uuid.UUID, ttl time.Duration) [uploadCapabilityTokenSize]byte {
 	expiryUnixMs := time.Now().Add(ttl).UnixMilli()
 	var expiryBytes [8]byte
 	binary.BigEndian.PutUint64(expiryBytes[:], uint64(expiryUnixMs))
 
-	input := make([]byte, 0, len(capabilityTokenDomainPrefix)+len(chunkID)+len(providerID)+len(fileID)+len(expiryBytes))
+	input := make([]byte, 0, len(capabilityTokenDomainPrefix)+len(chunkID)+len(providerID)+len(expiryBytes))
 	input = append(input, []byte(capabilityTokenDomainPrefix)...)
 	input = append(input, chunkID[:]...)
 	input = append(input, providerID[:]...)
-	input = append(input, fileID[:]...)
 	input = append(input, expiryBytes[:]...)
 
 	sig := localcrypto.SignBytes(signingKey, input)

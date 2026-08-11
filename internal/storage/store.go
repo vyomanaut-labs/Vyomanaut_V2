@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 )
 
 const (
@@ -180,59 +179,33 @@ type ChunkStore interface {
 	Close() error
 }
 
-// NewChunkStore opens or creates a WiscKey chunk store rooted at dataDir.
-// Creates two paths within dataDir:
-//   - index/       — RocksDB chunk index (Bloom filter + 64 MB LRU block cache)
-//   - chunks.vlog  — append-only value log
+// NewChunkStore opens or creates the platform-appropriate chunk store rooted
+// at dataDir: RocksDB + hand-rolled vLog on Linux/macOS (engine_rocksdb.go,
+// ADR-023), BadgerDB on Windows (engine_badger.go, ADR-046). This function is
+// deliberately OS-agnostic — it only ensures dataDir exists, then dispatches
+// to newEngineStore, whose implementation is selected at compile time by the
+// //go:build tags on engine_rocksdb.go / engine_badger.go, never a runtime
+// os.Getenv/GOOS-string branch (IC §11).
 //
 // The caller MUST call RecoverFromCrash() on the returned store and allow it to
 // complete BEFORE starting the writer goroutine (NFR-024, ARCH §16 §Crash recovery,
-// build.md Phase 5.1 Session 5.1.5).
+// build.md Phase 5.1 Session 5.1.5). This contract is identical on both engines
+// even though its RocksDB-path implementation performs a real tail-scan and its
+// Badger-path implementation is a documented no-op (engine_badger.go).
 //
 // NewChunkStore intentionally does NOT call RecoverFromCrash — the caller (Session
 // 13.1.1 daemon wiring) must do so explicitly to preserve the startup-sequence
 // contract.
 //
-// Error semantics: returns a wrapped error if directory creation, RocksDB open, or
-// vLog open fails. Treat as fatal — the daemon must not start without its chunk store.
+// Error semantics: returns a wrapped error if directory creation or engine
+// construction fails. Treat as fatal — the daemon must not start without its
+// chunk store.
 //
-// [REF: IC §5.3, ARCH §16, ADR-023, build.md Phase 5.1 Session 5.1.5]
+// [REF: IC §5.3, ARCH §16, ADR-023, ADR-046, build.md Phase 5.1 Session
+// 5.1.5, build.md Session 16.0.1]
 func NewChunkStore(dataDir string) (ChunkStore, error) {
 	if err := os.MkdirAll(dataDir, dirPerm); err != nil {
 		return nil, fmt.Errorf("storage.NewChunkStore: create dataDir %q: %w", dataDir, err)
 	}
-
-	indexPath := filepath.Join(dataDir, "index")
-	idx, err := openRocksDBIndex(indexPath)
-	if err != nil {
-		return nil, fmt.Errorf("storage.NewChunkStore: open RocksDB index: %w", err)
-	}
-
-	vlogPath := filepath.Join(dataDir, "chunks.vlog")
-	// O_RDWR: supports both ReadAt (pread, goroutine-safe) and Write (single writer).
-	// O_APPEND: ensures writes always land at EOF even on Linux after a Seek.
-	// O_CREATE: creates the file on first daemon start.
-	vlogFile, err := os.OpenFile(vlogPath, os.O_CREATE|os.O_RDWR|os.O_APPEND, filePerm)
-	if err != nil {
-		idx.close()
-		return nil, fmt.Errorf("storage.NewChunkStore: open vLog %q: %w", vlogPath, err)
-	}
-
-	// Initialise vlogHead from the current file size. The caller must invoke
-	// the crash-recovery scan before starting the writer goroutine (NFR-024);
-	// that scan corrects vlogHead if the tail holds entries not yet in RocksDB.
-	info, err := vlogFile.Stat()
-	if err != nil {
-		_ = vlogFile.Close()
-		idx.close()
-		return nil, fmt.Errorf("storage.NewChunkStore: stat vLog: %w", err)
-	}
-
-	return &wiskeyStore{
-		index:        idx,
-		vlog:         vlogFile,
-		vlogPath:     vlogPath,
-		vlogHead:     uint64(info.Size()),
-		isRotational: isRotationalDevice(dataDir),
-	}, nil
+	return newEngineStore(dataDir)
 }

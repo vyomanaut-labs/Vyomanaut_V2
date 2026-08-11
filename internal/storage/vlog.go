@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 // Package storage is declared in doc.go.
 // This file defines the wiskeyStore concrete struct that implements ChunkStore,
 // the two internal vLog I/O helpers, and all six ChunkStore method implementations.
