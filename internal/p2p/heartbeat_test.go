@@ -4,8 +4,8 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -198,9 +198,9 @@ func TestDoHeartbeatSendsVerifiableSignedPayload(t *testing.T) {
 	// would, and verify with crypto.VerifyBytes (IC §3.2 verification
 	// procedure) — proves the signature is over the documented fields only
 	// (provider_sig itself is excluded from what was signed).
-	sigBytes, err := base64.StdEncoding.DecodeString(received.ProviderSig)
+	sigBytes, err := hex.DecodeString(received.ProviderSig)
 	if err != nil {
-		t.Fatalf("provider_sig is not valid base64: %v", err)
+		t.Fatalf("provider_sig is not valid hex: %v", err)
 	}
 	if len(sigBytes) != 64 {
 		t.Fatalf("provider_sig decodes to %d bytes, want 64", len(sigBytes))

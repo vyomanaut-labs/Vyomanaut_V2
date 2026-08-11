@@ -31,7 +31,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
-	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -241,7 +241,13 @@ func doHeartbeat(ctx context.Context, cfg HeartbeatConfig) {
 		CurrentMultiaddrs: addrs,
 		Timestamp:         timestamp,
 		DaemonVersion:     cfg.DaemonVersion,
-		ProviderSig:       base64.StdEncoding.EncodeToString(sig[:]),
+		// hex, not base64 — matches decodeProviderSig / every other
+		// provider_sig in the system (internal/api/provider.go's own
+		// header comment already flagged this exact mismatch as a real,
+		// unfixed cross-package bug; fixed here as part of closing the
+		// PENDING_ONBOARDING->VETTING heartbeat gap, discovered via live
+		// verification, build.md Session 16.1.1).
+		ProviderSig: hex.EncodeToString(sig[:]),
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -249,7 +255,18 @@ func doHeartbeat(ctx context.Context, cfg HeartbeatConfig) {
 		return
 	}
 
-	status, respBody, err := postHeartbeat(ctx, cfg.effectiveHTTPClient(), cfg.MicroserviceURL+heartbeatPath, body)
+	// Authorization: Bearer <provider JWT> — POST /api/v1/provider/heartbeat
+	// is bearerAuthRole("provider")-gated server-side (router.go); this was
+	// missing entirely before (postHeartbeat took no token parameter at
+	// all), which is why every heartbeat attempt was rejected with 401
+	// "missing Bearer token" regardless of GetToken/RefreshToken existing
+	// on HeartbeatConfig — discovered via live verification, not visible
+	// from code review alone (build.md Session 16.1.1).
+	var token string
+	if cfg.GetToken != nil {
+		token, _ = cfg.GetToken()
+	}
+	status, respBody, err := postHeartbeat(ctx, cfg.effectiveHTTPClient(), cfg.MicroserviceURL+heartbeatPath, token, body)
 	if err != nil {
 		log.Printf("[heartbeat] send failed; will retry next cycle: %v", err)
 		return
@@ -337,14 +354,18 @@ func canonicalHeartbeatSigningInput(multiaddrs []string, timestamp string) ([]by
 	return buf.Bytes(), nil
 }
 
-// postHeartbeat sends body to url via client, returning the HTTP status code
-// and response body.
-func postHeartbeat(ctx context.Context, client *http.Client, url string, body []byte) (int, []byte, error) {
+// postHeartbeat sends body to url via client, with an Authorization: Bearer
+// header when token is non-empty, returning the HTTP status code and
+// response body.
+func postHeartbeat(ctx context.Context, client *http.Client, url, token string, body []byte) (int, []byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return 0, nil, fmt.Errorf("p2p: postHeartbeat: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
