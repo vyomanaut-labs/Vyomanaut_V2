@@ -5,39 +5,41 @@
 // deny-list on the dialing side automatically; this handler does not need to
 // do anything special to allow it.
 //
-// KNOWN GAP — capability-token verification (flagged, not resolved here;
-// see the build report's CAP-TOKEN-FILE-ID-GAP / CAP-TOKEN-PROVIDER-ID-GAP
-// findings):
+// RESOLVED GAP — capability-token verification (formerly CAP-TOKEN-
+// PROVIDER-ID-GAP / CAP-TOKEN-FILE-ID-GAP; both halves closed, one per
+// session):
 //
 // IC §4.1's capability_token signing_input is
-// domain_prefix || chunk_id(32) || provider_id(16) || file_id(16) || expiry_unix_ms(8),
-// exactly matching what internal/api/upload.go's generateCapabilityToken and
-// internal/repair/executor.go's mintCapabilityToken already sign, server-side,
-// today. Two of those four fields are structurally unavailable to a provider
-// daemon at this session's scope:
+// domain_prefix || chunk_id(32) || provider_id(16) || expiry_unix_ms(8) —
+// exactly matching what internal/api/upload.go's generateCapabilityToken,
+// internal/repair/executor.go's mintCapabilityToken, and
+// internal/vettingchunk/generator.go's mintCapabilityToken all sign,
+// server-side, today. Two fields were originally structurally unavailable
+// to a provider daemon at Session 13.2.1's scope; both are now closed:
 //
-//   - file_id: IC §4.1's UploadRequest Frame 1 (chunk_id, shard_index,
-//     capability_token, chunk_data) carries no file_id field at all. A
-//     provider has no way to learn it. (chunk_id already uniquely identifies
-//     the (segment, shard_index) slot in the shipped Milestone 11 design —
-//     chunk_id is a fresh, microservice-assigned random value per slot, not
-//     a content hash — so file_id is arguably redundant in the signing input
-//     and could be dropped there instead; that is a call for the design
-//     council, not this session.)
-//   - provider_id: MVP §8.3's cmd/provider flag table (this session's own
-//     reference) has no flag carrying the daemon's microservice-assigned
-//     UUID identity — only the Ed25519-derived Peer ID exists at this scope.
-//     No registration/OTP flow that would yield one is in scope for M13.
+//   - provider_id: CLOSED (Session 16.1.1, live verification). main.go's
+//     registerProviderWithMicroservice (added the same session, closing a
+//     separate gap) now gives this daemon its real microservice-assigned
+//     provider_id; verifyCapabilityTokenFrame below uses it via
+//     h.providerIDBytes instead of an always-zero placeholder field.
+//   - file_id: CLOSED (Session 16.1.1, Design Council verdict "Capability
+//     Token: Drop file_id, Not Add It to the Wire Format", ADR-072).
+//     IC §4.1's UploadRequest Frame 1 (chunk_id, shard_index,
+//     capability_token, chunk_data) never carried a file_id field — a
+//     provider daemon could never have learned it. Rather than adding one
+//     to the wire format, the Council found file_id was never load-bearing
+//     in the first place: chunk_id is 256 bits of fresh,
+//     microservice-generated randomness minted once per assignment and
+//     never reused across files, so it already carries the exact binding
+//     file_id was meant to provide. file_id was removed from the signing
+//     input entirely, in all three minting call sites and here.
 //
-// verifyCapabilityToken below is written to the full, correct 4-field
-// formula so no reshaping is needed once both gaps close, but every call
-// site in this file passes the zero UUID for both fields until then. This
-// makes every real capability_token fail verification (0x03 NOT_ASSIGNED) —
-// a safe, fail-closed, and honestly-incomplete state, not a silent bypass.
-// The structural checks (length, expiry, chunk_id content-hash match) are
-// fully functional independent of this gap.
+// verifyCapabilityToken below now implements the full, correct 3-field
+// formula. The structural checks (length, expiry, chunk_id content-hash
+// match) were always independent of either gap.
 //
-// [REF: IC §4.1, IC §4 rule 5 framing, IC §11, ADR-021, build.md Session 13.2.1]
+// [REF: IC §4.1, IC §4 rule 5 framing, IC §11, ADR-021, build.md Session
+// 13.2.1, build.md Session 16.1.1]
 package main
 
 import (
@@ -178,20 +180,25 @@ type UploadHandler struct {
 
 	msPublicKey ed25519.PublicKey // microservice signing key; verifies capability_token
 
-	providerID         [16]byte           // GAP: always zero, see file header
 	providerSigningKey ed25519.PrivateKey // this daemon's own Ed25519 identity key
-	providerIDBytes    [16]byte           // provider_id_bytes embedded in the upload receipt signing input
+	// providerIDBytes: the microservice-assigned provider_id, used both as
+	// capability_token's provider_id field (IC §4.1's 4-field signing
+	// input) and as the upload-receipt signing input's provider_id_bytes
+	// (IC §4.1 step 6) — a single real value now serves both purposes.
+	// Previously these were two separate fields, one (providerID) always
+	// the Go zero-value because no caller ever set it (main.go had no real
+	// provider_id available at Session 13.2.1's scope — see this file's
+	// header). Merged now that Session 16.1.1's live verification closed
+	// that gap (cmd/provider/main.go's registerProviderWithMicroservice).
+	providerIDBytes [16]byte
 
 	status *providerStatusHolder
 }
 
 // NewUploadHandler constructs an UploadHandler. providerIDBytes is the
-// 16-byte provider identifier embedded in the upload-receipt signing input
-// (IC §4.1 step 6); it is intentionally a caller-supplied opaque value
-// (typically the low 16 bytes of a stable local identifier) since no
-// microservice-assigned UUID is available at this session's scope — see the
-// file header's provider_id gap note. This is independent of the
-// (currently-unusable) capability-token provider_id field.
+// microservice-assigned 16-byte provider_id — see the field's doc comment
+// above for why one value now serves both the capability-token and
+// upload-receipt signing inputs.
 func NewUploadHandler(
 	store storage.ChunkStore,
 	writeCh chan<- chunkWriteRequest,
@@ -334,7 +341,17 @@ func (h *UploadHandler) verifyCapabilityTokenFrame(chunkID [32]byte, token [uplo
 	var pub [32]byte
 	copy(pub[:], h.msPublicKey)
 
-	signingInput := capabilityTokenSigningInput(chunkID, h.providerID, [16]byte{}, expiryUnixMs)
+	// providerIDBytes is the real microservice-assigned provider_id
+	// (CAP-TOKEN-PROVIDER-ID-GAP closed — see this file's header and
+	// main.go's registration flow). file_id is no longer part of the
+	// signing input at all — Design Council verdict ("Capability Token:
+	// Drop file_id, Not Add It to the Wire Format", ADR-072): chunk_id is
+	// 256 bits of fresh, microservice-generated randomness minted once
+	// per assignment and never reused across files, so it already
+	// carries the exact binding file_id would have provided. This closes
+	// CAP-TOKEN-FILE-ID-GAP entirely — real (non-vetting) uploads now
+	// verify correctly, the same as vetting chunks always did.
+	signingInput := capabilityTokenSigningInput(chunkID, h.providerIDBytes, expiryUnixMs)
 	if !localcrypto.VerifyBytes(pub, signingInput, sig) {
 		return uploadStatusNotAssigned
 	}
@@ -343,23 +360,23 @@ func (h *UploadHandler) verifyCapabilityTokenFrame(chunkID [32]byte, token [uplo
 
 // capabilityTokenSigningInput reconstructs the IC §4.1 signing_input:
 //
-//	digest(domain_prefix || chunk_id(32) || provider_id(16) || file_id(16) || expiry_unix_ms(8))
+//	digest(domain_prefix || chunk_id(32) || provider_id(16) || expiry_unix_ms(8))
 //
 // (internal/crypto.SignBytes/VerifyBytes perform the pre-hash step
 // internally; the raw concatenation is what's passed here — see
 // internal/api/upload.go's generateCapabilityToken, which this mirrors.)
 //
-// See this file's header for why providerID/fileID are currently always
-// passed as the zero value by every caller in this file.
-func capabilityTokenSigningInput(chunkID [32]byte, providerID, fileID [16]byte, expiryUnixMs int64) []byte {
+// file_id is deliberately not a parameter — see this file's header
+// (CAP-TOKEN-FILE-ID-GAP) and ADR-072 for why it was dropped from the
+// signing input entirely rather than added to the wire format.
+func capabilityTokenSigningInput(chunkID [32]byte, providerID [16]byte, expiryUnixMs int64) []byte {
 	var expiryBytes [8]byte
 	binary.BigEndian.PutUint64(expiryBytes[:], uint64(expiryUnixMs))
 
-	input := make([]byte, 0, len(capabilityTokenDomainPrefix)+len(chunkID)+len(providerID)+len(fileID)+len(expiryBytes))
+	input := make([]byte, 0, len(capabilityTokenDomainPrefix)+len(chunkID)+len(providerID)+len(expiryBytes))
 	input = append(input, []byte(capabilityTokenDomainPrefix)...)
 	input = append(input, chunkID[:]...)
 	input = append(input, providerID[:]...)
-	input = append(input, fileID[:]...)
 	input = append(input, expiryBytes[:]...)
 	return input
 }

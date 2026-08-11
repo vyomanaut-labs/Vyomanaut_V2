@@ -72,12 +72,13 @@ func newTestChunkStore(t *testing.T) storage.ChunkStore {
 }
 
 // buildValidCapabilityToken mints a 72-byte token using the zero provider_id
-// / file_id this file's handler currently always verifies against (see
-// handler_upload.go's file header for why).
+// this file's test handlers are consistently constructed with (see each
+// NewUploadHandler call site in this file) — file_id is no longer part of
+// the signing input at all (ADR-072).
 func buildValidCapabilityToken(t *testing.T, msPriv ed25519.PrivateKey, chunkID [32]byte, expiry time.Time) [uploadCapabilityTokenSize]byte {
 	t.Helper()
 	expiryMs := expiry.UnixMilli()
-	signingInput := capabilityTokenSigningInput(chunkID, [16]byte{}, [16]byte{}, expiryMs)
+	signingInput := capabilityTokenSigningInput(chunkID, [16]byte{}, expiryMs)
 	sig := signWithKey(msPriv, signingInput)
 
 	var token [uploadCapabilityTokenSize]byte
