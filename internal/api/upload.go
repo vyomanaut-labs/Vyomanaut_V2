@@ -98,26 +98,35 @@ const (
 	uint64Size = 8
 )
 
-// generateCapabilityToken implements IC §4.1's exact byte layout:
+// generateCapabilityToken implements IC §4.1's byte layout:
 //
-//	signing_input = SHA-256(domain_prefix || chunk_id || provider_id || file_id || expiry_unix_ms)
+//	signing_input = SHA-256(domain_prefix || chunk_id || provider_id || expiry_unix_ms)
 //	capability_token = expiry_unix_ms (8B) || Ed25519_sign(microservice_signing_key, signing_input)
+//
+// file_id is deliberately NOT part of this signing input — Design Council
+// verdict ("Capability Token: Drop file_id, Not Add It to the Wire
+// Format", ADR-072): chunk_id is 256 bits of fresh, microservice-generated
+// randomness minted once per assignment and never reused across files, so
+// it already carries the exact binding file_id would have provided. IC
+// §4.1's UploadRequest wire format (chunk_id, shard_index,
+// capability_token, chunk_data) has no file_id field at all — a provider
+// daemon could never have verified it — so every real (non-vetting) upload
+// failed capability-token verification (0x03 NOT_ASSIGNED) until this fix.
 //
 // crypto.SignBytes already performs the SHA-256-then-Ed25519-sign
 // composition internally (IC §3.2's SIGNING_INPUT_RULE convention used
 // throughout this package), so the raw, pre-hash field concatenation is
 // passed directly — SignBytes hashing it is what produces IC §4.1's
 // signing_input, not a second, additional hash.
-func generateCapabilityToken(msSigningKey ed25519.PrivateKey, chunkID [32]byte, providerID, fileID uuid.UUID, issuedAt time.Time) [capabilityTokenByteLen]byte {
+func generateCapabilityToken(msSigningKey ed25519.PrivateKey, chunkID [32]byte, providerID uuid.UUID, issuedAt time.Time) [capabilityTokenByteLen]byte {
 	expiryUnixMs := issuedAt.Add(capabilityTokenLifetime).UnixMilli()
 	var expiryBytes [8]byte
 	binary.BigEndian.PutUint64(expiryBytes[:], uint64(expiryUnixMs))
 
-	input := make([]byte, 0, len(capabilityTokenDomainPrefix)+sha256Size+len(providerID)+len(fileID)+uint64Size)
+	input := make([]byte, 0, len(capabilityTokenDomainPrefix)+sha256Size+len(providerID)+uint64Size)
 	input = append(input, []byte(capabilityTokenDomainPrefix)...)
 	input = append(input, chunkID[:]...)
 	input = append(input, providerID[:]...)
-	input = append(input, fileID[:]...)
 	input = append(input, expiryBytes[:]...)
 
 	sig := localcrypto.SignBytes(msSigningKey, input)
@@ -212,7 +221,7 @@ func (h *UploadAssignHandler) HandleAssign(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if len(existing) > 0 {
-		h.respondWithFreshTokens(w, req.FileID, existing, monthlyCost)
+		h.respondWithFreshTokens(w, existing, monthlyCost)
 		return
 	}
 
@@ -348,7 +357,7 @@ func (h *UploadAssignHandler) assignSegment(ctx context.Context, fileID uuid.UUI
 		var multiaddrs []string
 		_ = json.Unmarshal(multiaddrsJSON, &multiaddrs)
 
-		token := generateCapabilityToken(h.signingKey, chunkID, providerID, fileID, now)
+		token := generateCapabilityToken(h.signingKey, chunkID, providerID, now)
 
 		shards = append(shards, ShardAssignmentBody{
 			ShardIndex:      shardIdx,
@@ -423,7 +432,7 @@ func (h *UploadAssignHandler) loadExistingAssignments(ctx context.Context, fileI
 // respondWithFreshTokens rebuilds the UploadAssignResponse from persisted
 // rows, regenerating every capability_token with a fresh 1-hour expiry
 // (IC §4's ERRATA) without touching the provider set itself.
-func (h *UploadAssignHandler) respondWithFreshTokens(w http.ResponseWriter, fileID uuid.UUID, rows []existingShardRow, monthlyCost int64) {
+func (h *UploadAssignHandler) respondWithFreshTokens(w http.ResponseWriter, rows []existingShardRow, monthlyCost int64) {
 	now := time.Now()
 	segmentsByIndex := make(map[int]*segmentAssignmentBody)
 	var order []int
@@ -435,7 +444,7 @@ func (h *UploadAssignHandler) respondWithFreshTokens(w http.ResponseWriter, file
 			segmentsByIndex[row.segmentIndex] = seg
 			order = append(order, row.segmentIndex)
 		}
-		token := generateCapabilityToken(h.signingKey, row.chunkID, row.providerID, fileID, now)
+		token := generateCapabilityToken(h.signingKey, row.chunkID, row.providerID, now)
 		seg.Providers = append(seg.Providers, ShardAssignmentBody{
 			ShardIndex:      row.shardIndex,
 			ProviderID:      row.providerID,
