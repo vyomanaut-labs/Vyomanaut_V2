@@ -56,6 +56,45 @@ jobs:
           export CGO_LDFLAGS="-L${ROCKSDB_PREFIX}/lib -lrocksdb -lstdc++ -lz -lbz2 -lsnappy -llz4 -lzstd"
           go build ./internal/storage/... ./internal/crypto/... \
             || (echo "PENDING: first native-arm64 run — CGO flags above may need tuning, see M5 review §4" && exit 0)
+
+  # ─────────────────────────────────────────────────────────────
+  # storage-windows-coverage: native windows-latest run for
+  # internal/storage's BadgerDB-backed test suite (ADR-046, Session 16.0.1).
+  #
+  # ADR-046 §4: GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build already
+  # proves the Windows backend compiles from the existing Linux ci container
+  # with no new toolchain (BadgerDB has no CGo dependency) — but that only
+  # proves compilation, not correctness. This job is the "actually run it"
+  # half: a native windows-latest runner (mirroring the existing native
+  # macos-15 storage-platform-coverage job above) executing
+  # internal/storage's real test suite, including the badgerStore round-trip
+  # and content-hash-verification tests (engine_badger_test.go).
+  #
+  # continue-on-error until a first real run confirms there's nothing
+  # Windows-path-specific (file locking, path separators) that the
+  # cross-compile check alone can't catch — same "PENDING" pattern already
+  # used for check-06/12/13/16 while new.
+  #
+  # REF: ADR-046 §4, build.md Session 16.0.1
+  # ─────────────────────────────────────────────────────────────
+  storage-windows-coverage:
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+
+      - name: check-19 — native windows-latest test run (internal/storage)
+        shell: bash
+        run: |
+          go test -v ./internal/storage/... \
+            || (echo "PENDING: first native windows-latest run — see build.md Session 16.0.1" && exit 0)
+
   ensure-image:
     runs-on: ubuntu-latest
     permissions:

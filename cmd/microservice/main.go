@@ -38,6 +38,7 @@ import (
 	"github.com/masamasaowl/Vyomanaut_V2/internal/p2p"
 	"github.com/masamasaowl/Vyomanaut_V2/internal/payment"
 	"github.com/masamasaowl/Vyomanaut_V2/internal/repair"
+	"github.com/masamasaowl/Vyomanaut_V2/internal/vettingchunk"
 )
 
 // gossipMinPeerAcks is this session's own step 6 requirement: "BLOCK until
@@ -352,6 +353,17 @@ func runMicroservice(ctx context.Context, cfg startupConfig) (*app, error) {
 
 	// ── Step 18 ───────────────────────────────────────────────────────────
 	go runBackgroundThrottleLoop(ctx, db, foregroundReadP99)
+
+	// ── Step 19 (added post-hoc — closes a gap found via live verification,
+	// not part of the original 18-step sequence; appended rather than
+	// renumbering Steps 1-18) ───────────────────────────────────────────
+	go runVettingChunkGenerationLoop(ctx, db, vettingchunk.NewGenerator(db, p2pHost, jwtPriv))
+
+	// ── Step 20 (added post-hoc, same session as Step 19) ────────────────
+	go runClusterSecretRefreshLoop(ctx, cache)
+
+	// ── Step 21 (added post-hoc, same session as Steps 19-20) ────────────
+	go runVettingGCLoop(ctx, db, vettingchunk.NewGCDelivery(db, p2pHost, jwtPriv))
 
 	return a, nil
 }
