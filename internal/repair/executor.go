@@ -247,12 +247,7 @@ func ExecuteRepairJob(
 			return fmt.Errorf("repair.ExecuteRepairJob: pre-register: %w", err)
 		}
 
-		fileID, err := fileIDForSegment(ctx, db, job.SegmentID)
-		if err != nil {
-			_ = MarkJobComplete(ctx, db, job.JobID, false)
-			return fmt.Errorf("repair.ExecuteRepairJob: look up file_id: %w", err)
-		}
-		token := mintCapabilityToken(signingKey, job.ChunkID, candidateID, fileID, capabilityTokenTTL)
+		token := mintCapabilityToken(signingKey, job.ChunkID, candidateID, capabilityTokenTTL)
 
 		// See SurvivingHolder's doc comment: provider_id -> peer-ID resolution is
 		// out of this package's scope; Milestone 12's wiring supplies the real
@@ -476,34 +471,28 @@ VALUES ($1, FALSE, $2, $3, $4, 'REPAIRING')`
 	return nil
 }
 
-// fileIDForSegment looks up segments.file_id, needed for the
-// capability_token signing input (IC §4.1).
-func fileIDForSegment(ctx context.Context, db *sql.DB, segmentID uuid.UUID) (uuid.UUID, error) {
-	var fileID uuid.UUID
-	if err := db.QueryRowContext(ctx, `SELECT file_id FROM segments WHERE segment_id = $1`, segmentID).Scan(&fileID); err != nil {
-		return uuid.UUID{}, fmt.Errorf("look up file_id for segment %s: %w", segmentID, err)
-	}
-	return fileID, nil
-}
-
 // mintCapabilityToken builds the 72-byte capability_token (IC §4.1):
 //
 //	signing_input = SHA-256(
 //	    "vyomanaut-chunk-upload-cap-v1"
 //	    || chunk_id          (32 bytes)
 //	    || provider_id       (16 bytes, UUID bytes, big-endian)
-//	    || file_id           (16 bytes, UUID bytes, big-endian)
 //	    || expiry_unix_ms    (8 bytes, int64 big-endian)
 //	)
 //	capability_token = expiry_unix_ms (8 B) || Ed25519_sign(microservice_signing_key, signing_input)
-func mintCapabilityToken(signingKey ed25519.PrivateKey, chunkID [32]byte, providerID, fileID uuid.UUID, ttl time.Duration) [72]byte {
+//
+// file_id is deliberately NOT part of this signing input — Design Council
+// verdict ("Capability Token: Drop file_id, Not Add It to the Wire
+// Format", ADR-072): chunk_id is 256 bits of fresh, microservice-generated
+// randomness minted once per assignment and never reused across files, so
+// it already carries the exact binding file_id would have provided.
+func mintCapabilityToken(signingKey ed25519.PrivateKey, chunkID [32]byte, providerID uuid.UUID, ttl time.Duration) [72]byte {
 	expiryUnixMs := time.Now().Add(ttl).UnixMilli()
 
 	h := sha256.New()
 	h.Write([]byte("vyomanaut-chunk-upload-cap-v1"))
 	h.Write(chunkID[:])
 	h.Write(providerID[:]) // uuid.UUID is [16]byte in its natural (big-endian/network) byte order
-	h.Write(fileID[:])
 	var expiryBuf [8]byte
 	binary.BigEndian.PutUint64(expiryBuf[:], uint64(expiryUnixMs))
 	h.Write(expiryBuf[:])
