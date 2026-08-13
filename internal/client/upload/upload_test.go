@@ -39,6 +39,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -71,30 +72,73 @@ func randCapabilityTokenHex(t *testing.T) string {
 	return fmt.Sprintf("%x", token)
 }
 
-// buildAssignResponse fabricates a valid UploadAssignResponse for
-// numSegments segments against profile's shard counts, with distinct
-// provider IDs and multiaddrs (each carrying a synthetic /p2p/<PeerID>
-// suffix per the OAS's own documented convention).
-func buildAssignResponse(t *testing.T, numSegments int, profile config.NetworkProfile) uploadAssignResponse {
+// fakeShardFixture is one shard's stable, "persisted" identity within a
+// testServer — everything real internal/api/upload.go's assignSegment
+// would have written to chunk_assignments once, and never changes on a
+// later call for the same segment. capability_token is deliberately NOT
+// stored here — see buildAssignResponseFromAccumulated, which regenerates
+// it fresh on every call, matching the real server's respondWithFreshTokens
+// (ADR-073: token minting is the one thing idempotency never reuses).
+type fakeShardFixture struct {
+	shardIndex int
+	providerID uuid.UUID
+	multiaddrs []string
+	asn        string
+	chunkID    string // the client's real, submitted value — echoed verbatim
+}
+
+type fakeSegmentFixture struct {
+	segmentID uuid.UUID
+	shards    []fakeShardFixture
+}
+
+// buildFakeSegmentFixture fabricates one segment's stable identity from
+// the client's actually-submitted chunk_ids (ADR-073) — the real server's
+// assignSegment persists exactly what the client sent, never inventing a
+// value of its own, so the fixture must not either.
+func buildFakeSegmentFixture(seg segmentChunkIDsRequest) fakeSegmentFixture {
+	shards := make([]fakeShardFixture, len(seg.ChunkIDs))
+	for j, chunkIDHex := range seg.ChunkIDs {
+		peerID := fmt.Sprintf("12D3KooWFake%dSeg%dShard%d", j, seg.SegmentIndex, j)
+		shards[j] = fakeShardFixture{
+			shardIndex: j,
+			providerID: uuid.New(),
+			multiaddrs: []string{fmt.Sprintf("/ip4/127.0.0.1/tcp/4001/p2p/%s", peerID)},
+			asn:        "AS1",
+			chunkID:    chunkIDHex,
+		}
+	}
+	return fakeSegmentFixture{segmentID: uuid.New(), shards: shards}
+}
+
+// buildAssignResponseFromAccumulated builds a full UploadAssignResponse
+// from every segment fixture accumulated so far (testServer's handler),
+// regenerating a fresh capability_token per shard on every call — matching
+// the real server's respondWithFreshTokens exactly: identity (chunk_id,
+// provider, segment_id) is stable once assigned; the token never is.
+func buildAssignResponseFromAccumulated(t *testing.T, accumulated map[int]fakeSegmentFixture) uploadAssignResponse {
 	t.Helper()
-	assignments := make([]segmentAssignment, numSegments)
-	for i := 0; i < numSegments; i++ {
-		providers := make([]shardAssignment, profile.TotalShards)
-		for j := 0; j < profile.TotalShards; j++ {
-			peerID := fmt.Sprintf("12D3KooWFake%dSeg%dShard%d", j, i, j)
-			providers[j] = shardAssignment{
-				ShardIndex:      j,
-				ProviderID:      uuid.New(),
-				Multiaddrs:      []string{fmt.Sprintf("/ip4/127.0.0.1/tcp/4001/p2p/%s", peerID)},
-				ASN:             "AS1",
+	segIndices := make([]int, 0, len(accumulated))
+	for idx := range accumulated {
+		segIndices = append(segIndices, idx)
+	}
+	sort.Ints(segIndices)
+
+	assignments := make([]segmentAssignment, 0, len(segIndices))
+	for _, idx := range segIndices {
+		fixture := accumulated[idx]
+		providers := make([]shardAssignment, len(fixture.shards))
+		for i, sf := range fixture.shards {
+			providers[i] = shardAssignment{
+				ShardIndex:      sf.shardIndex,
+				ProviderID:      sf.providerID,
+				Multiaddrs:      sf.multiaddrs,
+				ASN:             sf.asn,
 				CapabilityToken: randCapabilityTokenHex(t),
+				ChunkID:         sf.chunkID,
 			}
 		}
-		assignments[i] = segmentAssignment{
-			SegmentIndex: i,
-			SegmentID:    uuid.New(),
-			Providers:    providers,
-		}
+		assignments = append(assignments, segmentAssignment{SegmentIndex: idx, SegmentID: fixture.segmentID, Providers: providers})
 	}
 	return uploadAssignResponse{Assignments: assignments, MonthlyCostPaise: 1000, RequiredEscrowPaise: 1000}
 }
@@ -215,6 +259,17 @@ func (s *fakeUploadCaptureStream) SetWriteDeadline(time.Time) error { return nil
 
 // testServer wires /api/v1/upload/assign and /api/v1/file/register against
 // in-memory captures, using profile's shard counts for every assignment.
+//
+// [Updated — ADR-073] /api/v1/upload/assign now mirrors the real server's
+// per-segment idempotency: a segment named in a call's Segments is
+// fabricated (buildFakeSegmentFixture) only the first time it's seen and
+// accumulated in accumulated; every response — first call or Nth — is
+// built fresh from everything accumulated so far
+// (buildAssignResponseFromAccumulated), exactly like the real
+// respondWithFreshTokens. numSegments/profile are still stored but are no
+// longer used to fabricate a request-independent response; they remain
+// for tests that want them (none currently do, kept for signature
+// stability against existing call sites).
 type testServer struct {
 	*httptest.Server
 	mu             sync.Mutex
@@ -224,11 +279,12 @@ type testServer struct {
 	registerCalled bool
 	numSegments    int
 	profile        config.NetworkProfile
+	accumulated    map[int]fakeSegmentFixture
 }
 
 func newTestServer(t *testing.T, profile config.NetworkProfile, numSegments int) *testServer {
 	t.Helper()
-	ts := &testServer{numSegments: numSegments, profile: profile}
+	ts := &testServer{numSegments: numSegments, profile: profile, accumulated: make(map[int]fakeSegmentFixture)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/upload/assign", func(w http.ResponseWriter, r *http.Request) {
 		var req uploadAssignRequest
@@ -236,8 +292,14 @@ func newTestServer(t *testing.T, profile config.NetworkProfile, numSegments int)
 		ts.mu.Lock()
 		ts.assignCalls++
 		ts.lastAssignReq = req
+		for _, seg := range req.Segments {
+			if _, exists := ts.accumulated[seg.SegmentIndex]; exists {
+				continue // already "persisted" — the real server never re-derives an existing segment
+			}
+			ts.accumulated[seg.SegmentIndex] = buildFakeSegmentFixture(seg)
+		}
+		resp := buildAssignResponseFromAccumulated(t, ts.accumulated)
 		ts.mu.Unlock()
-		resp := buildAssignResponse(t, ts.numSegments, ts.profile)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(resp)
@@ -358,6 +420,65 @@ func TestUploadReassignsIdempotentlyOnCapabilityExpired(t *testing.T) {
 	if assignCalls != 2 {
 		t.Errorf("assign called %d times, want exactly 2 (initial + one idempotent re-assignment after CAPABILITY_EXPIRED)", assignCalls)
 	}
+}
+
+// TestUploadFileMultiSegmentAssignsIncrementally is the direct regression
+// test for F-070-13/ADR-073: a real, multi-segment upload — the exact
+// shape (2 segments) live verification originally exercised when it found
+// every real shard's capability-token verification failing. Confirms every
+// shard across both segments is transmitted with a non-zero
+// capability_token (the fake transfer host's Write only succeeds past
+// framing; verifyAssignedChunkIDsMatch, exercised internally by UploadFile,
+// is what actually proves chunk_id agreement — this test's job is to
+// confirm the whole path completes for >1 segment, and that assignment
+// happened once per segment rather than once for the whole file).
+func TestUploadFileMultiSegmentAssignsIncrementally(t *testing.T) {
+	const numSegments = 2
+	ts := newTestServer(t, config.DemoProfile, numSegments)
+	defer ts.Close()
+	host := newFakeTransferHost()
+	o := newTestOrchestrator(t, ts.URL, host)
+
+	// Large enough to span two segments at DemoProfile's small shard size.
+	plaintext := make([]byte, plaintextSegmentSize(config.DemoProfile)+1024)
+	_, _ = cryptorand.Read(plaintext)
+	var masterSecret [32]byte
+	_, _ = cryptorand.Read(masterSecret[:])
+	ownerID := uuid.New()
+
+	fileID, err := o.UploadFile(context.Background(), masterSecret, ownerID, plaintext)
+	if err != nil {
+		t.Fatalf("UploadFile: %v", err)
+	}
+	if fileID == uuid.Nil {
+		t.Fatal("UploadFile returned a nil fileID")
+	}
+
+	wantShards := numSegments * config.DemoProfile.TotalShards
+	captured := host.capturedRequests()
+	if len(captured) != wantShards {
+		t.Fatalf("captured %d UploadRequests, want %d (%d segments × %d shards) — a segment's shards were never transmitted",
+			len(captured), wantShards, numSegments, config.DemoProfile.TotalShards)
+	}
+	for _, c := range captured {
+		var zero [uploadCapabilityTokenSize]byte
+		if c.token == zero {
+			t.Errorf("shard %d: capability_token is all-zero", c.shardIndex)
+		}
+	}
+
+	ts.mu.Lock()
+	assignCalls := ts.assignCalls
+	ts.mu.Unlock()
+	if assignCalls != numSegments {
+		t.Errorf("assign called %d times, want exactly %d (one per segment, encoded-then-assigned incrementally — ADR-073)", assignCalls, numSegments)
+	}
+
+	ts.mu.Lock()
+	if len(ts.accumulated) != numSegments {
+		t.Errorf("server accumulated %d segments, want %d", len(ts.accumulated), numSegments)
+	}
+	ts.mu.Unlock()
 }
 
 func TestUploadMapsHTTP409ToErrInsufficientEscrow(t *testing.T) {
