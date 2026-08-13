@@ -137,6 +137,24 @@ func decodeUploadAssignResponse(t *testing.T, body []byte) uploadAssignResponseB
 	return resp
 }
 
+// fakeSegmentChunkIDs builds one segment's worth of client-submitted,
+// content-hash-shaped chunk_ids for a HandleAssign request (ADR-073) — one
+// random 32-byte value per shard, matching what internal/client/upload's
+// orchestrator would compute via sha256.Sum256(shard) in real use. Tests
+// in this file don't need the values to actually be real content hashes
+// of anything (HandleAssign only validates shape: length and hex
+// encoding), so randChunkID's existing helper (provider_test.go) is reused
+// directly rather than duplicated.
+func fakeSegmentChunkIDs(t *testing.T, segIdx, totalShards int) segmentChunkIDsRequestBody {
+	t.Helper()
+	ids := make([]string, totalShards)
+	for i := range ids {
+		id := randChunkID(t)
+		ids[i] = fmt.Sprintf("%x", id)
+	}
+	return segmentChunkIDsRequestBody{SegmentIndex: segIdx, ChunkIDs: ids}
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Session 11.7.1 — Upload Assign
 // ═══════════════════════════════════════════════════════════════════════
@@ -150,7 +168,10 @@ func TestUploadAssignRejectsWhenNetworkNotReady(t *testing.T) {
 	_, msPriv, _ := ed25519.GenerateKey(nil)
 	h := NewUploadAssignHandler(db, config.DemoProfile, msPriv, evaluator)
 
-	reqBody := uploadAssignRequestBody{FileID: uuid.New(), NumSegments: 1, OriginalSizeBytes: 1024}
+	reqBody := uploadAssignRequestBody{
+		FileID: uuid.New(), NumSegments: 1, OriginalSizeBytes: 1024,
+		Segments: []segmentChunkIDsRequestBody{fakeSegmentChunkIDs(t, 0, config.DemoProfile.TotalShards)},
+	}
 	body, _ := json.Marshal(reqBody)
 	r := withClaims(httptest.NewRequest(http.MethodPost, "/api/v1/upload/assign", bytes.NewReader(body)),
 		VerifiedClaims{Subject: ownerID, Role: "owner"})
@@ -181,7 +202,10 @@ func TestUploadAssignRejectsInsufficientEscrow(t *testing.T) {
 	_, msPriv, _ := ed25519.GenerateKey(nil)
 	h := NewUploadAssignHandler(db, config.DemoProfile, msPriv, evaluator)
 
-	reqBody := uploadAssignRequestBody{FileID: uuid.New(), NumSegments: 1, OriginalSizeBytes: 10 * 1024 * 1024 * 1024} // 10 GB
+	reqBody := uploadAssignRequestBody{
+		FileID: uuid.New(), NumSegments: 1, OriginalSizeBytes: 10 * 1024 * 1024 * 1024, // 10 GB
+		Segments: []segmentChunkIDsRequestBody{fakeSegmentChunkIDs(t, 0, config.DemoProfile.TotalShards)},
+	}
 	body, _ := json.Marshal(reqBody)
 	r := withClaims(httptest.NewRequest(http.MethodPost, "/api/v1/upload/assign", bytes.NewReader(body)),
 		VerifiedClaims{Subject: ownerID, Role: "owner"})
@@ -202,7 +226,10 @@ func TestUploadAssignIdempotentOnFileID(t *testing.T) {
 	_, msPriv, _ := ed25519.GenerateKey(nil)
 	h := NewUploadAssignHandler(db, config.DemoProfile, msPriv, evaluator)
 	fileID := uuid.New()
-	reqBody := uploadAssignRequestBody{FileID: fileID, NumSegments: 1, OriginalSizeBytes: 1024}
+	reqBody := uploadAssignRequestBody{
+		FileID: fileID, NumSegments: 1, OriginalSizeBytes: 1024,
+		Segments: []segmentChunkIDsRequestBody{fakeSegmentChunkIDs(t, 0, config.DemoProfile.TotalShards)},
+	}
 	body, _ := json.Marshal(reqBody)
 
 	r1 := withClaims(httptest.NewRequest(http.MethodPost, "/api/v1/upload/assign", bytes.NewReader(body)),
@@ -251,7 +278,10 @@ func TestUploadAssignShardIndexRangeDemo(t *testing.T) {
 
 	_, msPriv, _ := ed25519.GenerateKey(nil)
 	h := NewUploadAssignHandler(db, config.DemoProfile, msPriv, evaluator)
-	reqBody := uploadAssignRequestBody{FileID: uuid.New(), NumSegments: 1, OriginalSizeBytes: 1024}
+	reqBody := uploadAssignRequestBody{
+		FileID: uuid.New(), NumSegments: 1, OriginalSizeBytes: 1024,
+		Segments: []segmentChunkIDsRequestBody{fakeSegmentChunkIDs(t, 0, config.DemoProfile.TotalShards)},
+	}
 	body, _ := json.Marshal(reqBody)
 	r := withClaims(httptest.NewRequest(http.MethodPost, "/api/v1/upload/assign", bytes.NewReader(body)),
 		VerifiedClaims{Subject: ownerID, Role: "owner"})
@@ -279,6 +309,245 @@ func TestUploadAssignShardIndexRangeDemo(t *testing.T) {
 	if len(seen) != config.DemoProfile.TotalShards {
 		t.Fatalf("distinct shard_index values = %d, want %d (0..DataShards-1 data, DataShards..TotalShards-1 parity, profile.DataShards=%d)",
 			len(seen), config.DemoProfile.TotalShards, config.DemoProfile.DataShards)
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// ADR-073 — client-submitted, per-segment content-hash chunk_id
+// ═══════════════════════════════════════════════════════════════════════
+
+// TestUploadAssignPersistsSubmittedChunkIDVerbatim is this decision's core
+// guarantee: the chunk_id returned (and, transitively, the one
+// capability_token is bound to via respondWithFreshTokens) is exactly what
+// the client submitted — never a server-generated value. Directly guards
+// against a regression back to the rand.Read behavior ADR-073 replaced.
+func TestUploadAssignPersistsSubmittedChunkIDVerbatim(t *testing.T) {
+	db := openTestDB(t)
+	seedReadyDemoProviderPool(t, db)
+	ownerID := insertTestOwnerWithEscrow(t, db, 100_000_00)
+	evaluator := newReadyEvaluator(t, db, config.DemoProfile)
+
+	_, msPriv, _ := ed25519.GenerateKey(nil)
+	h := NewUploadAssignHandler(db, config.DemoProfile, msPriv, evaluator)
+
+	submitted := fakeSegmentChunkIDs(t, 0, config.DemoProfile.TotalShards)
+	reqBody := uploadAssignRequestBody{
+		FileID: uuid.New(), NumSegments: 1, OriginalSizeBytes: 1024,
+		Segments: []segmentChunkIDsRequestBody{submitted},
+	}
+	body, _ := json.Marshal(reqBody)
+	r := withClaims(httptest.NewRequest(http.MethodPost, "/api/v1/upload/assign", bytes.NewReader(body)),
+		VerifiedClaims{Subject: ownerID, Role: "owner"})
+	w := httptest.NewRecorder()
+
+	h.HandleAssign(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	resp := decodeUploadAssignResponse(t, w.Body.Bytes())
+	if len(resp.Assignments) != 1 {
+		t.Fatalf("segments = %d, want 1", len(resp.Assignments))
+	}
+	gotByShard := make(map[int]string, len(resp.Assignments[0].Providers))
+	for _, s := range resp.Assignments[0].Providers {
+		gotByShard[s.ShardIndex] = s.ChunkID
+	}
+	for shardIdx, wantChunkID := range submitted.ChunkIDs {
+		got, ok := gotByShard[shardIdx]
+		if !ok {
+			t.Fatalf("no assignment returned for shard %d", shardIdx)
+		}
+		if got != wantChunkID {
+			t.Fatalf("shard %d: chunk_id = %s, want %s (submitted verbatim, not server-generated)", shardIdx, got, wantChunkID)
+		}
+	}
+}
+
+// TestUploadAssignAcceptsSegmentsIncrementally exercises ADR-073's actual
+// shape change: a 2-segment file assigned via two separate calls, segment
+// 0 first (as internal/client/upload's orchestrator now does — see that
+// package's own tests), segment 1 once the client has finished encoding
+// it. The second call must not re-run readiness/escrow (asserted
+// indirectly: no provider pool re-seed, no escrow re-deposit between
+// calls, yet the second call still succeeds) and the final response must
+// contain both segments.
+func TestUploadAssignAcceptsSegmentsIncrementally(t *testing.T) {
+	db := openTestDB(t)
+	seedReadyDemoProviderPool(t, db)
+	ownerID := insertTestOwnerWithEscrow(t, db, 100_000_00)
+	evaluator := newReadyEvaluator(t, db, config.DemoProfile)
+
+	_, msPriv, _ := ed25519.GenerateKey(nil)
+	h := NewUploadAssignHandler(db, config.DemoProfile, msPriv, evaluator)
+	fileID := uuid.New()
+
+	seg0 := fakeSegmentChunkIDs(t, 0, config.DemoProfile.TotalShards)
+	req1 := uploadAssignRequestBody{FileID: fileID, NumSegments: 2, OriginalSizeBytes: 2048, Segments: []segmentChunkIDsRequestBody{seg0}}
+	body1, _ := json.Marshal(req1)
+	r1 := withClaims(httptest.NewRequest(http.MethodPost, "/api/v1/upload/assign", bytes.NewReader(body1)),
+		VerifiedClaims{Subject: ownerID, Role: "owner"})
+	w1 := httptest.NewRecorder()
+	h.HandleAssign(w1, r1)
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first call (segment 0 only): status = %d, body = %s", w1.Code, w1.Body.String())
+	}
+	first := decodeUploadAssignResponse(t, w1.Body.Bytes())
+	if len(first.Assignments) != 1 {
+		t.Fatalf("first call: segments = %d, want 1 (only segment 0 submitted so far)", len(first.Assignments))
+	}
+
+	seg1 := fakeSegmentChunkIDs(t, 1, config.DemoProfile.TotalShards)
+	req2 := uploadAssignRequestBody{FileID: fileID, NumSegments: 2, OriginalSizeBytes: 2048, Segments: []segmentChunkIDsRequestBody{seg1}}
+	body2, _ := json.Marshal(req2)
+	r2 := withClaims(httptest.NewRequest(http.MethodPost, "/api/v1/upload/assign", bytes.NewReader(body2)),
+		VerifiedClaims{Subject: ownerID, Role: "owner"})
+	w2 := httptest.NewRecorder()
+	h.HandleAssign(w2, r2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("second call (segment 1 only): status = %d, body = %s", w2.Code, w2.Body.String())
+	}
+	second := decodeUploadAssignResponse(t, w2.Body.Bytes())
+	if len(second.Assignments) != 2 {
+		t.Fatalf("second call: segments = %d, want 2 (segment 0 persisted + segment 1 newly assigned)", len(second.Assignments))
+	}
+
+	bySegIdx := make(map[int]segmentAssignmentBody, len(second.Assignments))
+	for _, seg := range second.Assignments {
+		bySegIdx[seg.SegmentIndex] = seg
+	}
+	if _, ok := bySegIdx[0]; !ok {
+		t.Fatalf("segment 0 missing from second call's response")
+	}
+	if _, ok := bySegIdx[1]; !ok {
+		t.Fatalf("segment 1 missing from second call's response")
+	}
+	// Segment 0's chunk_ids must be unchanged from the first call — the
+	// second call's ASN pool exhaustion (or any other segment-0-only
+	// state) must never re-derive segment 0.
+	seg0Shards := bySegIdx[0].Providers
+	firstSeg0Shards := first.Assignments[0].Providers
+	if len(seg0Shards) != len(firstSeg0Shards) {
+		t.Fatalf("segment 0 shard count changed: %d vs %d", len(firstSeg0Shards), len(seg0Shards))
+	}
+	firstByShard := make(map[int]string, len(firstSeg0Shards))
+	for _, s := range firstSeg0Shards {
+		firstByShard[s.ShardIndex] = s.ChunkID
+	}
+	for _, s := range seg0Shards {
+		if firstByShard[s.ShardIndex] != s.ChunkID {
+			t.Fatalf("segment 0 shard %d chunk_id changed across calls: %s vs %s", s.ShardIndex, firstByShard[s.ShardIndex], s.ChunkID)
+		}
+	}
+}
+
+// TestUploadAssignRejectsEmptySegments confirms the request-shape
+// validation ADR-073 introduces: a call naming zero segments is a 400,
+// never silently accepted or treated as a readiness/escrow-only probe.
+func TestUploadAssignRejectsEmptySegments(t *testing.T) {
+	db := openTestDB(t)
+	seedReadyDemoProviderPool(t, db)
+	ownerID := insertTestOwnerWithEscrow(t, db, 100_000_00)
+	evaluator := newReadyEvaluator(t, db, config.DemoProfile)
+
+	_, msPriv, _ := ed25519.GenerateKey(nil)
+	h := NewUploadAssignHandler(db, config.DemoProfile, msPriv, evaluator)
+
+	reqBody := uploadAssignRequestBody{FileID: uuid.New(), NumSegments: 1, OriginalSizeBytes: 1024}
+	body, _ := json.Marshal(reqBody)
+	r := withClaims(httptest.NewRequest(http.MethodPost, "/api/v1/upload/assign", bytes.NewReader(body)),
+		VerifiedClaims{Subject: ownerID, Role: "owner"})
+	w := httptest.NewRecorder()
+
+	h.HandleAssign(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body = %s", w.Code, w.Body.String())
+	}
+}
+
+// TestUploadAssignRejectsWrongChunkIDCount confirms a segment whose
+// chunk_ids length doesn't equal profile.TotalShards is rejected, not
+// silently truncated or padded.
+func TestUploadAssignRejectsWrongChunkIDCount(t *testing.T) {
+	db := openTestDB(t)
+	seedReadyDemoProviderPool(t, db)
+	ownerID := insertTestOwnerWithEscrow(t, db, 100_000_00)
+	evaluator := newReadyEvaluator(t, db, config.DemoProfile)
+
+	_, msPriv, _ := ed25519.GenerateKey(nil)
+	h := NewUploadAssignHandler(db, config.DemoProfile, msPriv, evaluator)
+
+	short := fakeSegmentChunkIDs(t, 0, config.DemoProfile.TotalShards-1) // one too few
+	reqBody := uploadAssignRequestBody{
+		FileID: uuid.New(), NumSegments: 1, OriginalSizeBytes: 1024,
+		Segments: []segmentChunkIDsRequestBody{short},
+	}
+	body, _ := json.Marshal(reqBody)
+	r := withClaims(httptest.NewRequest(http.MethodPost, "/api/v1/upload/assign", bytes.NewReader(body)),
+		VerifiedClaims{Subject: ownerID, Role: "owner"})
+	w := httptest.NewRecorder()
+
+	h.HandleAssign(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body = %s", w.Code, w.Body.String())
+	}
+}
+
+// TestUploadAssignRejectsMalformedChunkIDHex confirms a chunk_id that
+// doesn't decode to exactly 32 bytes of hex is rejected before any DB
+// write, rather than persisted as garbage or silently truncated.
+func TestUploadAssignRejectsMalformedChunkIDHex(t *testing.T) {
+	db := openTestDB(t)
+	seedReadyDemoProviderPool(t, db)
+	ownerID := insertTestOwnerWithEscrow(t, db, 100_000_00)
+	evaluator := newReadyEvaluator(t, db, config.DemoProfile)
+
+	_, msPriv, _ := ed25519.GenerateKey(nil)
+	h := NewUploadAssignHandler(db, config.DemoProfile, msPriv, evaluator)
+
+	seg := fakeSegmentChunkIDs(t, 0, config.DemoProfile.TotalShards)
+	seg.ChunkIDs[0] = "not-hex-and-also-not-32-bytes"
+	reqBody := uploadAssignRequestBody{
+		FileID: uuid.New(), NumSegments: 1, OriginalSizeBytes: 1024,
+		Segments: []segmentChunkIDsRequestBody{seg},
+	}
+	body, _ := json.Marshal(reqBody)
+	r := withClaims(httptest.NewRequest(http.MethodPost, "/api/v1/upload/assign", bytes.NewReader(body)),
+		VerifiedClaims{Subject: ownerID, Role: "owner"})
+	w := httptest.NewRecorder()
+
+	h.HandleAssign(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body = %s", w.Code, w.Body.String())
+	}
+}
+
+// TestUploadAssignRejectsDuplicateSegmentIndex confirms two entries naming
+// the same segment_index within one request is a 400, not a silent
+// last-write-wins or an attempted (and FK/unique-constraint-failing)
+// double INSERT.
+func TestUploadAssignRejectsDuplicateSegmentIndex(t *testing.T) {
+	db := openTestDB(t)
+	seedReadyDemoProviderPool(t, db)
+	ownerID := insertTestOwnerWithEscrow(t, db, 100_000_00)
+	evaluator := newReadyEvaluator(t, db, config.DemoProfile)
+
+	_, msPriv, _ := ed25519.GenerateKey(nil)
+	h := NewUploadAssignHandler(db, config.DemoProfile, msPriv, evaluator)
+
+	seg0a := fakeSegmentChunkIDs(t, 0, config.DemoProfile.TotalShards)
+	seg0b := fakeSegmentChunkIDs(t, 0, config.DemoProfile.TotalShards)
+	reqBody := uploadAssignRequestBody{
+		FileID: uuid.New(), NumSegments: 1, OriginalSizeBytes: 1024,
+		Segments: []segmentChunkIDsRequestBody{seg0a, seg0b},
+	}
+	body, _ := json.Marshal(reqBody)
+	r := withClaims(httptest.NewRequest(http.MethodPost, "/api/v1/upload/assign", bytes.NewReader(body)),
+		VerifiedClaims{Subject: ownerID, Role: "owner"})
+	w := httptest.NewRecorder()
+
+	h.HandleAssign(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body = %s", w.Code, w.Body.String())
 	}
 }
 
