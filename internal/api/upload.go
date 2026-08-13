@@ -6,22 +6,29 @@
 // ShardAssignment schema has no chunk_id property, yet IC §4.1's capability
 // token signing_input is bound to a specific chunk_id
 // (SHA-256("vyomanaut-chunk-upload-cap-v1" || chunk_id || provider_id ||
-// file_id || expiry_unix_ms)), and IC §4.1 step 5 says the provider
-// "re-derives signing_input using the chunk_id received in the frame
-// header" — i.e. the client must send the SAME chunk_id the token was
-// signed over, or every upload fails signature verification. Real content
-// hashing can't produce this value in advance: ADR-022's AONT step 2 draws
-// a fresh random key per segment, so the eventual shard bytes (and their
-// true SHA-256) are not knowable at assignment time, before the client has
-// even performed the AONT-RS transform. The client has no source for this
-// value except this response. Resolved here as: chunk_id is a
-// microservice-assigned 32-byte identifier for the (segment, shard_index)
-// slot, generated once at first assignment and persisted in
-// chunk_assignments.chunk_id (already NOT NULL there), returned verbatim on
-// every idempotent re-call. This is the same "code needs a field the OAS
-// schema omits" situation as Phase 11.6's promised_return_at gap — flagged
-// and added rather than left unimplementable. ShardAssignmentBody below adds
-// ChunkID accordingly.
+// expiry_unix_ms) — file_id dropped per ADR-072), and IC §4.1 step 5 says
+// the provider "re-derives signing_input using the chunk_id received in the
+// frame header" — i.e. the client must send the SAME chunk_id the token was
+// signed over, or every upload fails signature verification. This is the
+// same "code needs a field the OAS schema omits" situation as Phase 11.6's
+// promised_return_at gap — flagged and added rather than left
+// unimplementable. ShardAssignmentBody below adds ChunkID accordingly.
+//
+// [RESOLVED — ADR-073, corrects this session's original resolution]
+// chunk_id is NOT microservice-assigned. IC §4.1 defines it unconditionally
+// as SHA-256(chunk_data) — the provider's own pre-write check enforces this
+// (0x02 CHUNK_ID_MISMATCH), and storage/retrieval/audit are all built on it
+// holding. The original resolution here (generate chunk_id via rand.Read
+// at assignment time, before the client has encoded anything) violated
+// that invariant and made every real upload's capability-token
+// verification fail deterministically — misdiagnosed in ADR-070/ADR-072 as
+// a single-shard edge case (F-070-13) before being correctly root-caused
+// and resolved by Design Council as ADR-073. The client's own chunk_id
+// computation (internal/client/upload/orchestrator.go) was always correct;
+// it now submits that real, content-hash chunk_id per shard in this
+// endpoint's request body, per segment, as soon as that segment is encoded
+// — see segmentChunkIDsRequestBody below. assignSegment persists the
+// submitted value directly instead of generating one.
 //
 // [Decision — provider selection reuses internal/repair] OAS: "Selects
 // providers using Power of Two Choices weighted by reliability score" +
@@ -49,6 +56,23 @@
 // already done. Implemented as: if file_id already has persisted segments,
 // skip straight to regenerating tokens.
 //
+// [Extended — ADR-073, per-segment incremental submission] The above
+// "skip straight to regenerating tokens" behavior was originally binary:
+// any existing rows for file_id meant every gate was skipped and no new
+// work was ever done. ADR-073 requires this endpoint to accept an
+// in-progress file's segments incrementally, one call per segment as the
+// client finishes encoding it (so a segment's real chunk_id is available
+// before that segment is assigned — chunk_id cannot be known before
+// encoding, see this file's header note). The three gates (readiness,
+// escrow, capacity) still run exactly once per file_id — on the first call,
+// when no segments exist yet — never again on subsequent calls for the
+// same file_id, matching the original ERRATA precedent's spirit exactly,
+// just generalized from "resend" to "resend-and-extend". Every response,
+// first call or Nth, returns the full, fresh-tokened set of every segment
+// persisted so far for that file_id — not just the segment(s) named in that
+// particular call — so the client's final call always has everything
+// finishUpload needs.
+//
 // [Decision — escrow check uses available, not raw, balance] FR-014's own
 // wording says "balance < cost_for_30_days(file_size)", but
 // ownerBalanceAndReserved (built in Phase 11.5 for exactly this purpose —
@@ -60,7 +84,7 @@
 //
 // [REF: OAS paths./api/v1/upload/assign, components/schemas/
 // UploadAssignRequest/Response, SegmentAssignment, ShardAssignment,
-// FR-007-FR-020, ADR-014, ADR-022, IC §4.1, build.md Phase 11.7
+// FR-007-FR-020, ADR-014, ADR-022, ADR-073, IC §4.1, build.md Phase 11.7
 // Session 11.7.1]
 
 package api
@@ -68,7 +92,6 @@ package api
 import (
 	"context"
 	"crypto/ed25519"
-	"crypto/rand"
 	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
@@ -77,6 +100,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/google/uuid"
@@ -143,6 +167,26 @@ type uploadAssignRequestBody struct {
 	FileID            uuid.UUID `json:"file_id"`
 	NumSegments       int       `json:"num_segments"`
 	OriginalSizeBytes int64     `json:"original_size_bytes"`
+
+	// Segments carries the client's real, already-computed content-hash
+	// chunk_id for every shard of one or more segments — never a full
+	// file's worth in the common case; see this file's header note
+	// (ADR-073). At least one segment is required on every call: an
+	// initial call submits segment 0 (and any other already-encoded
+	// segments); a CAPABILITY_EXPIRED retry or ResumeUpload submits every
+	// segment the client has (all of them, since encoding completes
+	// before transfer begins in both cases).
+	Segments []segmentChunkIDsRequestBody `json:"segments"`
+}
+
+// segmentChunkIDsRequestBody carries one segment's real, client-computed
+// chunk_ids — SHA-256(chunk_data) per shard, shard_index order, exactly
+// profile.TotalShards entries, hex-encoded. See this file's header note
+// (ADR-073) for why the client, not the server, is the source of this
+// value.
+type segmentChunkIDsRequestBody struct {
+	SegmentIndex int      `json:"segment_index"`
+	ChunkIDs     []string `json:"chunk_ids"`
 }
 
 // ShardAssignmentBody mirrors OAS ShardAssignment, plus ChunkID — see this
@@ -209,81 +253,138 @@ func (h *UploadAssignHandler) HandleAssign(w http.ResponseWriter, r *http.Reques
 		WriteError(w, http.StatusBadRequest, ErrInvalidRequest, "original_size_bytes must be positive", nil, "original_size_bytes", nil)
 		return
 	}
+	segChunkIDs, err := parseSegmentChunkIDs(req.Segments, req.NumSegments, h.profile.TotalShards)
+	if err != nil {
+		WriteError(w, http.StatusBadRequest, ErrInvalidRequest, err.Error(), nil, "segments", nil)
+		return
+	}
 
 	monthlyCost := fileMonthlyCostPaiseForBytes(req.OriginalSizeBytes, h.profile)
 
-	// Idempotency: a prior successful call already persisted segments for
-	// this file_id — skip the three gates entirely (see file header) and
-	// just refresh tokens.
+	// Idempotency (ADR-073): a prior call may already have persisted some
+	// (not necessarily all) of this file_id's segments — skip the three
+	// gates and placeholder-file creation entirely once ANY segment exists
+	// (see file header), but still assign whichever of req.Segments are
+	// genuinely new.
 	existing, err := h.loadExistingAssignments(ctx, req.FileID)
 	if err != nil {
 		WriteError(w, http.StatusInternalServerError, ErrInternal, "failed to check existing assignment", nil, "", nil)
 		return
 	}
-	if len(existing) > 0 {
-		h.respondWithFreshTokens(w, existing, monthlyCost)
-		return
+	existingSegIdx := make(map[int]bool, len(existing))
+	for _, row := range existing {
+		existingSegIdx[row.segmentIndex] = true
 	}
-
-	// Check 1 — readiness gate.
-	readinessResp, err := h.readiness.Evaluate(ctx)
-	if err != nil {
-		WriteError(w, http.StatusInternalServerError, ErrInternal, "readiness evaluation failed", nil, "", nil)
-		return
-	}
-	if !readinessResp.AllConditionsMet {
-		writeNetworkNotReadyError(w)
-		return
-	}
-
-	// Check 2 — escrow balance (available, not raw — see file header).
-	balance, reserved, err := ownerBalanceAndReserved(ctx, h.db, h.profile, claims.Subject)
-	if err != nil {
-		WriteError(w, http.StatusInternalServerError, ErrInternal, "escrow balance lookup failed", nil, "", nil)
-		return
-	}
-	available := balance - reserved
-	if available < monthlyCost {
-		WriteError(w, http.StatusConflict, ErrInsufficientEscrow, "escrow balance insufficient for 30-day storage cost", nil, "", nil)
-		return
-	}
-
-	// files row created now (placeholder ciphertext fields — see file.go's
-	// header for the file/register handshake this sets up), satisfying
-	// segments.file_id's FK before any segment can be inserted.
-	if err := h.createPlaceholderFile(ctx, req.FileID, claims.Subject, req.OriginalSizeBytes); err != nil {
-		WriteError(w, http.StatusInternalServerError, ErrInternal, "failed to create file record", nil, "", nil)
-		return
-	}
-
-	// Check 2.5 — per-provider chunk storage ceiling (NFR-044): exclude
-	// providers already at/over the ceiling from every segment's candidate
-	// pool below, and reject the whole request if too few eligible ACTIVE
-	// providers remain once that exclusion is applied.
-	overCeiling, ok := enforceProviderCapacity(ctx, w, h.db, chunkCeilingMaxChunks(h.profile), h.profile.MinActiveProviders)
-	if !ok {
-		return
-	}
-
-	// Check 3 — ASN cap, enforced per-shard by repair.SelectReplacementProvider.
-	segments := make([]segmentAssignmentBody, 0, req.NumSegments)
-	for segIdx := 0; segIdx < req.NumSegments; segIdx++ {
-		segAssignment, availableASNs, err := h.assignSegment(ctx, req.FileID, segIdx, overCeiling)
-		if errors.Is(err, repair.ErrNoEligibleReplacement) {
-			writeInsufficientASNDiversityError(w, h.profile.TotalShards, availableASNs)
-			return
+	var newSegIdx []int
+	for idx := range segChunkIDs {
+		if !existingSegIdx[idx] {
+			newSegIdx = append(newSegIdx, idx)
 		}
+	}
+	sort.Ints(newSegIdx)
+
+	if len(existing) == 0 {
+		// Check 1 — readiness gate.
+		readinessResp, err := h.readiness.Evaluate(ctx)
 		if err != nil {
-			WriteError(w, http.StatusInternalServerError, ErrInternal, "shard assignment failed", nil, "", nil)
+			WriteError(w, http.StatusInternalServerError, ErrInternal, "readiness evaluation failed", nil, "", nil)
 			return
 		}
-		segments = append(segments, segAssignment)
+		if !readinessResp.AllConditionsMet {
+			writeNetworkNotReadyError(w)
+			return
+		}
+
+		// Check 2 — escrow balance (available, not raw — see file header).
+		balance, reserved, err := ownerBalanceAndReserved(ctx, h.db, h.profile, claims.Subject)
+		if err != nil {
+			WriteError(w, http.StatusInternalServerError, ErrInternal, "escrow balance lookup failed", nil, "", nil)
+			return
+		}
+		available := balance - reserved
+		if available < monthlyCost {
+			WriteError(w, http.StatusConflict, ErrInsufficientEscrow, "escrow balance insufficient for 30-day storage cost", nil, "", nil)
+			return
+		}
+
+		// files row created now (placeholder ciphertext fields — see file.go's
+		// header for the file/register handshake this sets up), satisfying
+		// segments.file_id's FK before any segment can be inserted.
+		if err := h.createPlaceholderFile(ctx, req.FileID, claims.Subject, req.OriginalSizeBytes); err != nil {
+			WriteError(w, http.StatusInternalServerError, ErrInternal, "failed to create file record", nil, "", nil)
+			return
+		}
 	}
 
-	resp := uploadAssignResponseBody{Assignments: segments, MonthlyCostPaise: monthlyCost, RequiredEscrowPaise: monthlyCost}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	if len(newSegIdx) > 0 {
+		// Check 2.5 — per-provider chunk storage ceiling (NFR-044): exclude
+		// providers already at/over the ceiling from every segment's candidate
+		// pool below, and reject the request if too few eligible ACTIVE
+		// providers remain once that exclusion is applied. Only evaluated
+		// when there is genuinely new segment work to do this call.
+		overCeiling, ok := enforceProviderCapacity(ctx, w, h.db, chunkCeilingMaxChunks(h.profile), h.profile.MinActiveProviders)
+		if !ok {
+			return
+		}
+
+		// Check 3 — ASN cap, enforced per-shard by repair.SelectReplacementProvider.
+		for _, segIdx := range newSegIdx {
+			availableASNs, err := h.assignSegment(ctx, req.FileID, segIdx, segChunkIDs[segIdx], overCeiling)
+			if errors.Is(err, repair.ErrNoEligibleReplacement) {
+				writeInsufficientASNDiversityError(w, h.profile.TotalShards, availableASNs)
+				return
+			}
+			if err != nil {
+				WriteError(w, http.StatusInternalServerError, ErrInternal, "shard assignment failed", nil, "", nil)
+				return
+			}
+		}
+	}
+
+	// Always respond with the full, fresh-tokened set of every segment
+	// persisted so far for this file_id — old and newly-created this call
+	// alike (ADR-073) — so the client's last call always has everything
+	// finishUpload needs, regardless of which segment(s) this specific call
+	// named.
+	all, err := h.loadExistingAssignments(ctx, req.FileID)
+	if err != nil {
+		WriteError(w, http.StatusInternalServerError, ErrInternal, "failed to load assignment after write", nil, "", nil)
+		return
+	}
+	h.respondWithFreshTokens(w, all, monthlyCost)
+}
+
+// parseSegmentChunkIDs validates and decodes the client-submitted
+// segments (ADR-073): at least one segment is required, every
+// segment_index must be within [0, numSegments), no segment_index may
+// repeat within a single request, and every chunk_ids entry must be
+// exactly totalShards hex-encoded 32-byte values (shard_index order).
+func parseSegmentChunkIDs(segments []segmentChunkIDsRequestBody, numSegments, totalShards int) (map[int][][32]byte, error) {
+	if len(segments) == 0 {
+		return nil, fmt.Errorf("segments must include at least one segment's chunk_ids")
+	}
+	out := make(map[int][][32]byte, len(segments))
+	for _, seg := range segments {
+		if seg.SegmentIndex < 0 || seg.SegmentIndex >= numSegments {
+			return nil, fmt.Errorf("segment_index %d out of range [0, %d)", seg.SegmentIndex, numSegments)
+		}
+		if _, dup := out[seg.SegmentIndex]; dup {
+			return nil, fmt.Errorf("duplicate segment_index %d in request", seg.SegmentIndex)
+		}
+		if len(seg.ChunkIDs) != totalShards {
+			return nil, fmt.Errorf("segment %d: chunk_ids has %d entries, want %d (profile.TotalShards)", seg.SegmentIndex, len(seg.ChunkIDs), totalShards)
+		}
+		parsed := make([][32]byte, totalShards)
+		for j, hexID := range seg.ChunkIDs {
+			raw, err := hex.DecodeString(hexID)
+			if err != nil || len(raw) != sha256Size {
+				return nil, fmt.Errorf("segment %d shard %d: chunk_id must be %d hex-encoded bytes", seg.SegmentIndex, j, sha256Size)
+			}
+			copy(parsed[j][:], raw)
+		}
+		out[seg.SegmentIndex] = parsed
+	}
+	return out, nil
 }
 
 // createPlaceholderFile inserts the files row that segments.file_id's FK
@@ -303,24 +404,30 @@ func (h *UploadAssignHandler) createPlaceholderFile(ctx context.Context, fileID,
 }
 
 // assignSegment creates one segment row and its TotalShards shard
-// assignments. shard_index 0..profile.DataShards-1 are the systematic AONT
-// data words; profile.DataShards..profile.TotalShards-1 are RS parity
-// (never the hardcoded "0-15/16-55" OAS's schema descriptions use — this
-// phase's own flagged note). excludeForCeiling seeds the exclude list with
-// every provider already at/over the chunk storage ceiling (NFR-044,
-// enforceProviderCapacity in HandleAssign) — computed once per request, not
-// per segment, since it reflects each provider's real chunk allocation
-// which a single new shard assignment (256 KB) does not meaningfully move.
-func (h *UploadAssignHandler) assignSegment(ctx context.Context, fileID uuid.UUID, segIdx int, excludeForCeiling []uuid.UUID) (segmentAssignmentBody, int, error) {
+// assignments, persisting the client-supplied, already-computed
+// content-hash chunk_id for each shard (ADR-073) rather than generating
+// one — see this file's header note. shard_index 0..profile.DataShards-1
+// are the systematic AONT data words; profile.DataShards..
+// profile.TotalShards-1 are RS parity (never the hardcoded "0-15/16-55"
+// OAS's schema descriptions use — this phase's own flagged note).
+// excludeForCeiling seeds the exclude list with every provider already
+// at/over the chunk storage ceiling (NFR-044, enforceProviderCapacity in
+// HandleAssign) — computed once per request, not per segment, since it
+// reflects each provider's real chunk allocation which a single new shard
+// assignment (256 KB) does not meaningfully move.
+//
+// Capability-token minting is NOT done here — HandleAssign always
+// regenerates fresh tokens for the full accumulated assignment set via
+// respondWithFreshTokens after this function returns, so minting only
+// ever happens in that one place rather than being duplicated here too.
+func (h *UploadAssignHandler) assignSegment(ctx context.Context, fileID uuid.UUID, segIdx int, chunkIDs [][32]byte, excludeForCeiling []uuid.UUID) (availableASNs int, err error) {
 	var segmentID uuid.UUID
 	if err := h.db.QueryRowContext(ctx, `INSERT INTO segments (file_id, segment_index) VALUES ($1, $2) RETURNING segment_id`,
 		fileID, segIdx).Scan(&segmentID); err != nil {
-		return segmentAssignmentBody{}, 0, fmt.Errorf("api: assignSegment: insert segment: %w", err)
+		return 0, fmt.Errorf("api: assignSegment: insert segment: %w", err)
 	}
 
-	shards := make([]ShardAssignmentBody, 0, h.profile.TotalShards)
 	excludeIDs := append([]uuid.UUID{}, excludeForCeiling...)
-	now := time.Now()
 
 	for shardIdx := 0; shardIdx < h.profile.TotalShards; shardIdx++ {
 		providerID, err := repair.SelectReplacementProvider(ctx, h.db, h.profile, segmentID, excludeIDs)
@@ -330,46 +437,23 @@ func (h *UploadAssignHandler) assignSegment(ctx context.Context, fileID uuid.UUI
 				if countErr != nil {
 					availableASNs = 0
 				}
-				return segmentAssignmentBody{}, availableASNs, err
+				return availableASNs, err
 			}
-			return segmentAssignmentBody{}, 0, fmt.Errorf("api: assignSegment: select provider: %w", err)
+			return 0, fmt.Errorf("api: assignSegment: select provider: %w", err)
 		}
 		excludeIDs = append(excludeIDs, providerID)
 
-		var chunkID [32]byte
-		if _, err := rand.Read(chunkID[:]); err != nil {
-			return segmentAssignmentBody{}, 0, fmt.Errorf("api: assignSegment: rand chunk_id: %w", err)
-		}
+		chunkID := chunkIDs[shardIdx]
 		if _, err := h.db.ExecContext(ctx, `
 			INSERT INTO chunk_assignments (chunk_id, is_vetting_chunk, segment_id, shard_index, provider_id)
 			VALUES ($1, FALSE, $2, $3, $4)`,
 			chunkID[:], segmentID, shardIdx, providerID,
 		); err != nil {
-			return segmentAssignmentBody{}, 0, fmt.Errorf("api: assignSegment: insert chunk_assignment: %w", err)
+			return 0, fmt.Errorf("api: assignSegment: insert chunk_assignment: %w", err)
 		}
-
-		var multiaddrsJSON []byte
-		var asn string
-		if err := h.db.QueryRowContext(ctx, `SELECT last_known_multiaddrs, asn FROM providers WHERE provider_id = $1`, providerID).
-			Scan(&multiaddrsJSON, &asn); err != nil {
-			return segmentAssignmentBody{}, 0, fmt.Errorf("api: assignSegment: provider lookup: %w", err)
-		}
-		var multiaddrs []string
-		_ = json.Unmarshal(multiaddrsJSON, &multiaddrs)
-
-		token := generateCapabilityToken(h.signingKey, chunkID, providerID, now)
-
-		shards = append(shards, ShardAssignmentBody{
-			ShardIndex:      shardIdx,
-			ProviderID:      providerID,
-			Multiaddrs:      multiaddrs,
-			ASN:             asn,
-			CapabilityToken: hex.EncodeToString(token[:]),
-			ChunkID:         hex.EncodeToString(chunkID[:]),
-		})
 	}
 
-	return segmentAssignmentBody{SegmentIndex: segIdx, SegmentID: segmentID, Providers: shards}, 0, nil
+	return 0, nil
 }
 
 func (h *UploadAssignHandler) countDistinctActiveASNs(ctx context.Context) (int, error) {
