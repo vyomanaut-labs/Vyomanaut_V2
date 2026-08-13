@@ -46,6 +46,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,6 +86,54 @@ func liveDB(t *testing.T) *sql.DB {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return db
+}
+
+// resetDemoDatabase truncates every application table before a scenario
+// begins, so provider/audit/repair counts this test polls for reflect
+// only this run — not accumulated state from every previous invocation
+// against the same persistent local Postgres instance.
+//
+// [Found live, this session] pollAllProvidersActive and its siblings
+// query un-scoped global counts (e.g. `SELECT COUNT(*) FROM providers
+// WHERE status = 'ACTIVE'`), which is exactly correct for a single,
+// isolated demo session — mvp.md §3.6's own framing — but breaks the
+// moment the same database is reused across multiple go test invocations,
+// which any local, non-ephemeral Postgres instance is. Discovered via
+// pg_tables rather than a hardcoded list, so a table added by a future
+// migration can't be silently missed and left accumulating.
+func resetDemoDatabase(t *testing.T, ctx context.Context, db *sql.DB) {
+	t.Helper()
+	rows, err := db.QueryContext(ctx, `
+		SELECT tablename FROM pg_tables
+		WHERE schemaname = 'public' AND tablename NOT IN ('schema_migrations')`)
+	if err != nil {
+		t.Fatalf("resetDemoDatabase: list tables: %v", err)
+	}
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			_ = rows.Close()
+			t.Fatalf("resetDemoDatabase: scan table name: %v", err)
+		}
+		tables = append(tables, name)
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatalf("resetDemoDatabase: iterate tables: %v", err)
+	}
+	if len(tables) == 0 {
+		t.Fatalf("resetDemoDatabase: no tables found in public schema — is the schema actually migrated?")
+	}
+
+	quoted := make([]string, len(tables))
+	for i, name := range tables {
+		quoted[i] = `"` + name + `"`
+	}
+	stmt := "TRUNCATE TABLE " + strings.Join(quoted, ", ") + " RESTART IDENTITY CASCADE"
+	if _, err := db.ExecContext(ctx, stmt); err != nil {
+		t.Fatalf("resetDemoDatabase: %v", err)
+	}
 }
 
 func testDSN(userEnvKey, userFallback, passEnvKey string) string {
@@ -737,6 +786,7 @@ func TestDemoTimeline(t *testing.T) {
 	db := liveDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Minute)
 	defer cancel()
+	resetDemoDatabase(t, ctx, db)
 
 	microservicePath, providerPath := buildBinaries(t)
 	ms := startMicroservice(t, ctx, microservicePath)
@@ -859,6 +909,7 @@ func TestViabilityASNCapMatchesRunningDemoProfile(t *testing.T) {
 	db := liveDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
+	resetDemoDatabase(t, ctx, db)
 
 	microservicePath, providerPath := buildBinaries(t)
 	ms := startMicroservice(t, ctx, microservicePath)
@@ -887,6 +938,7 @@ func TestViabilityRepairSucceedsWithTwoOfFiveOffline(t *testing.T) {
 	db := liveDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
+	resetDemoDatabase(t, ctx, db)
 
 	microservicePath, providerPath := buildBinaries(t)
 	ms := startMicroservice(t, ctx, microservicePath)
@@ -930,6 +982,7 @@ func TestViabilityActiveTransitionAtTenMinutes(t *testing.T) {
 	db := liveDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
+	resetDemoDatabase(t, ctx, db)
 
 	microservicePath, providerPath := buildBinaries(t)
 	ms := startMicroservice(t, ctx, microservicePath)
@@ -964,6 +1017,7 @@ func TestViabilityDuplicateWebhookProducesExactlyOneEscrowRow(t *testing.T) {
 	db := liveDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	resetDemoDatabase(t, ctx, db)
 
 	microservicePath, _ := buildBinaries(t)
 	ms := startMicroservice(t, ctx, microservicePath)
@@ -982,9 +1036,21 @@ func TestViabilityDuplicateWebhookProducesExactlyOneEscrowRow(t *testing.T) {
 	}
 
 	var rowCount int
+	// [Fixed, found live this session] owner_escrow_events.idempotency_key
+	// stores mockDepositIdempotencyKey(ownerID, contractID) — a value
+	// internal/api/owner.go's HandleDepositInitiate derives server-side,
+	// not the raw idempotency_key this test submitted in the HTTP request
+	// body. Reproducing that derivation here would be testing an
+	// implementation detail rather than the actual guarantee mvp.md §7.7
+	// cares about. Scoping by owner_id alone is equivalent and simpler:
+	// this owner is freshly registered for this test alone (registerOwner
+	// uses a random phone per call) and only ever deposits here, so any
+	// owner_escrow_events row for this owner_id came from one of these two
+	// calls — resetDemoDatabase at the top of this test also guarantees no
+	// prior-run rows could be present regardless.
 	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM owner_escrow_events WHERE owner_id = $1 AND idempotency_key = $2`,
-		owner.ownerID, idempotencyKey,
+		`SELECT COUNT(*) FROM owner_escrow_events WHERE owner_id = $1`,
+		owner.ownerID,
 	).Scan(&rowCount); err != nil {
 		t.Fatalf("count owner_escrow_events: %v", err)
 	}
