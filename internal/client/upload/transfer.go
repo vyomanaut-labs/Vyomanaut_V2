@@ -117,8 +117,22 @@ func (o *Orchestrator) transferAll(
 				// as upload failure rather than looping indefinitely.
 				return fmt.Errorf("upload: transferAll: capability token expired again after re-assignment: %w", ErrUploadIncomplete)
 			}
-			fresh, err := o.requestAssignment(ctx, fileID, len(shardData), sumOriginalSizeBytes(sess))
+			// sess already carries the real original_size_bytes and every
+			// segment's real chunk_ids (encoding always completes before
+			// transfer begins — see orchestrator.go's UploadFile) — both are
+			// threaded through directly rather than via a placeholder.
+			// [Fixed, found during ADR-073 work] The prior fallback here
+			// (sumOriginalSizeBytes) always returned 0 for
+			// original_size_bytes, which internal/api/upload.go's
+			// HandleAssign unconditionally rejects with 400 regardless of
+			// idempotency state — so this retry path 400'd on every real
+			// CAPABILITY_EXPIRED occurrence before this fix, independent of
+			// and pre-dating ADR-073's chunk_id defect.
+			fresh, err := o.requestAssignment(ctx, fileID, len(shardData), sess.OriginalSizeBytes, sess.ChunkIDs)
 			if err != nil {
+				return fmt.Errorf("upload: transferAll: re-assignment after CAPABILITY_EXPIRED: %w", err)
+			}
+			if err := verifyAssignedChunkIDsMatch(fresh, sess.ChunkIDs); err != nil {
 				return fmt.Errorf("upload: transferAll: re-assignment after CAPABILITY_EXPIRED: %w", err)
 			}
 			assignments = fresh.Assignments
@@ -139,23 +153,11 @@ func (o *Orchestrator) transferAll(
 	}
 }
 
-// sumOriginalSizeBytes is a defensive fallback used only for the
-// re-assignment call's original_size_bytes parameter — the true value is
-// already known by orchestrator.go's caller and should be threaded through
-// directly in a future revision; this exists so transferAll's signature
-// does not need to grow an extra parameter purely for the rare
-// CAPABILITY_EXPIRED-retry path. Returns 0, which requestAssignment/the
-// server treats as its own validation concern on retry (the file_id is
-// already registered from the first assign call, so this field is not
-// re-validated against a changed value on a same-file_id idempotent
-// re-call per the OAS's own "idempotent: repeated calls with the same
-// file_id return the same assignments" description).
-func sumOriginalSizeBytes(sess *SessionState) int64 { return 0 }
-
 // pendingTasks returns one shardUploadTask per not-yet-acknowledged shard.
 func pendingTasks(assignments []segmentAssignment, shardData [][][]byte, sess *SessionState) []shardUploadTask {
 	var tasks []shardUploadTask
-	for segIdx, seg := range assignments {
+	for _, seg := range assignments {
+		segIdx := seg.SegmentIndex
 		for _, sa := range seg.Providers {
 			if sess.AckStatus[segIdx][sa.ShardIndex] {
 				continue

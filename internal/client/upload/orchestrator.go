@@ -195,18 +195,20 @@ func (o *Orchestrator) UploadFile(ctx context.Context, masterSecret [32]byte, ow
 		numSegments = 1 // a zero-length file still uploads one fully-padded segment
 	}
 
-	// TASK step 3: request provider assignment before doing any encoding
-	// work, so a closed readiness gate (503) or insufficient escrow (409)
-	// fails fast.
-	assignResp, err := o.requestAssignment(ctx, fileID, numSegments, int64(len(plaintext)))
-	if err != nil {
-		return fileID, fmt.Errorf("upload: UploadFile: %w", err)
-	}
-
-	// TASK step 2: AONT-encode each segment, then RS-encode via
-	// erasure.Engine.EncodeSegment.
+	// TASK steps 2–3, restructured per ADR-073: chunk_id cannot exist
+	// before a segment is encoded (it's that segment's real content hash),
+	// so assignment can no longer happen once, upfront, for the whole
+	// file. Instead, each segment is AONT+RS-encoded, its shard content
+	// hashes computed, and assignment requested immediately — carrying
+	// only the segments encoded so far (buildSegmentChunkIDRequests skips
+	// nil entries). This preserves the original "fail fast" property at
+	// the point it actually matters: a readiness/escrow rejection on
+	// segment 0 (the only call that runs those gates — ADR-073) is still
+	// caught before segment 1 is ever encoded, rather than only after the
+	// whole file has been.
 	shardData := make([][][]byte, numSegments)
 	chunkIDs := make([][][32]byte, numSegments)
+	var assignResp *uploadAssignResponse
 	for i := 0; i < numSegments; i++ {
 		segPlain := make([]byte, segSize)
 		start := i * segSize
@@ -233,6 +235,15 @@ func (o *Orchestrator) UploadFile(ctx context.Context, masterSecret [32]byte, ow
 			ids[j] = sha256.Sum256(shard)
 		}
 		chunkIDs[i] = ids
+
+		resp, err := o.requestAssignment(ctx, fileID, numSegments, int64(len(plaintext)), chunkIDs)
+		if err != nil {
+			return fileID, fmt.Errorf("upload: UploadFile: assign segment %d: %w", i, err)
+		}
+		assignResp = resp
+	}
+	if err := verifyAssignedChunkIDsMatch(assignResp, chunkIDs); err != nil {
+		return fileID, fmt.Errorf("upload: UploadFile: %w", err)
 	}
 
 	// TASK step 8: persist session state BEFORE transfer begins (FR-060) —
@@ -268,9 +279,38 @@ func (o *Orchestrator) UploadFile(ctx context.Context, masterSecret [32]byte, ow
 	return fileID, nil
 }
 
-// finishUpload implements TASK steps 6–8, shared by UploadFile and
-// ResumeUpload (Session 15.2.2): build the pointer file, register it, and
-// clean up session state only once registration succeeds.
+// verifyAssignedChunkIDsMatch defensively confirms the server echoed back
+// exactly the chunk_id this package submitted for every shard it has
+// encoded so far (ADR-073) — the wire chunk_id actually used for transfer
+// is always chunkIDs' own local value (transfer.go's pendingTasks), never
+// assignResp's echo, so this check is not load-bearing for correctness.
+// It exists purely to fail loudly, immediately, and with a clear message
+// if a future regression reintroduces a server-side chunk_id divergence
+// (exactly the class of bug ADR-073 fixed), rather than surfacing 5+
+// minutes later as an opaque 0x03 at the provider.
+func verifyAssignedChunkIDsMatch(assignResp *uploadAssignResponse, chunkIDs [][][32]byte) error {
+	if assignResp == nil {
+		return fmt.Errorf("no assignment response to verify")
+	}
+	for _, seg := range assignResp.Assignments {
+		if seg.SegmentIndex < 0 || seg.SegmentIndex >= len(chunkIDs) || chunkIDs[seg.SegmentIndex] == nil {
+			continue // not a segment this call encoded/submitted; nothing to check
+		}
+		want := chunkIDs[seg.SegmentIndex]
+		for _, sa := range seg.Providers {
+			if sa.ShardIndex < 0 || sa.ShardIndex >= len(want) {
+				return fmt.Errorf("segment %d: server returned shard_index %d out of range", seg.SegmentIndex, sa.ShardIndex)
+			}
+			wantHex := fmt.Sprintf("%x", want[sa.ShardIndex])
+			if sa.ChunkID != wantHex {
+				return fmt.Errorf("segment %d shard %d: server echoed chunk_id %s, submitted %s — capability_token would not verify",
+					seg.SegmentIndex, sa.ShardIndex, sa.ChunkID, wantHex)
+			}
+		}
+	}
+	return nil
+}
+
 func (o *Orchestrator) finishUpload(
 	ctx context.Context, masterSecret [32]byte, ownerID, fileID uuid.UUID,
 	assignResp *uploadAssignResponse, chunkIDs [][][32]byte, originalSizeBytes int64,
@@ -338,8 +378,16 @@ func (o *Orchestrator) ResumeUpload(ctx context.Context, masterSecret [32]byte, 
 		return fmt.Errorf("upload: ResumeUpload: loaded session state is for file_id %s, want %s", sess.FileID, fileID)
 	}
 
-	assignResp, err := o.requestAssignment(ctx, fileID, len(sess.ChunkIDs), sess.OriginalSizeBytes)
+	// sess.ChunkIDs is fully populated for every segment (encoding always
+	// completes, per-segment, before transfer begins — see UploadFile) so
+	// this resume submits every segment's real chunk_id in one call; the
+	// server's per-segment idempotency (ADR-073) means already-persisted
+	// segments are simply token-refreshed, not re-derived.
+	assignResp, err := o.requestAssignment(ctx, fileID, len(sess.ChunkIDs), sess.OriginalSizeBytes, sess.ChunkIDs)
 	if err != nil {
+		return fmt.Errorf("upload: ResumeUpload: %w", err)
+	}
+	if err := verifyAssignedChunkIDsMatch(assignResp, sess.ChunkIDs); err != nil {
 		return fmt.Errorf("upload: ResumeUpload: %w", err)
 	}
 
