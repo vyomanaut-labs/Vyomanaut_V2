@@ -15,7 +15,7 @@
 // resolveProviderPeer twin (Milestone 14).
 //
 // [REF: OAS /api/v1/upload/assign, IC §5.9 pre-conditions, ADR-016,
-// MVP §8.2 Phase 15.2 Session 15.2.1, FR-009, FR-014]
+// ADR-073, MVP §8.2 Phase 15.2 Session 15.2.1, FR-009, FR-014]
 
 package upload
 
@@ -131,17 +131,38 @@ type uploadAssignRequest struct {
 	FileID            uuid.UUID `json:"file_id"`
 	NumSegments       int       `json:"num_segments"`
 	OriginalSizeBytes int64     `json:"original_size_bytes"`
+
+	// Segments carries this call's real, already-computed content-hash
+	// chunk_id per shard for one or more segments (ADR-073) — the client's
+	// own chunk_id computation, never a server-generated value; see
+	// requestAssignment and buildSegmentChunkIDRequests below for how this
+	// is populated per call.
+	Segments []segmentChunkIDsRequest `json:"segments"`
+}
+
+// segmentChunkIDsRequest mirrors OAS's per-segment chunk_ids addition
+// (ADR-073) — one segment's real content-hash chunk_id per shard,
+// shard_index order, hex-encoded.
+type segmentChunkIDsRequest struct {
+	SegmentIndex int      `json:"segment_index"`
+	ChunkIDs     []string `json:"chunk_ids"`
 }
 
 // shardAssignment mirrors OAS ShardAssignment, including the
 // server-issued capability_token (ERRATA-001, IC §4.1) — never re-derived
-// client-side; see transfer.go for where this is used verbatim.
+// client-side; see transfer.go for where this is used verbatim. ChunkID
+// is the server's echo of what this package submitted in Segments above
+// — decoded and defensively checked (transfer.go's pendingTasks) against
+// this package's own SessionState.ChunkIDs record, never used as the
+// wire chunk_id in place of it; see ADR-073 for why this package, not the
+// server, is chunk_id's source of truth.
 type shardAssignment struct {
 	ShardIndex      int       `json:"shard_index"`
 	ProviderID      uuid.UUID `json:"provider_id"`
 	Multiaddrs      []string  `json:"multiaddrs"`
 	ASN             string    `json:"asn"`
 	CapabilityToken string    `json:"capability_token"` // 144 hex chars = 72 bytes
+	ChunkID         string    `json:"chunk_id"`
 }
 
 // segmentAssignment mirrors OAS SegmentAssignment.
@@ -158,10 +179,37 @@ type uploadAssignResponse struct {
 	RequiredEscrowPaise int64               `json:"required_escrow_paise"`
 }
 
-// requestAssignment calls POST /api/v1/upload/assign. Idempotent on
-// file_id per the OAS's own description — a resumed upload (Session
-// 15.2.2) may call this again for the same fileID and receive the same
-// provider set with fresh capability tokens.
+// buildSegmentChunkIDRequests converts a (possibly partial) chunkIDs slice
+// into the wire Segments shape — chunkIDs[i] == nil means segment i has
+// not been encoded yet and is omitted from the request entirely (ADR-073:
+// a segment's chunk_id cannot exist before that segment is encoded, so
+// there is nothing to submit for it yet). UploadFile's per-segment loop
+// passes a slice that fills in left-to-right as encoding proceeds;
+// transferAll's CAPABILITY_EXPIRED retry and ResumeUpload pass a fully
+// populated slice (every segment already encoded by the time either runs).
+func buildSegmentChunkIDRequests(chunkIDs [][][32]byte) []segmentChunkIDsRequest {
+	var out []segmentChunkIDsRequest
+	for i, ids := range chunkIDs {
+		if ids == nil {
+			continue
+		}
+		hexIDs := make([]string, len(ids))
+		for j, id := range ids {
+			hexIDs[j] = fmt.Sprintf("%x", id)
+		}
+		out = append(out, segmentChunkIDsRequest{SegmentIndex: i, ChunkIDs: hexIDs})
+	}
+	return out
+}
+
+// requestAssignment calls POST /api/v1/upload/assign, submitting the
+// caller's real, already-computed chunk_ids for whichever segments
+// chunkIDs has populated (ADR-073 — see buildSegmentChunkIDRequests).
+// Idempotent on file_id per the OAS's own description, extended by
+// ADR-073 to be idempotent per-segment too: a segment already persisted
+// server-side from an earlier call is never re-derived, only
+// token-refreshed; the response always contains every segment persisted
+// so far for fileID, not just the ones named in chunkIDs this call.
 //
 // Error semantics:
 //   - ErrNetworkNotReady: HTTP 503, error_code NETWORK_NOT_READY (readiness
@@ -172,11 +220,12 @@ type uploadAssignResponse struct {
 //   - ErrInsufficientEscrow: HTTP 409 (IC §5.9's own pre-condition — the
 //     30-day escrow check is enforced server-side, not re-implemented
 //     client-side).
-func (o *Orchestrator) requestAssignment(ctx context.Context, fileID uuid.UUID, numSegments int, originalSizeBytes int64) (*uploadAssignResponse, error) {
+func (o *Orchestrator) requestAssignment(ctx context.Context, fileID uuid.UUID, numSegments int, originalSizeBytes int64, chunkIDs [][][32]byte) (*uploadAssignResponse, error) {
 	reqBody := uploadAssignRequest{
 		FileID:            fileID,
 		NumSegments:       numSegments,
 		OriginalSizeBytes: originalSizeBytes,
+		Segments:          buildSegmentChunkIDRequests(chunkIDs),
 	}
 	var respBody uploadAssignResponse
 	httpResp, rawBody, err := o.api.doJSON(ctx, http.MethodPost, "/api/v1/upload/assign", reqBody, &respBody)
