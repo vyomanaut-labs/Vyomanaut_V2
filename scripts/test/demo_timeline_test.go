@@ -36,6 +36,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -366,10 +367,25 @@ type liveOwner struct {
 	signingKey ed25519.PrivateKey
 }
 
+// registerOwner registers a fresh owner against a randomly-generated phone
+// number — required now that more than one Test* function in this file
+// calls registerOwner against the same shared live Postgres instance
+// (Session 16.1.2); a single hardcoded phone number would collide across
+// test functions the moment more than one owner registration was needed
+// in the same database.
 func registerOwner(t *testing.T, ctx context.Context, db *sql.DB, baseURL string) *liveOwner {
 	t.Helper()
 
-	regToken := otpVerifyToken(t, ctx, db, baseURL, "+919876520000", "OWNER_REGISTER")
+	var phoneSuffix [4]byte
+	if _, err := rand.Read(phoneSuffix[:]); err != nil {
+		t.Fatalf("rand.Read phone suffix: %v", err)
+	}
+	// +9199 prefix is deliberately distinct from startProviders' own
+	// +91987653NNNN pattern, so owner and provider phone numbers can never
+	// collide even at the same numeric suffix.
+	phone := fmt.Sprintf("+9199%08d", binary.BigEndian.Uint32(phoneSuffix[:])%100_000_000)
+
+	regToken := otpVerifyToken(t, ctx, db, baseURL, phone, "OWNER_REGISTER")
 
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -409,9 +425,22 @@ func registerOwner(t *testing.T, ctx context.Context, db *sql.DB, baseURL string
 // provider (synchronous in demo mode) — required before upload, per ADR-064.
 func depositForOwner(t *testing.T, ctx context.Context, baseURL string, owner *liveOwner, amountPaise int64) {
 	t.Helper()
+	status := depositForOwnerWithKey(t, ctx, baseURL, owner, amountPaise, randomHex(t, 32))
+	if status != http.StatusOK {
+		t.Fatalf("owner deposit: HTTP %d", status)
+	}
+}
+
+// depositForOwnerWithKey is depositForOwner's core, with an explicit
+// idempotency_key (rather than always generating a fresh random one) and
+// returning the HTTP status instead of failing the test on a non-200 —
+// so TestViabilityDuplicateWebhookProducesExactlyOneEscrowRow (§7.7) can
+// call it twice with the SAME key and inspect both responses itself.
+func depositForOwnerWithKey(t *testing.T, ctx context.Context, baseURL string, owner *liveOwner, amountPaise int64, idempotencyKey string) int {
+	t.Helper()
 	reqBody, _ := json.Marshal(map[string]interface{}{
 		"amount_paise":    amountPaise,
-		"idempotency_key": randomHex(t, 32),
+		"idempotency_key": idempotencyKey,
 	})
 	httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/v1/owner/deposit", bytes.NewReader(reqBody))
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -422,9 +451,7 @@ func depositForOwner(t *testing.T, ctx context.Context, baseURL string, owner *l
 		t.Fatalf("owner deposit: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("owner deposit: HTTP %d", resp.StatusCode)
-	}
+	return resp.StatusCode
 }
 
 // ── provider fleet: testSimCount separate OS processes, each
@@ -664,34 +691,41 @@ WHERE p.status = 'ACTIVE' AND ca.is_vetting_chunk = TRUE AND ca.status = 'ACTIVE
 	}
 }
 
-func pollDeparted(t *testing.T, ctx context.Context, db *sql.DB, timeout time.Duration) {
+// pollDeparted waits until at least wantCount providers have reached
+// DEPARTED status. Parameterized (Session 16.1.2) rather than fixed at
+// ">= 1" — TestViabilityRepairSucceedsWithTwoOfFiveOffline (§7.2) needs to
+// wait for 2 independent departures, not just the first.
+func pollDeparted(t *testing.T, ctx context.Context, db *sql.DB, wantCount int, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
 		var count int
 		err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM providers WHERE status = 'DEPARTED'`).Scan(&count)
-		if err == nil && count >= 1 {
+		if err == nil && count >= wantCount {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("no provider reached DEPARTED within %s", timeout)
+			t.Fatalf("fewer than %d providers reached DEPARTED within %s", wantCount, timeout)
 		}
 		time.Sleep(10 * time.Second)
 	}
 }
 
-func pollRepairCompleted(t *testing.T, ctx context.Context, db *sql.DB, timeout time.Duration) {
+// pollRepairCompleted waits until at least wantCompleted repair jobs exist
+// and have status = 'COMPLETED'. Parameterized (Session 16.1.2) rather
+// than fixed at ">= 1" — a 2-shard-loss scenario should produce 2
+// completed repair jobs (one per lost shard), not just one.
+func pollRepairCompleted(t *testing.T, ctx context.Context, db *sql.DB, wantCompleted int, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
-		var created, completed int
-		_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM repair_jobs`).Scan(&created)
+		var completed int
 		_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM repair_jobs WHERE status = 'COMPLETED'`).Scan(&completed)
-		if created > 0 && completed > 0 {
+		if completed >= wantCompleted {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("repair job not created-and-completed within %s (created=%d completed=%d)", timeout, created, completed)
+			t.Fatalf("fewer than %d repair jobs completed within %s (completed=%d)", wantCompleted, timeout, completed)
 		}
 		time.Sleep(10 * time.Second)
 	}
@@ -771,10 +805,10 @@ func TestDemoTimeline(t *testing.T) {
 	// Kill one simulated daemon; assert departure detection within
 	// profile.DepartureThreshold (10 min in demo).
 	providers.killProvider(t, 0)
-	pollDeparted(t, ctx, db, 11*time.Minute)
+	pollDeparted(t, ctx, db, 1, 11*time.Minute)
 
 	// Assert repair job created and completed.
-	pollRepairCompleted(t, ctx, db, 5*time.Minute)
+	pollRepairCompleted(t, ctx, db, 1, 5*time.Minute)
 }
 
 // attemptUploadExpectRejected asserts ADR-071's corrected T+01:00 behavior:
@@ -800,5 +834,161 @@ func assertDemoThreshold(t *testing.T, name string, cond readinessCondition, wan
 	}
 	if cond.RequiredValue != want {
 		t.Errorf("%s: required_value = %d, want %d (OAS DemoReady example)", name, cond.RequiredValue, want)
+	}
+}
+
+// ── Session 16.1.2 — viability fact-checks (mvp.md §7) ──────────────────
+//
+// Each test below stands up its own full microservice + provider fleet
+// (buildBinaries/startMicroservice/startProviders), same as TestDemoTimeline
+// — these are independent live-infra scenarios, not sub-cases sharing one
+// system under test, matching this file's existing one-full-setup-per-Test
+// convention.
+
+// TestViabilityASNCapMatchesRunningDemoProfile (§7.1): confirms the LIVE,
+// RUNNING microservice's readiness evaluator actually enforces
+// profile.MinDistinctASNs=5 — not just that config.DemoProfile's struct
+// literal says so (already covered, at the struct level, by earlier M1
+// tests). The pre-ADR analysis this fact-check corrected proposed
+// MinDistinctASNs=2, which mvp.md §7.1 shows is mathematically inconsistent
+// with the 20% ASN cap at n=5 (floor(5×0.20)=1 shard/ASN requires 5
+// distinct ASNs, not 2) — this test's job is to catch a regression back to
+// that inconsistent value in what the running system actually evaluates
+// against, not merely in the source file.
+func TestViabilityASNCapMatchesRunningDemoProfile(t *testing.T) {
+	db := liveDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	microservicePath, providerPath := buildBinaries(t)
+	ms := startMicroservice(t, ctx, microservicePath)
+	_ = startProviders(t, ctx, db, providerPath, ms.baseURL)
+
+	readiness := pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 60*time.Second)
+
+	if config.DemoProfile.MinDistinctASNs != 5 {
+		t.Fatalf("config.DemoProfile.MinDistinctASNs = %d, want 5 (mvp.md §7.1 — the pre-ADR analysis value of 2 was mathematically inconsistent with the 20%% ASN cap at n=5)",
+			config.DemoProfile.MinDistinctASNs)
+	}
+	if readiness.Conditions.DistinctASNs.RequiredValue != config.DemoProfile.MinDistinctASNs {
+		t.Errorf("running readiness gate's distinct_asns.required_value = %d, want %d (config.DemoProfile.MinDistinctASNs) — the running evaluator has drifted from the profile struct",
+			readiness.Conditions.DistinctASNs.RequiredValue, config.DemoProfile.MinDistinctASNs)
+	}
+}
+
+// TestViabilityRepairSucceedsWithTwoOfFiveOffline (§7.2): RS(3,5) math —
+// losing any 2 of 5 shard holders simultaneously still leaves exactly 3
+// (DataShards, the emergency floor per mvp.md §7.2), which is enough to
+// RS-decode and repair. This is the boundary case: TestDemoTimeline only
+// ever exercises a single departure (T+20:00, one daemon killed); this
+// test kills two, independently, and confirms repair still completes for
+// both lost shards.
+func TestViabilityRepairSucceedsWithTwoOfFiveOffline(t *testing.T) {
+	db := liveDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	microservicePath, providerPath := buildBinaries(t)
+	ms := startMicroservice(t, ctx, microservicePath)
+
+	owner := registerOwner(t, ctx, db, ms.baseURL)
+	depositForOwner(t, ctx, ms.baseURL, owner, 100_000_00)
+
+	providers := startProviders(t, ctx, db, providerPath, ms.baseURL)
+	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 60*time.Second)
+	pollFirstAuditPass(t, ctx, db, 3*time.Minute)
+	pollAllProvidersActive(t, ctx, db, 12*time.Minute)
+
+	fileID := uploadTestFile(t, ctx, ms, owner)
+	t.Logf("uploaded file_id=%s", fileID)
+
+	// Kill 2 of 5 providers — the emergency floor (s=3 remaining), not the
+	// single-departure lazy-repair-trigger path TestDemoTimeline covers.
+	providers.killProvider(t, 0)
+	providers.killProvider(t, 1)
+
+	// DepartureThreshold applies per provider, independently — both
+	// departures must be detected, not just the first.
+	pollDeparted(t, ctx, db, 2, 11*time.Minute)
+
+	// Both lost shards belong to the one segment uploadTestFile wrote
+	// (testUploadBytes is well under one segment's plaintext capacity), so
+	// exactly 2 repair jobs — one per lost shard — must complete.
+	pollRepairCompleted(t, ctx, db, 2, 5*time.Minute)
+}
+
+// TestViabilityActiveTransitionAtTenMinutes (§7.3): VettingMinPasses=5 at
+// PollingInterval=2 minutes puts the VETTING→ACTIVE transition at
+// approximately T+10:00 — the binding constraint per mvp.md §7.3;
+// VettingMinDuration=5 minutes is never binding, since 5 consecutive
+// 2-minute-interval passes always take longer than 5 minutes to
+// accumulate. This asserts wall-clock elapsed time, not just eventual
+// success — pollAllProvidersActive's own 12-minute timeout (used
+// elsewhere in this file) tolerates a wide range without checking timing
+// precision at all.
+func TestViabilityActiveTransitionAtTenMinutes(t *testing.T) {
+	db := liveDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+
+	microservicePath, providerPath := buildBinaries(t)
+	ms := startMicroservice(t, ctx, microservicePath)
+	_ = startProviders(t, ctx, db, providerPath, ms.baseURL)
+
+	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 60*time.Second)
+
+	start := time.Now()
+	pollAllProvidersActive(t, ctx, db, 12*time.Minute)
+	elapsed := time.Since(start)
+
+	// mvp.md §7.3's own arithmetic: VettingMinPasses × PollingInterval = 10
+	// minutes minimum. Generous slack on both sides (goroutine scheduling,
+	// heartbeat jitter, CI variance) — this asserts "close to 10 minutes",
+	// not "exactly 10:00.000".
+	want := time.Duration(config.DemoProfile.VettingMinPasses) * config.DemoProfile.PollingInterval
+	const slack = 2 * time.Minute
+	if elapsed < want-slack || elapsed > want+slack {
+		t.Errorf("VETTING→ACTIVE transition took %s, want %s ± %s (mvp.md §7.3: VettingMinPasses=%d × PollingInterval=%s)",
+			elapsed, want, slack, config.DemoProfile.VettingMinPasses, config.DemoProfile.PollingInterval)
+	}
+}
+
+// TestViabilityDuplicateWebhookProducesExactlyOneEscrowRow (§7.7): the
+// mock PaymentProvider's idempotency is DB-enforced
+// (owner_escrow_events' UNIQUE(idempotency_key)), not implemented as
+// separate application logic — POST /api/v1/owner/deposit called twice
+// with the same idempotency_key must produce exactly one
+// owner_escrow_events row, not two, regardless of what HTTP status either
+// call returns.
+func TestViabilityDuplicateWebhookProducesExactlyOneEscrowRow(t *testing.T) {
+	db := liveDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	microservicePath, _ := buildBinaries(t)
+	ms := startMicroservice(t, ctx, microservicePath)
+	owner := registerOwner(t, ctx, db, ms.baseURL)
+
+	idempotencyKey := randomHex(t, 32)
+	const amountPaise = 50_000_00
+
+	status1 := depositForOwnerWithKey(t, ctx, ms.baseURL, owner, amountPaise, idempotencyKey)
+	if status1 != http.StatusOK {
+		t.Fatalf("first deposit: HTTP %d, want 200", status1)
+	}
+	status2 := depositForOwnerWithKey(t, ctx, ms.baseURL, owner, amountPaise, idempotencyKey)
+	if status2 != http.StatusOK {
+		t.Errorf("duplicate deposit (same idempotency_key): HTTP %d — a duplicate submission should still be accepted as an idempotent no-op, not rejected", status2)
+	}
+
+	var rowCount int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM owner_escrow_events WHERE owner_id = $1 AND idempotency_key = $2`,
+		owner.ownerID, idempotencyKey,
+	).Scan(&rowCount); err != nil {
+		t.Fatalf("count owner_escrow_events: %v", err)
+	}
+	if rowCount != 1 {
+		t.Errorf("owner_escrow_events rows for this idempotency_key = %d, want exactly 1 (duplicate webhook/retry must not double-credit)", rowCount)
 	}
 }
