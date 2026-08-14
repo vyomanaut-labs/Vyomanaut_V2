@@ -224,6 +224,7 @@ type liveMicroservice struct {
 	adminAPIKey string
 	signingSeed string // hex, VYOMANAUT_MICROSERVICE_SIGNING_SEED (32-byte Ed25519 seed, 64 hex chars)
 	clusterSeed string // base64, VYOMANAUT_CLUSTER_MASTER_SEED
+	logPath     string
 }
 
 func startMicroservice(t *testing.T, ctx context.Context, binPath string) *liveMicroservice {
@@ -251,7 +252,21 @@ func startMicroservice(t *testing.T, ctx context.Context, binPath string) *liveM
 		"VYOMANAUT_CLUSTER_MASTER_SEED="+clusterSeed,
 		fmt.Sprintf("VYOMANAUT_HTTP_LISTEN_ADDR=:%d", port),
 	)
-	logFile, err := os.Create(filepath.Join(t.TempDir(), "microservice.log"))
+	// [Fixed — repair pipeline investigation] logFile was previously
+	// created under t.TempDir(), which Go removes automatically at test
+	// cleanup regardless of pass/fail — so a failure's actual root cause
+	// (this process's own stdout/stderr, e.g. the exact error a repair job
+	// failed with) was unrecoverable after the fact, forcing a second
+	// manual psql round-trip and a full ~24-minute re-run just to see it.
+	// A stable os.MkdirTemp directory survives t.TempDir()'s cleanup; the
+	// content is dumped via t.Logf on failure (removed on success) so it
+	// appears directly in go test -v's own output, no extra step needed.
+	logDir, err := os.MkdirTemp("", "vyomanaut-microservice-log-")
+	if err != nil {
+		t.Fatalf("create microservice log dir: %v", err)
+	}
+	logPath := filepath.Join(logDir, "microservice.log")
+	logFile, err := os.Create(logPath)
 	if err != nil {
 		t.Fatalf("create microservice log file: %v", err)
 	}
@@ -264,9 +279,18 @@ func startMicroservice(t *testing.T, ctx context.Context, binPath string) *liveM
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
+		_ = logFile.Close()
+		if t.Failed() {
+			if content, readErr := os.ReadFile(logPath); readErr == nil {
+				t.Logf("microservice log (%s):\n%s", logPath, content)
+			} else {
+				t.Logf("could not read microservice log at %s: %v", logPath, readErr)
+			}
+		}
+		_ = os.RemoveAll(logDir)
 	})
 
-	ms := &liveMicroservice{baseURL: baseURL, adminAPIKey: adminKey, signingSeed: signingSeed, clusterSeed: clusterSeed}
+	ms := &liveMicroservice{baseURL: baseURL, adminAPIKey: adminKey, signingSeed: signingSeed, clusterSeed: clusterSeed, logPath: logPath}
 	waitForHTTP(t, baseURL+"/api/v1/admin/readiness", 30*time.Second)
 	return ms
 }
@@ -511,6 +535,7 @@ func depositForOwnerWithKey(t *testing.T, ctx context.Context, baseURL string, o
 
 type liveProviders struct {
 	cmds       [testSimCount]*exec.Cmd
+	logPaths   [testSimCount]string
 	simDataDir string
 }
 
@@ -519,6 +544,18 @@ func startProviders(t *testing.T, ctx context.Context, db *sql.DB, providerBinPa
 
 	simDataDir := t.TempDir()
 	simBasePort := freePort(t)
+
+	// [Fixed — repair pipeline investigation, same shape as
+	// startMicroservice's own fix] provider log files were previously
+	// under t.TempDir(), auto-removed at test cleanup before a failure
+	// could ever be inspected — and a repair failure is exactly as likely
+	// to be visible on the receiving (replacement) provider's side as on
+	// the microservice's, since ExecuteRepairJob re-runs a wire upload
+	// structurally similar to the original one.
+	logDir, err := os.MkdirTemp("", "vyomanaut-provider-logs-")
+	if err != nil {
+		t.Fatalf("create provider log dir: %v", err)
+	}
 
 	lp := &liveProviders{simDataDir: simDataDir}
 	for i := 0; i < testSimCount; i++ {
@@ -536,7 +573,8 @@ func startProviders(t *testing.T, ctx context.Context, db *sql.DB, providerBinPa
 			fmt.Sprintf("--sim-base-port=%d", simBasePort),
 			"--registration-bearer-token="+token,
 		)
-		logFile, err := os.Create(filepath.Join(t.TempDir(), fmt.Sprintf("provider-%d.log", i)))
+		logPath := filepath.Join(logDir, fmt.Sprintf("provider-%d.log", i))
+		logFile, err := os.Create(logPath)
 		if err != nil {
 			t.Fatalf("create provider %d log file: %v", i, err)
 		}
@@ -546,6 +584,7 @@ func startProviders(t *testing.T, ctx context.Context, db *sql.DB, providerBinPa
 			t.Fatalf("start provider %d: %v", i, err)
 		}
 		lp.cmds[i] = cmd
+		lp.logPaths[i] = logPath
 	}
 
 	t.Cleanup(func() {
@@ -555,6 +594,16 @@ func startProviders(t *testing.T, ctx context.Context, db *sql.DB, providerBinPa
 				_ = cmd.Wait()
 			}
 		}
+		if t.Failed() {
+			for i, path := range lp.logPaths {
+				if content, readErr := os.ReadFile(path); readErr == nil {
+					t.Logf("provider %d log (%s):\n%s", i, path, content)
+				} else {
+					t.Logf("could not read provider %d log at %s: %v", i, path, readErr)
+				}
+			}
+		}
+		_ = os.RemoveAll(logDir)
 	})
 	return lp
 }
@@ -764,17 +813,37 @@ func pollDeparted(t *testing.T, ctx context.Context, db *sql.DB, wantCount int, 
 // and have status = 'COMPLETED'. Parameterized (Session 16.1.2) rather
 // than fixed at ">= 1" — a 2-shard-loss scenario should produce 2
 // completed repair jobs (one per lost shard), not just one.
+// pollRepairCompleted waits until at least wantCompleted repair jobs exist
+// and have status = 'COMPLETED'. Parameterized (Session 16.1.2) rather
+// than fixed at ">= 1" — a 2-shard-loss scenario should produce 2
+// completed repair jobs (one per lost shard), not just one.
+//
+// [Fixed — repair pipeline investigation] Previously checked only
+// status = 'COMPLETED' and let a FAILED job run out the full timeout
+// before reporting "completed=0" — indistinguishable from "nothing ever
+// got enqueued." repair_jobs.status = 'FAILED' is a terminal state (the
+// executor loop does not retry a job it has already marked FAILED), so
+// waiting out the rest of the timeout once any FAILED rows exist can
+// never produce a different outcome — fail immediately instead, with the
+// count, so this surfaces in seconds rather than minutes and points
+// clearly at "read the microservice/provider logs," not "maybe it just
+// needs more time."
 func pollRepairCompleted(t *testing.T, ctx context.Context, db *sql.DB, wantCompleted int, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
-		var completed int
+		var completed, failed int
 		_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM repair_jobs WHERE status = 'COMPLETED'`).Scan(&completed)
 		if completed >= wantCompleted {
 			return
 		}
+		_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM repair_jobs WHERE status = 'FAILED'`).Scan(&failed)
+		if failed > 0 {
+			t.Fatalf("%d repair job(s) have status=FAILED (completed=%d, want %d) — see the microservice/provider log dump above for the actual error, not a timing issue",
+				failed, completed, wantCompleted)
+		}
 		if time.Now().After(deadline) {
-			t.Fatalf("fewer than %d repair jobs completed within %s (completed=%d)", wantCompleted, timeout, completed)
+			t.Fatalf("fewer than %d repair jobs completed within %s (completed=%d, failed=%d)", wantCompleted, timeout, completed, failed)
 		}
 		time.Sleep(10 * time.Second)
 	}
