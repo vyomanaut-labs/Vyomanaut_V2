@@ -48,6 +48,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -354,20 +355,31 @@ func downloadShards(
 ) ([][]byte, error) {
 	shards := make([][]byte, profile.TotalShards) // nil-filled; erasure.DecodeSegment treats nil entries as erasures
 	collected := 0
+	// [Added — repair pipeline investigation] attemptErrs preserves each
+	// holder's actual failure reason for the aggregate error below.
+	// Previously discarded entirely (bare `continue`) — correct as a
+	// control-flow decision (one bad holder must not abort the whole
+	// download), but it meant two consecutive live failures produced the
+	// byte-for-byte identical top-level error message regardless of
+	// whether the underlying cause was the same or had changed, since
+	// nothing distinguished "frame rejected" from "not authorised" from
+	// "corrupted" from "connection refused" at this level.
+	attemptErrs := make([]string, 0, len(holders))
 	for _, h := range holders {
 		if collected >= profile.DataShards {
 			break
 		}
 		data, err := downloadOneShard(ctx, transport, signingKey, microservicePeerID, chunkID, h.PeerID)
 		if err != nil {
+			attemptErrs = append(attemptErrs, fmt.Sprintf("%s: %v", h.PeerID, err))
 			continue // try the next surviving holder
 		}
 		shards[h.ShardIndex] = data
 		collected++
 	}
 	if collected < profile.DataShards {
-		return nil, fmt.Errorf("downloadShards: only %d of %d required shards recovered from %d candidate holders",
-			collected, profile.DataShards, len(holders))
+		return nil, fmt.Errorf("downloadShards: only %d of %d required shards recovered from %d candidate holders: [%s]",
+			collected, profile.DataShards, len(holders), strings.Join(attemptErrs, "; "))
 	}
 	return shards, nil
 }
