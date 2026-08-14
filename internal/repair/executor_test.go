@@ -155,6 +155,54 @@ func genTestSigningKey(t *testing.T) ed25519.PrivateKey {
 
 // ── downloadShards-level tests (exercise the unexported helper directly) ──────
 
+// TestRepairDownloadRequestFrameMatchesHandlerRepairWireFormat is a direct
+// regression guard for F-16-3: cmd/provider/handler_repair.go's Frame 1
+// requires exactly chunk_id(32) || request_ts_ms(8) || repair_auth_sig(64)
+// = 104 bytes (its own "WIRE-FORMAT CORRECTION" header note explains why —
+// repair_auth_sig is signed over request_ts_ms, so the responder cannot
+// verify it, or freshness-check it per ADR-036 §2, without also receiving
+// that field). mockStream's canned response never validates what was
+// written to it, which is exactly why the original 96-byte-frame bug
+// (request_ts_ms computed for signing but never actually transmitted)
+// passed every existing test in this file — this test captures and
+// inspects the real written bytes instead.
+func TestRepairDownloadRequestFrameMatchesHandlerRepairWireFormat(t *testing.T) {
+	signingKey := genTestSigningKey(t)
+	chunkID := randChunkID()
+	var capturedStream *mockStream
+
+	transport := &mockTransport{fn: func(peerID, protocolID string) (RepairStream, error) {
+		capturedStream = &mockStream{resp: bytes.NewReader(encodeRepairDownloadResponse(repairDownloadStatusOK, randShardDataStable(0)))}
+		return capturedStream, nil
+	}}
+
+	before := time.Now().UnixMilli()
+	if _, err := downloadOneShard(context.Background(), transport, signingKey, "microservice-peer", chunkID, "holder-peer"); err != nil {
+		t.Fatalf("downloadOneShard: %v", err)
+	}
+	after := time.Now().UnixMilli()
+
+	written := capturedStream.written.Bytes()
+	const wantTotalLen = lengthPrefixSize + chunkIDFieldSize + repairRequestTsSize + repairAuthSigSize // 4 + 104 = 108
+	if len(written) != wantTotalLen {
+		t.Fatalf("wrote %d bytes, want %d (length prefix + chunk_id(32) + request_ts_ms(8) + repair_auth_sig(64) — handler_repair.go's corrected Frame 1 shape)",
+			len(written), wantTotalLen)
+	}
+
+	gotLengthField := binary.BigEndian.Uint32(written[0:lengthPrefixSize])
+	const wantLengthField = chunkIDFieldSize + repairRequestTsSize + repairAuthSigSize // 104
+	if gotLengthField != wantLengthField {
+		t.Fatalf("length prefix = %d, want %d", gotLengthField, wantLengthField)
+	}
+
+	tsOffset := lengthPrefixSize + chunkIDFieldSize
+	gotTs := int64(binary.BigEndian.Uint64(written[tsOffset : tsOffset+repairRequestTsSize]))
+	if gotTs < before || gotTs > after {
+		t.Fatalf("request_ts_ms = %d, want between %d and %d — actually transmitted on the wire, not just used locally to compute the signature",
+			gotTs, before, after)
+	}
+}
+
 func TestRepairExecutorDownloadsMinimumShards(t *testing.T) {
 	profile := config.DemoProfile // DataShards=3
 	signingKey := genTestSigningKey(t)

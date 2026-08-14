@@ -117,6 +117,7 @@ const maxRepairReplacementRetries = 3
 const (
 	lengthPrefixSize      = 4  // uint32 big-endian frame length prefix (every frame)
 	chunkIDFieldSize      = 32 // SHA-256 content address
+	repairRequestTsSize   = 8  // [Added — F-16-3] see downloadOneShard's doc comment: cmd/provider/handler_repair.go's own "WIRE-FORMAT CORRECTION" note extended Frame 1 with this field; this file was never updated to match
 	repairAuthSigSize     = 64 // Ed25519 signature (RepairDownloadRequest)
 	shardIndexFieldSize   = 4  // uint32 big-endian (UploadRequest)
 	capabilityTokenSize   = 72 // expiry_unix_ms(8) || Ed25519 signature(64) (UploadRequest)
@@ -394,11 +395,30 @@ func downloadOneShard(
 	requestTsMs := time.Now().UnixMilli()
 	sig := signRepairDownloadRequest(signingKey, chunkID, requestTsMs, microservicePeerID)
 
-	// Frame 1 — RepairDownloadRequest: length(4) || chunk_id(32) || repair_auth_sig(64).
-	var frame1 [lengthPrefixSize + chunkIDFieldSize + repairAuthSigSize]byte
-	binary.BigEndian.PutUint32(frame1[0:lengthPrefixSize], chunkIDFieldSize+repairAuthSigSize)
-	copy(frame1[lengthPrefixSize:lengthPrefixSize+chunkIDFieldSize], chunkID[:])
-	copy(frame1[lengthPrefixSize+chunkIDFieldSize:], sig[:])
+	// Frame 1 — RepairDownloadRequest: length(4) || chunk_id(32) ||
+	// request_ts_ms(8) || repair_auth_sig(64).
+	//
+	// [Fixed — F-16-3] request_ts_ms must actually be transmitted, not
+	// just used locally to compute repair_auth_sig — see
+	// signRepairDownloadRequest's own doc comment and
+	// cmd/provider/handler_repair.go's header note (its "WIRE-FORMAT
+	// CORRECTION" flagging exactly this gap): the responder cannot verify
+	// repair_auth_sig, which is signed over request_ts_ms, without also
+	// receiving that value on the wire, and separately cannot freshness-
+	// check the request per ADR-036 §2 without it either. This client
+	// sent the original, pre-correction 96-byte frame (chunk_id ||
+	// repair_auth_sig only) while the provider's handler required and
+	// read the corrected 104-byte frame — every repair-download request
+	// was rejected (length mismatch, stream reset) before Frame 2 was
+	// ever sent, indistinguishable from every holder being unreachable.
+	var frame1 [lengthPrefixSize + chunkIDFieldSize + repairRequestTsSize + repairAuthSigSize]byte
+	binary.BigEndian.PutUint32(frame1[0:lengthPrefixSize], chunkIDFieldSize+repairRequestTsSize+repairAuthSigSize)
+	offset := lengthPrefixSize
+	copy(frame1[offset:offset+chunkIDFieldSize], chunkID[:])
+	offset += chunkIDFieldSize
+	binary.BigEndian.PutUint64(frame1[offset:offset+repairRequestTsSize], uint64(requestTsMs))
+	offset += repairRequestTsSize
+	copy(frame1[offset:], sig[:])
 	if _, err := stream.Write(frame1[:]); err != nil {
 		return nil, fmt.Errorf("write RepairDownloadRequest: %w", err)
 	}
