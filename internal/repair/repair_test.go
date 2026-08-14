@@ -330,7 +330,7 @@ func TestDepartureToRepairFullPipelineNoUniqueViolation(t *testing.T) {
 		}
 		holderProviderID := insertTestProvider(t, db, testProviderSpec{})
 		peerID := "peer-" + holderProviderID.String()
-		holders = append(holders, SurvivingHolder{ProviderID: holderProviderID, PeerID: peerID, ShardIndex: i})
+		holders = append(holders, SurvivingHolder{ProviderID: holderProviderID, PeerID: peerID, ShardIndex: i, ChunkID: randChunkID()})
 		shardsByPeer[peerID] = randShardDataStable(i)
 		exclude = append(exclude, holderProviderID)
 	}
