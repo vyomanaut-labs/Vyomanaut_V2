@@ -17,8 +17,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/config"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/crypto"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/crypto"
 )
 
 // ErrInvalidRecoveryPhrase is this package's user-facing sentinel for a

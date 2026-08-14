@@ -14,7 +14,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/storage"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/storage"
 )
 
 // TestSingleWriterGoroutine validates that 100 concurrent callers routing through a

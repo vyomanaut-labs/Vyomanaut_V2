@@ -31,7 +31,7 @@ import (
 	cryptorand "crypto/rand"
 	"fmt"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/crypto"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/crypto"
 )
 
 // Keystore is the plaintext shape of the local keystore, held in memory

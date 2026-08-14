@@ -67,10 +67,10 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/config"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/metrics"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/p2p"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/storage"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/metrics"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/p2p"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/storage"
 )
 
 // daemonVersion is reported in the heartbeat payload (IC §3.1) and startup

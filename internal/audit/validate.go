@@ -19,7 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/crypto"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/crypto"
 )
 
 // ── Layout sizes ───────────────────────────────────────────────────────────

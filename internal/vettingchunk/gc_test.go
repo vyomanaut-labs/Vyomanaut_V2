@@ -27,8 +27,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/config"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/p2p"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/p2p"
 )
 
 // ── Mock p2p.Stream / p2p.Host for the vetting-gc protocol ────────────────

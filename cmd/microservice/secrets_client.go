@@ -49,7 +49,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/audit"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/audit"
 )
 
 // clusterMasterSeedEnvVar is the IC §8 "Local development / simulation mode"

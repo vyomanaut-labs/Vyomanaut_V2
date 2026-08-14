@@ -53,10 +53,10 @@ import (
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/client/upload"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/config"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/erasure"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/p2p"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/client/upload"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/erasure"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/p2p"
 )
 
 // ── fixed test parameters (mvp.md §3.6 / §7) ────────────────────────────────

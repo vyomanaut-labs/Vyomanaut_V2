@@ -23,7 +23,7 @@ import (
 	"os"
 	"path/filepath"
 
-	localcrypto "github.com/masamasaowl/Vyomanaut_V2/internal/crypto"
+	localcrypto "github.com/vyomanaut-labs/Vyomanaut_V2/internal/crypto"
 )
 
 const identityFileName = "identity.key"

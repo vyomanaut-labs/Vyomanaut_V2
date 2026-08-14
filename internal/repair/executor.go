@@ -52,8 +52,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/config"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/erasure"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/erasure"
 )
 
 // RepairTransport is the narrow subset of a libp2p-style host this package

@@ -28,7 +28,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/vettingchunk"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/vettingchunk"
 )
 
 // vettingChunkGenerationInterval is how often this loop checks for VETTING

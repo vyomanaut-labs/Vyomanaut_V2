@@ -28,7 +28,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/crypto"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/crypto"
 )
 
 // vrNonce is a 33-byte test challenge nonce fixture.

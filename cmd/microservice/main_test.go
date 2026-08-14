@@ -11,10 +11,10 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/audit"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/cluster"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/config"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/repair"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/audit"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/cluster"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/repair"
 )
 
 // openTestDB opens a connection to the local test Postgres instance,

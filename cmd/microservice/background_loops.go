@@ -29,7 +29,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/api"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/api"
 )
 
 // readinessEvaluationCycle is IC §3.4's 60-second re-evaluation cadence.

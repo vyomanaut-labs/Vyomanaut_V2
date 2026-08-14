@@ -13,8 +13,8 @@ package account
 import (
 	"fmt"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/config"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/crypto"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/crypto"
 )
 
 // ConfirmPrompter is the minimal UI hook this package needs from its

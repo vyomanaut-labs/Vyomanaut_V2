@@ -19,7 +19,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/config"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
 )
 
 func main() {

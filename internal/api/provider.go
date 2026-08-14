@@ -65,11 +65,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/config"
-	localcrypto "github.com/masamasaowl/Vyomanaut_V2/internal/crypto"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/payment"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/repair"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/scoring"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
+	localcrypto "github.com/vyomanaut-labs/Vyomanaut_V2/internal/crypto"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/payment"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/repair"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/scoring"
 )
 
 // A named constant for decodeReceiptsCursor

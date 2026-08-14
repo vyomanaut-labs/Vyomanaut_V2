@@ -63,7 +63,7 @@ docs/           → system design documents (authoritative source in Research re
 ## Running locally
 
 ```bash
-git clone https://github.com/masamasaowl/Vyomanaut_V2.git
+git clone https://github.com/vyomanaut-labs/Vyomanaut_V2.git
 cd Vyomanaut_V2
 docker-compose -f deployments/dev/docker-compose.yml up
 ```

@@ -19,7 +19,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/metrics"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/metrics"
 )
 
 // EscrowEventType mirrors the escrow_event_type DB enum (DM §4.8).

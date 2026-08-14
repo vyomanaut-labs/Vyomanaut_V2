@@ -23,7 +23,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/crypto"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/crypto"
 )
 
 // decodeSegment reconstructs a segment's plaintext from its downloaded

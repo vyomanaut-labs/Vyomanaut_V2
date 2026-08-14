@@ -46,10 +46,10 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/config"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/crypto"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/erasure"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/p2p"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/crypto"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/erasure"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/p2p"
 )
 
 // ── Test helpers ────────────────────────────────────────────────────────

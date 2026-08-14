@@ -17,7 +17,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/storage"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/storage"
 )
 
 // writeReq is the message type for the channel-serialised writer goroutine pattern

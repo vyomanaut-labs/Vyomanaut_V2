@@ -13,7 +13,7 @@
 //	build.md Phase 3.1 Session 3.1.1]
 package erasure
 
-import "github.com/masamasaowl/Vyomanaut_V2/internal/config"
+import "github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
 
 // ShardSize is the fixed size of every erasure-coded shard in bytes.
 // 256 KB; identical in both demo and production modes.

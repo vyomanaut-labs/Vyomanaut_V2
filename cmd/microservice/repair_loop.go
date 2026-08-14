@@ -22,10 +22,10 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/config"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/erasure"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/p2p"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/repair"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/erasure"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/p2p"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/repair"
 )
 
 // repairExecutorIdleBackoff is how long the executor loop sleeps after

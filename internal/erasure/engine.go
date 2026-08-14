@@ -19,7 +19,7 @@ package erasure
 import (
 	"fmt"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/config"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
 )
 
 // NewEngine constructs an erasure Engine from the active NetworkProfile.

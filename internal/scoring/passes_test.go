@@ -23,7 +23,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/config"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
 )
 
 // TestIncrementConsecutivePassesUsesDemoProfile verifies the VETTING->ACTIVE

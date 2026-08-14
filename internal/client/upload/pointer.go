@@ -48,7 +48,7 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/crypto/hkdf"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/crypto"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/crypto"
 )
 
 const poly1305TagSize = 16

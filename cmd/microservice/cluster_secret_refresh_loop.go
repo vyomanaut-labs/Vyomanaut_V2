@@ -32,7 +32,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/audit"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/audit"
 )
 
 // clusterSecretRefreshInterval is comfortably under ClusterSecretCache's

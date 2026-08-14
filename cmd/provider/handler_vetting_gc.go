@@ -22,9 +22,9 @@ import (
 	"io"
 	"time"
 
-	localcrypto "github.com/masamasaowl/Vyomanaut_V2/internal/crypto"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/p2p"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/storage"
+	localcrypto "github.com/vyomanaut-labs/Vyomanaut_V2/internal/crypto"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/p2p"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/storage"
 )
 
 // ── Protocol ID (IC §4.5) ────────────────────────────────────────────────

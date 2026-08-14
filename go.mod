@@ -1,4 +1,4 @@
-module github.com/masamasaowl/Vyomanaut_V2
+module github.com/vyomanaut-labs/Vyomanaut_V2
 
 go 1.26.2
 

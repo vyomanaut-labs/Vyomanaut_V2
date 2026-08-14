@@ -53,7 +53,7 @@ linters:
             - "**/internal/erasure/**"
           allow:
             - $gostd
-            - github.com/masamasaowl/Vyomanaut_V2/internal/config
+            - github.com/vyomanaut-labs/Vyomanaut_V2/internal/config
 
         # ── storage: no payment, scoring, repair ────────────────────────────────
         storage:
@@ -63,9 +63,9 @@ linters:
             - $gostd
             - github.com/linxGnu/grocksdb
             - github.com/stretchr/testify
-            - github.com/masamasaowl/Vyomanaut_V2/internal/config
-            - github.com/masamasaowl/Vyomanaut_V2/internal/storage
-            - github.com/masamasaowl/Vyomanaut_V2/internal/erasure
+            - github.com/vyomanaut-labs/Vyomanaut_V2/internal/config
+            - github.com/vyomanaut-labs/Vyomanaut_V2/internal/storage
+            - github.com/vyomanaut-labs/Vyomanaut_V2/internal/erasure
 
         # ── payment: no repair, p2p ──────────────────────────────────────────────
         # google/uuid and lib/pq added (build.md Phase 10.1/10.2): every exported
@@ -82,12 +82,12 @@ linters:
             - "**/internal/payment/**"
           allow:
             - $gostd
-            - github.com/masamasaowl/Vyomanaut_V2/internal/config
-            - github.com/masamasaowl/Vyomanaut_V2/internal/scoring
+            - github.com/vyomanaut-labs/Vyomanaut_V2/internal/config
+            - github.com/vyomanaut-labs/Vyomanaut_V2/internal/scoring
             - github.com/google/uuid
             - github.com/lib/pq
             - github.com/prometheus/client_golang/prometheus
-            - github.com/masamasaowl/Vyomanaut_V2/internal/metrics
+            - github.com/vyomanaut-labs/Vyomanaut_V2/internal/metrics
 
         # ── scoring: no repair, payment ──────────────────────────────────────────
         # google/uuid and lib/pq added (build.md Phase 8.1 Session 8.1.1): IC §5.6
@@ -100,7 +100,7 @@ linters:
             - "**/internal/scoring/**"
           allow:
             - $gostd
-            - github.com/masamasaowl/Vyomanaut_V2/internal/config
+            - github.com/vyomanaut-labs/Vyomanaut_V2/internal/config
             - github.com/google/uuid
             - github.com/lib/pq
 
@@ -110,12 +110,12 @@ linters:
             - "**/internal/audit/**"
           allow:
             - $gostd
-            - github.com/masamasaowl/Vyomanaut_V2/internal/crypto
+            - github.com/vyomanaut-labs/Vyomanaut_V2/internal/crypto
             - github.com/google/uuid
             - github.com/lib/pq
             - github.com/prometheus/client_golang/prometheus
-            - github.com/masamasaowl/Vyomanaut_V2/internal/metrics
-        
+            - github.com/vyomanaut-labs/Vyomanaut_V2/internal/metrics
+
         # ── p2p: stdlib + crypto only (identity.go needs DeriveKeystoreEncKey / ──
         # EncryptAEAD/DecryptAEAD); no payment, scoring, repair, audit
         p2p:
@@ -123,8 +123,8 @@ linters:
             - "**/internal/p2p/**"
           allow:
             - $gostd
-            - github.com/masamasaowl/Vyomanaut_V2/internal/config
-            - github.com/masamasaowl/Vyomanaut_V2/internal/crypto
+            - github.com/vyomanaut-labs/Vyomanaut_V2/internal/config
+            - github.com/vyomanaut-labs/Vyomanaut_V2/internal/crypto
 
         # ── repair: config + erasure only — no payment, audit, scoring, p2p ──────
         # IC §9's closing paragraph: "the microservice entrypoint wires
@@ -143,18 +143,18 @@ linters:
             - "**/internal/repair/**"
           allow:
             - $gostd
-            - github.com/masamasaowl/Vyomanaut_V2/internal/config
-            - github.com/masamasaowl/Vyomanaut_V2/internal/erasure
+            - github.com/vyomanaut-labs/Vyomanaut_V2/internal/config
+            - github.com/vyomanaut-labs/Vyomanaut_V2/internal/erasure
             - github.com/google/uuid
             - github.com/lib/pq
-            - github.com/masamasaowl/Vyomanaut_V2/internal/metrics
+            - github.com/vyomanaut-labs/Vyomanaut_V2/internal/metrics
 
         # ── client/*: deny-only rule; everything else stays allowed by default ──
         client:
           files:
             - "**/internal/client/**"
           deny:
-            - pkg: "github.com/masamasaowl/Vyomanaut_V2/cmd"
+            - pkg: "github.com/vyomanaut-labs/Vyomanaut_V2/cmd"
               desc: "internal/client/* must not import cmd/"
 
   exclusions:

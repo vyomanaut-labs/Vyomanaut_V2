@@ -11,8 +11,8 @@ package storage_test
 import (
 	"testing"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/erasure"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/storage"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/erasure"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/storage"
 )
 
 // TestChunkDataSizeMatchesErasureShardSize closes a gap where

@@ -30,15 +30,15 @@ import (
 
 	_ "github.com/lib/pq"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/api"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/audit"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/cluster"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/config"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/erasure"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/p2p"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/payment"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/repair"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/vettingchunk"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/api"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/audit"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/cluster"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/erasure"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/p2p"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/payment"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/repair"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/vettingchunk"
 )
 
 // gossipMinPeerAcks is this session's own step 6 requirement: "BLOCK until

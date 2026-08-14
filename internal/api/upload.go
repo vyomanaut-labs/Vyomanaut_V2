@@ -105,9 +105,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/config"
-	localcrypto "github.com/masamasaowl/Vyomanaut_V2/internal/crypto"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/repair"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
+	localcrypto "github.com/vyomanaut-labs/Vyomanaut_V2/internal/crypto"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/repair"
 )
 
 // ── Capability token (IC §4.1) ──────────────────────────────────────────

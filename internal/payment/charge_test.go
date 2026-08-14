@@ -29,7 +29,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/config"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
 )
 
 // ── Pure function tests (no database needed) ──────────────────────────────────

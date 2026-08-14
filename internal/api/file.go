@@ -75,9 +75,9 @@ import (
 
 	"github.com/google/uuid"
 
-	localcrypto "github.com/masamasaowl/Vyomanaut_V2/internal/crypto"
+	localcrypto "github.com/vyomanaut-labs/Vyomanaut_V2/internal/crypto"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/config"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
 )
 
 // Named constants for crypto

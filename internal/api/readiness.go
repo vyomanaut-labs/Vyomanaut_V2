@@ -43,8 +43,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/audit"
-	"github.com/masamasaowl/Vyomanaut_V2/internal/config"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/audit"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
 )
 
 // productionQuorumSize and soloInstanceSize are the two possible derived

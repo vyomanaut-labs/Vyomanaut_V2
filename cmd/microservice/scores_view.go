@@ -35,7 +35,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/config"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
 )
 
 // providerScoresViewTemplate mirrors migrations/001_initial_schema.sql's

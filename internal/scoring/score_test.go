@@ -51,7 +51,7 @@ import (
 	"github.com/google/uuid"
 	_ "github.com/lib/pq" // registers the "postgres" driver used by openTestDB
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/config"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
 )
 
 // ── DB fixture plumbing (reused by passes_test.go, rto_test.go) ───────────────

@@ -43,7 +43,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/config"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
 )
 
 // ── Session 11.8.1 — Storage Pricing Estimate ───────────────────────────

@@ -42,7 +42,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/masamasaowl/Vyomanaut_V2/internal/p2p"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/p2p"
 )
 
 // Chunk-upload protocol constants (IC §4.1) — a package-local twin of
