@@ -6,7 +6,7 @@ This is where the `Version 2` of the ambitious and exhilarating project is being
 
 > **The Core Idea:** Distributed cloud storage network for India powered by over a billion devices.
 
-**Note:** If you want to understand *why* it's being built this way, the thinking lives in the [Research repo](https://github.com/masamasaowl/Vyomanaut_Research). If you want to see where it all started, that's [V1](https://github.com/masamasaowl/Vyomanaut).
+**Note:** If you want to understand *why* it's being built this way, the thinking lives in the [Research repo](https://github.com/vyomanaut-labs/Vyomanaut_Research). If you want to see where it all started, that's [V1](https://github.com/vyomanaut-labs/Vyomanaut).
 
 ---
 
@@ -74,5 +74,5 @@ Demo mode spins up a 5-provider network on your laptop. Full upload → audit �
 
 ## Related
 
-- **[Vyomanaut V1](https://github.com/masamasaowl/Vyomanaut)** — where this idea was born
-- **[Vyomanaut Research](https://github.com/masamasaowl/Vyomanaut_Research)** — the system design, ADRs, and 41 papers behind V2
+- **[Vyomanaut V1](https://github.com/vyomanaut-labs/Vyomanaut)** — where this idea was born
+- **[Vyomanaut Research](https://github.com/vyomanaut-labs/Vyomanaut_Research)** — the system design, ADRs, and 41 papers behind V2
