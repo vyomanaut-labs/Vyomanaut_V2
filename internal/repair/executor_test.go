@@ -206,7 +206,6 @@ func TestRepairDownloadRequestFrameMatchesHandlerRepairWireFormat(t *testing.T) 
 func TestRepairExecutorDownloadsMinimumShards(t *testing.T) {
 	profile := config.DemoProfile // DataShards=3
 	signingKey := genTestSigningKey(t)
-	chunkID := randChunkID()
 
 	transport := &mockTransport{
 		fn: func(peerID, protocolID string) (RepairStream, error) {
@@ -214,16 +213,18 @@ func TestRepairExecutorDownloadsMinimumShards(t *testing.T) {
 		},
 	}
 
-	// Offer 5 holders; only the first profile.DataShards (3) should ever be contacted.
+	// Offer 5 holders; only the first profile.DataShards (3) should ever be
+	// contacted. Each holder gets its own distinct ChunkID — F-16-4: a
+	// shared chunk_id across holders is exactly the bug this fixed.
 	holders := []SurvivingHolder{
-		{ProviderID: uuid.New(), PeerID: "peer-0", ShardIndex: 0},
-		{ProviderID: uuid.New(), PeerID: "peer-1", ShardIndex: 1},
-		{ProviderID: uuid.New(), PeerID: "peer-2", ShardIndex: 2},
-		{ProviderID: uuid.New(), PeerID: "peer-3", ShardIndex: 3},
-		{ProviderID: uuid.New(), PeerID: "peer-4", ShardIndex: 4},
+		{ProviderID: uuid.New(), PeerID: "peer-0", ShardIndex: 0, ChunkID: randChunkID()},
+		{ProviderID: uuid.New(), PeerID: "peer-1", ShardIndex: 1, ChunkID: randChunkID()},
+		{ProviderID: uuid.New(), PeerID: "peer-2", ShardIndex: 2, ChunkID: randChunkID()},
+		{ProviderID: uuid.New(), PeerID: "peer-3", ShardIndex: 3, ChunkID: randChunkID()},
+		{ProviderID: uuid.New(), PeerID: "peer-4", ShardIndex: 4, ChunkID: randChunkID()},
 	}
 
-	shards, err := downloadShards(context.Background(), transport, profile, signingKey, "microservice-peer", chunkID, holders)
+	shards, err := downloadShards(context.Background(), transport, profile, signingKey, "microservice-peer", holders)
 	if err != nil {
 		t.Fatalf("downloadShards: %v", err)
 	}
@@ -243,7 +244,6 @@ func TestRepairExecutorDownloadsMinimumShards(t *testing.T) {
 func TestRepairExecutorFallsBackOnHolderFailure(t *testing.T) {
 	profile := config.DemoProfile // DataShards=3
 	signingKey := genTestSigningKey(t)
-	chunkID := randChunkID()
 
 	transport := &mockTransport{
 		fn: func(peerID, protocolID string) (RepairStream, error) {
@@ -255,15 +255,16 @@ func TestRepairExecutorFallsBackOnHolderFailure(t *testing.T) {
 	}
 
 	// peer-bad (offered first) fails; downloadShards must fall back to the
-	// remaining candidates rather than aborting.
+	// remaining candidates rather than aborting. Each holder gets its own
+	// distinct ChunkID — F-16-4.
 	holders := []SurvivingHolder{
-		{ProviderID: uuid.New(), PeerID: "peer-bad", ShardIndex: 0},
-		{ProviderID: uuid.New(), PeerID: "peer-ok-1", ShardIndex: 1},
-		{ProviderID: uuid.New(), PeerID: "peer-ok-2", ShardIndex: 2},
-		{ProviderID: uuid.New(), PeerID: "peer-ok-3", ShardIndex: 3},
+		{ProviderID: uuid.New(), PeerID: "peer-bad", ShardIndex: 0, ChunkID: randChunkID()},
+		{ProviderID: uuid.New(), PeerID: "peer-ok-1", ShardIndex: 1, ChunkID: randChunkID()},
+		{ProviderID: uuid.New(), PeerID: "peer-ok-2", ShardIndex: 2, ChunkID: randChunkID()},
+		{ProviderID: uuid.New(), PeerID: "peer-ok-3", ShardIndex: 3, ChunkID: randChunkID()},
 	}
 
-	shards, err := downloadShards(context.Background(), transport, profile, signingKey, "microservice-peer", chunkID, holders)
+	shards, err := downloadShards(context.Background(), transport, profile, signingKey, "microservice-peer", holders)
 	if err != nil {
 		t.Fatalf("downloadShards: %v (must fall back to the next candidate, not abort)", err)
 	}
@@ -311,6 +312,7 @@ func setupFullPipelineFixture(t *testing.T, db *sql.DB, missingIndex int) (
 			ProviderID: holderProviderID,
 			PeerID:     "peer-" + holderProviderID.String(),
 			ShardIndex: i,
+			ChunkID:    randChunkID(), // F-16-4 — each holder's own shard has its own distinct chunk_id
 		})
 	}
 

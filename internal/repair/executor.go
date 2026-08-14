@@ -86,6 +86,19 @@ type SurvivingHolder struct {
 	ProviderID uuid.UUID
 	PeerID     string
 	ShardIndex int
+	// ChunkID is THIS holder's own shard's content-hash chunk_id — never
+	// job.ChunkID (the lost/missing shard's identity). [Added — F-16-4]
+	// Each shard within a segment is genuinely different bytes (RS
+	// systematic/parity encoding), hence a genuinely different SHA-256
+	// content address; requesting the lost shard's chunk_id from a
+	// surviving holder asks for data that provider never had in the first
+	// place, and correctly gets repairStatusNotFound (0x01) back — every
+	// time, from every holder, which is exactly what live verification
+	// showed once F-16-3's frame-format fix let the request reach this
+	// far. The caller (cmd/microservice/repair_loop.go's
+	// findSurvivingHolders) is responsible for populating this from
+	// chunk_assignments.chunk_id.
+	ChunkID [32]byte
 }
 
 // Protocol IDs (IC §4.4.1, IC §4.1).
@@ -194,7 +207,7 @@ func ExecuteRepairJob(
 	excludeProviderIDs []uuid.UUID,
 ) error {
 	// ── 1. Download ──────────────────────────────────────────────────────────
-	shards, err := downloadShards(ctx, transport, profile, signingKey, microservicePeerID, job.ChunkID, survivingHolders)
+	shards, err := downloadShards(ctx, transport, profile, signingKey, microservicePeerID, survivingHolders)
 	if err != nil {
 		_ = MarkJobComplete(ctx, db, job.JobID, false)
 		return fmt.Errorf("repair.ExecuteRepairJob: download: %w", err)
@@ -350,7 +363,6 @@ func downloadShards(
 	profile config.NetworkProfile,
 	signingKey ed25519.PrivateKey,
 	microservicePeerID string,
-	chunkID [32]byte,
 	holders []SurvivingHolder,
 ) ([][]byte, error) {
 	shards := make([][]byte, profile.TotalShards) // nil-filled; erasure.DecodeSegment treats nil entries as erasures
@@ -369,7 +381,12 @@ func downloadShards(
 		if collected >= profile.DataShards {
 			break
 		}
-		data, err := downloadOneShard(ctx, transport, signingKey, microservicePeerID, chunkID, h.PeerID)
+		// [Fixed — F-16-4] h.ChunkID, not a shared chunkID parameter: each
+		// holder's own shard has its own distinct content-hash identity —
+		// see SurvivingHolder.ChunkID's doc comment for why requesting the
+		// lost shard's chunk_id from a surviving holder can only ever
+		// return NotFound.
+		data, err := downloadOneShard(ctx, transport, signingKey, microservicePeerID, h.ChunkID, h.PeerID)
 		if err != nil {
 			attemptErrs = append(attemptErrs, fmt.Sprintf("%s: %v", h.PeerID, err))
 			continue // try the next surviving holder
