@@ -17,6 +17,7 @@ import (
 	"crypto/ed25519"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log"
 	"time"
 
@@ -67,7 +68,7 @@ func runPromotionTicker(ctx context.Context, db *sql.DB, profile config.NetworkP
 // not be a provider that already holds another shard of this segment).
 func findSurvivingHolders(ctx context.Context, db *sql.DB, segmentID uuid.UUID, excludeProviderID *uuid.UUID) ([]repair.SurvivingHolder, []uuid.UUID, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT provider_id, shard_index
+		SELECT provider_id, shard_index, chunk_id
 		FROM chunk_assignments
 		WHERE segment_id = $1 AND is_vetting_chunk = FALSE AND status = 'ACTIVE'`,
 		segmentID,
@@ -83,19 +84,36 @@ func findSurvivingHolders(ctx context.Context, db *sql.DB, segmentID uuid.UUID, 
 	)
 	for rows.Next() {
 		var (
-			providerID uuid.UUID
-			shardIndex int
+			providerID   uuid.UUID
+			shardIndex   int
+			chunkIDBytes []byte
 		)
-		if err := rows.Scan(&providerID, &shardIndex); err != nil {
+		if err := rows.Scan(&providerID, &shardIndex, &chunkIDBytes); err != nil {
 			return nil, nil, err
 		}
 		if excludeProviderID != nil && providerID == *excludeProviderID {
 			continue
 		}
+		// [Fixed — F-16-4] chunk_id must be fetched per-holder: each shard
+		// within a segment is different bytes (RS systematic/parity
+		// encoding), hence a different SHA-256 content address. The
+		// original query never selected this column at all, so every
+		// download request downstream used the lost shard's own chunk_id
+		// (job.ChunkID) against every surviving holder — none of whom
+		// ever stored that exact chunk_id — producing a deterministic
+		// repairStatusNotFound (0x01) from every holder, every time. See
+		// SurvivingHolder.ChunkID's doc comment (internal/repair/executor.go).
+		if len(chunkIDBytes) != 32 {
+			return nil, nil, fmt.Errorf("findSurvivingHolders: chunk_assignments.chunk_id has length %d, want 32 (provider_id=%s, shard_index=%d)",
+				len(chunkIDBytes), providerID, shardIndex)
+		}
+		var chunkID [32]byte
+		copy(chunkID[:], chunkIDBytes)
 		holders = append(holders, repair.SurvivingHolder{
 			ProviderID: providerID,
 			PeerID:     providerID.String(),
 			ShardIndex: shardIndex,
+			ChunkID:    chunkID,
 		})
 		ids = append(ids, providerID)
 	}
