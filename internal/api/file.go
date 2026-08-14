@@ -17,16 +17,27 @@
 // signal: HandleAssign leaves it as a zero-length bytea; HandleRegister's
 // 409 check is octet_length(pointer_ciphertext) > 0 AND status = 'ACTIVE'.
 //
-// [Decision — owner_sig verification convention] owner_sig here follows
-// owner.go's OWN established convention (raw ed25519.Verify over a
-// hand-built canonical-JSON-shaped byte string, per verifyOwnerSig) — not
-// provider.go's crypto.SignBytes/VerifyBytes hash-then-sign convention.
-// These two conventions are already deliberately distinct in this codebase
-// (confirmed in Phase 11.6's research); this file's multi-field version
-// reuses provider.go's canonicalSigningObject/jstr/jstrArray builders
-// (package-private, already in this package) purely for the fixed-layout
-// construction, then verifies with ed25519.Verify directly — never
-// crypto.VerifyBytes — to stay on the owner side of that split.
+// [Corrected, F-16-1] owner_sig verification. This file's original
+// (Session 11.7.2) approach followed what its own comment called
+// "owner.go's OWN established convention" — a hand-built canonical-JSON-
+// shaped byte string, verified via a bare ed25519.Verify call, deliberately
+// distinct from provider.go's crypto.SignBytes/VerifyBytes hash-then-sign
+// convention. That convention is incompatible with internal/crypto's own
+// package doc, which states as a CRITICAL rule: "JSON serialisation MUST
+// NOT be used for signing inputs — field ordering is not guaranteed across
+// Go versions. All signing inputs must be constructed as a fixed-layout
+// byte sequence." internal/client/upload/pointer.go's own header comment
+// documents that its client-side signing was already corrected to a
+// fixed-layout scheme per finding A-6 ("critical fix to the OAS's stale
+// 'canonical JSON, keys sorted' description") — this file was never
+// updated to match, so every real /api/v1/file/register call failed
+// owner_sig verification deterministically, for every upload, until this
+// fix. See ownerSigSigningInput's own doc comment for the corrected
+// byte-layout, which now matches pointer.go's computeOwnerSig exactly and
+// verifies via localcrypto.VerifyBytes, IC §3.2's actual composition.
+// Caught by build.md Session 16.1.1's live end-to-end run, the same class
+// of gap as F-070-13/ADR-073 — a client/server contract drift invisible to
+// either side's own unit tests, since neither exercises the other's code.
 //
 // [Decision — file-delete "provider notification"] OAS's deleteFile
 // description implies a live, synchronous P2P notification attempt at
@@ -53,14 +64,18 @@ package api
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
 
 	"github.com/google/uuid"
+
+	localcrypto "github.com/masamasaowl/Vyomanaut_V2/internal/crypto"
 
 	"github.com/masamasaowl/Vyomanaut_V2/internal/config"
 )
@@ -91,41 +106,88 @@ type fileRegisterResponseBody struct {
 	UploadedAt time.Time `json:"uploaded_at"`
 }
 
-// canonicalFileRegisterSigningInput signs every field except owner_sig, in
-// alphabetical key order, present-fields-only (matching provider.go's same
-// convention for optional fields) — built via the same
-// canonicalSigningObject/jstr/jstrArray helpers provider.go already defines
-// in this package.
-func canonicalFileRegisterSigningInput(req fileRegisterRequestBody) []byte {
-	fields := []signingField{
-		{"file_id", jstr(req.FileID.String())},
+// ownerSigDomainPrefix must match internal/client/upload/pointer.go's own
+// constant of the same name exactly — internal/api cannot import a
+// internal/client package (layering), so this is a deliberate, minimal
+// duplication of one string literal, not a design split.
+const ownerSigDomainPrefix = "vyomanaut-file-register-v1"
+
+// ownerSigSigningInput builds the exact fixed-layout byte sequence
+// internal/client/upload/pointer.go's computeOwnerSig signs (A-6), for use
+// with localcrypto.VerifyBytes — which itself SHA-256s this input before
+// the Ed25519 check, per IC §3.2's hash-then-sign composition.
+//
+// [Fixed — corrects a stale, never-updated verification scheme] This
+// function replaces canonicalFileRegisterSigningInput, which built a
+// JSON-shaped canonical object (alphabetical keys, quoted string values)
+// and verified it via a bare ed25519.Verify call. internal/crypto's own
+// package doc states, as a CRITICAL rule: "JSON serialisation MUST NOT be
+// used for signing inputs — field ordering is not guaranteed across Go
+// versions. All signing inputs must be constructed as a fixed-layout byte
+// sequence." pointer.go's own header comment documents exactly this fix
+// having already been applied client-side ("fixed-layout, NOT canonical
+// JSON — A-6, critical fix to the OAS's stale 'canonical JSON, keys
+// sorted' description") — this file (Session 11.7.2) predates that
+// correction and was never brought in line with it, so every real
+// owner_sig verification failed deterministically until now: not a
+// single-request edge case, every /api/v1/file/register call, for every
+// upload, on every provider network. Caught by build.md Session 16.1.1's
+// live end-to-end run, the same way F-070-13/ADR-073 was.
+//
+// The two required inputs the client computes but this handler must
+// reproduce from wire values: pointerCiphertextHash is SHA-256 of the raw
+// (base64-decoded) pointer ciphertext, never the base64 string itself;
+// displayNameBlockHash is SHA-256 of raw displayNameCiphertext ||
+// displayNameNonce || displayNameTag concatenated — and critically,
+// displayNameNonce must be a full 12 zero bytes (not an empty/nil slice)
+// when the display name is absent, matching ownerSigInput.DisplayNameNonce's
+// Go zero value ([12]byte{}) on the client side. A nil slice here would
+// silently hash to a different, wrong value.
+func ownerSigSigningInput(fileID uuid.UUID, pointerCiphertext, pointerNonce, pointerTag []byte, originalSizeBytes int64, displayNamePresent bool, displayNameCiphertext, displayNameNonce, displayNameTag []byte, schemaVersion int) []byte {
+	dnNonce := displayNameNonce
+	if len(dnNonce) == 0 {
+		dnNonce = make([]byte, aesGCMNonceSize)
 	}
-	if req.DisplayNameCiphertext != nil {
-		fields = append(fields, signingField{"display_name_ciphertext", jstr(*req.DisplayNameCiphertext)})
+	displayNameBlock := concatFileRegisterBytes(displayNameCiphertext, dnNonce, displayNameTag)
+	displayNameBlockHash := sha256.Sum256(displayNameBlock)
+	pointerCiphertextHash := sha256.Sum256(pointerCiphertext)
+
+	var displayNamePresentByte [1]byte
+	if displayNamePresent {
+		displayNamePresentByte[0] = 1
 	}
-	if req.DisplayNameNonce != nil {
-		fields = append(fields, signingField{"display_name_nonce", jstr(*req.DisplayNameNonce)})
-	}
-	if req.DisplayNameTag != nil {
-		fields = append(fields, signingField{"display_name_tag", jstr(*req.DisplayNameTag)})
-	}
-	fields = append(fields,
-		signingField{"original_size_bytes", jstrInt64(req.OriginalSizeBytes)},
-		signingField{"pointer_ciphertext", jstr(req.PointerCiphertext)},
-		signingField{"pointer_nonce", jstr(req.PointerNonce)},
-		signingField{"pointer_tag", jstr(req.PointerTag)},
-		signingField{"schema_version", jstrInt(req.SchemaVersion)},
+	var originalSizeBytesArr [8]byte
+	binary.BigEndian.PutUint64(originalSizeBytesArr[:], uint64(originalSizeBytes))
+	var schemaVersionBytes [4]byte
+	binary.BigEndian.PutUint32(schemaVersionBytes[:], uint32(schemaVersion))
+
+	return concatFileRegisterBytes(
+		[]byte(ownerSigDomainPrefix),
+		fileID[:],
+		pointerCiphertextHash[:],
+		pointerNonce,
+		pointerTag,
+		originalSizeBytesArr[:],
+		displayNamePresentByte[:],
+		displayNameBlockHash[:],
+		schemaVersionBytes[:],
 	)
-	return canonicalSigningObject(fields...)
 }
 
-// jstrInt and jstrInt64 render bare (unquoted) JSON integers for use as a
-// signingField.value, matching canonicalRegisterSigningInput's
-// declared_storage_gb treatment in provider.go.
-func jstrInt(n int) string { return jstrInt64(int64(n)) }
-func jstrInt64(n int64) string {
-	b, _ := json.Marshal(n)
-	return string(b)
+// concatFileRegisterBytes is this file's own copy of the same trivial
+// concatenation helper pointer.go defines locally (concatBytes) — internal/api
+// cannot import internal/client/upload (layering), and the helper is too
+// small to be worth promoting to a shared package for one caller on each side.
+func concatFileRegisterBytes(parts ...[]byte) []byte {
+	total := 0
+	for _, p := range parts {
+		total += len(p)
+	}
+	out := make([]byte, 0, total)
+	for _, p := range parts {
+		out = append(out, p...)
+	}
+	return out
 }
 
 // FileRegisterHandler serves POST /api/v1/file/register.
@@ -218,6 +280,12 @@ func (h *FileRegisterHandler) HandleRegister(w http.ResponseWriter, r *http.Requ
 		WriteError(w, http.StatusInternalServerError, ErrInternal, "owner lookup failed", nil, "", nil)
 		return
 	}
+	if len(ownerPubKeyRaw) != ed25519.PublicKeySize {
+		WriteError(w, http.StatusInternalServerError, ErrInternal, "stored owner public key has the wrong length", nil, "", nil)
+		return
+	}
+	var ownerPubKey [32]byte
+	copy(ownerPubKey[:], ownerPubKeyRaw)
 	// decodeProviderSig (provider.go) is a generic 128-hex-char -> 64-byte
 	// decoder despite its name; reused here for owner_sig rather than
 	// duplicating the same decode+length-check logic.
@@ -226,7 +294,12 @@ func (h *FileRegisterHandler) HandleRegister(w http.ResponseWriter, r *http.Requ
 		WriteError(w, http.StatusBadRequest, ErrInvalidRequest, "owner_sig must be 128 lowercase hex characters", nil, "owner_sig", nil)
 		return
 	}
-	if !ed25519.Verify(ed25519.PublicKey(ownerPubKeyRaw), canonicalFileRegisterSigningInput(req), sigArr[:]) {
+	signingInput := ownerSigSigningInput(
+		req.FileID, pointerCiphertext, pointerNonce, pointerTag, req.OriginalSizeBytes,
+		req.DisplayNameCiphertext != nil, displayNameCiphertext, displayNameNonce, displayNameTag,
+		req.SchemaVersion,
+	)
+	if !localcrypto.VerifyBytes(ownerPubKey, signingInput, sigArr) {
 		WriteError(w, http.StatusUnauthorized, ErrInvalidBodySignature, "invalid owner_sig", nil, "", nil)
 		return
 	}

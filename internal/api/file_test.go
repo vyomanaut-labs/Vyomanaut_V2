@@ -7,8 +7,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +18,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	localcrypto "github.com/masamasaowl/Vyomanaut_V2/internal/crypto"
 
 	"github.com/masamasaowl/Vyomanaut_V2/internal/config"
 )
@@ -47,11 +51,89 @@ func insertPlaceholderFile(t *testing.T, db *sql.DB, fileID, ownerID uuid.UUID, 
 	}
 }
 
+// signFileRegisterRequest signs req via the same fixed-layout scheme
+// internal/client/upload/pointer.go's computeOwnerSig uses (A-6) and
+// ownerSigSigningInput (file.go) verifies against — not a bare
+// ed25519.Sign over req's own fields. [Fixed, found alongside F-16-1] This
+// helper previously signed via ed25519.Sign(priv,
+// canonicalFileRegisterSigningInput(req)) directly — self-consistent with
+// file.go's own (wrong) verification at the time, which is exactly why
+// this test suite never caught the client/server signing-scheme mismatch
+// live testing did.
 func signFileRegisterRequest(t *testing.T, priv ed25519.PrivateKey, req fileRegisterRequestBody) fileRegisterRequestBody {
 	t.Helper()
-	sig := ed25519.Sign(priv, canonicalFileRegisterSigningInput(req))
-	req.OwnerSig = hexEncode(sig)
+	decode := func(field, s string) []byte {
+		raw, err := base64.StdEncoding.DecodeString(s)
+		if err != nil {
+			t.Fatalf("decode %s: %v", field, err)
+		}
+		return raw
+	}
+	pointerCiphertext := decode("pointer_ciphertext", req.PointerCiphertext)
+	pointerNonce := decode("pointer_nonce", req.PointerNonce)
+	pointerTag := decode("pointer_tag", req.PointerTag)
+	var displayNameCiphertext, displayNameNonce, displayNameTag []byte
+	if req.DisplayNameCiphertext != nil {
+		displayNameCiphertext = decode("display_name_ciphertext", *req.DisplayNameCiphertext)
+	}
+	if req.DisplayNameNonce != nil {
+		displayNameNonce = decode("display_name_nonce", *req.DisplayNameNonce)
+	}
+	if req.DisplayNameTag != nil {
+		displayNameTag = decode("display_name_tag", *req.DisplayNameTag)
+	}
+	input := ownerSigSigningInput(
+		req.FileID, pointerCiphertext, pointerNonce, pointerTag, req.OriginalSizeBytes,
+		req.DisplayNameCiphertext != nil, displayNameCiphertext, displayNameNonce, displayNameTag,
+		req.SchemaVersion,
+	)
+	sig := localcrypto.SignBytes(priv, input)
+	req.OwnerSig = hexEncode(sig[:])
 	return req
+}
+
+// TestOwnerSigSigningInputMatchesDocumentedLayout is a direct regression
+// guard for F-16-1 (the owner_sig JSON-canonical/fixed-layout mismatch):
+// it hand-computes the fixed-layout byte sequence
+// internal/client/upload/pointer.go's computeOwnerSig documents —
+// domain_prefix || file_id || SHA256(pointer_ciphertext) || pointer_nonce
+// || pointer_tag || original_size_bytes(8,BE) || display_name_present(1)
+// || SHA256(display_name_ciphertext||nonce||tag) || schema_version(4,BE)
+// — independently of ownerSigSigningInput itself, so a future regression
+// back toward the JSON-canonical scheme (or any layout drift) fails here
+// even if signFileRegisterRequest's own fixture drifted the same way this
+// one did.
+func TestOwnerSigSigningInputMatchesDocumentedLayout(t *testing.T) {
+	fileID := uuid.New()
+	pointerCiphertext := []byte("fake-pointer-ciphertext")
+	pointerNonce := bytes.Repeat([]byte{0x11}, aesGCMNonceSize)
+	pointerTag := bytes.Repeat([]byte{0x22}, aesGCMTagSize)
+	originalSizeBytes := int64(123456789)
+	schemaVersion := 1
+
+	got := ownerSigSigningInput(fileID, pointerCiphertext, pointerNonce, pointerTag, originalSizeBytes, false, nil, nil, nil, schemaVersion)
+
+	pointerHash := sha256.Sum256(pointerCiphertext)
+	displayNameHash := sha256.Sum256(make([]byte, aesGCMNonceSize)) // absent → 12 zero bytes, nothing else
+	var sizeBytes [8]byte
+	binary.BigEndian.PutUint64(sizeBytes[:], uint64(originalSizeBytes))
+	var schemaBytes [4]byte
+	binary.BigEndian.PutUint32(schemaBytes[:], uint32(schemaVersion))
+
+	var want []byte
+	want = append(want, []byte(ownerSigDomainPrefix)...)
+	want = append(want, fileID[:]...)
+	want = append(want, pointerHash[:]...)
+	want = append(want, pointerNonce...)
+	want = append(want, pointerTag...)
+	want = append(want, sizeBytes[:]...)
+	want = append(want, 0) // display_name_present = false
+	want = append(want, displayNameHash[:]...)
+	want = append(want, schemaBytes[:]...)
+
+	if !bytes.Equal(got, want) {
+		t.Fatalf("ownerSigSigningInput layout mismatch:\n got  = %x\n want = %x", got, want)
+	}
 }
 
 func hexEncode(b []byte) string {
