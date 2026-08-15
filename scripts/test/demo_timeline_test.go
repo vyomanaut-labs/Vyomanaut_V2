@@ -61,11 +61,54 @@ import (
 
 // ── fixed test parameters (mvp.md §3.6 / §7) ────────────────────────────────
 
+// testSimCount / testSimASNCount — provider-fleet size for this file's
+// tests. [Derived, ADR-075 (Accepted) — Option A]
+//
+// TotalShards=5 alone would suffice for readiness, upload, and reconstruction
+// (mvp.md §7.1/§7.2) — but NOT for repair-replacement. SelectReplacementProvider
+// (internal/repair/assignment.go) excludes every current holder of a
+// segment's shards plus the departed provider, and requires a candidate on
+// an ASN not already at its 1-shard-per-segment cap
+// (floor(TotalShards*ASNCapFraction) = floor(5*0.20) = 1). At exactly 5
+// providers/5 ASNs, original assignment already occupies all 5 — every
+// provider is implicated by one exclusion or the other, for ANY departure,
+// deterministically (F-16-6). This is not a code defect: SelectReplacementProvider
+// is enforcing the cap exactly as ADR-014 specifies. The network simply has
+// no spare capacity to place a replacement.
+//
+// The fix is headroom, not logic: each spare provider/ASN absorbs one
+// concurrently-departed provider's worth of replacement-selection, and is
+// reusable across a file's OTHER segments (the ASN cap is enforced per
+// segment_id — a spare that already holds segment A's replacement is still
+// fully cap-eligible for segment B, since it holds nothing there yet) but is
+// never freed for reuse by a LATER, different departure once consumed (it's
+// now a regular holder, subject to the same cap as everyone else). So:
+//
+//	N_spares_needed = number of distinct providers concurrently departed
+//	                  (independent of how many segments the file spans)
+//
+// TestDemoTimeline exercises 1 concurrent departure → needs 6.
+// TestViabilityRepairSucceedsWithTwoOfFiveOffline exercises 2 → needs 7.
+// Both share these file-level constants (providerFleet's cmds/logPaths
+// arrays are sized by testSimCount at compile time — see startProviders),
+// so this is set to 7, the binding case, for every test in this file rather
+// than duplicating the harness per test. The 3 tests that don't exercise
+// repair are unaffected: readiness assertions below check RequiredValue
+// (unchanged at 5, config.DemoProfile.MinActiveProviders/MinDistinctASNs),
+// not CurrentValue, so a larger-than-minimum fleet still satisfies them.
+//
+// internal/repair/assignment.go is unchanged by this decision — no core
+// logic was touched; see ADR-075 for the full derivation and the options
+// considered and rejected (loosening the ASN cap specifically was rejected:
+// at demo scale two colluding ASNs currently sit below the AONT-RS k=3
+// disclosure threshold, and loosening the cap for repair-replacement would
+// close that margin down toward production's own already-flagged-as-thin
+// one — see ADR-075, F-32/F-34).
 const (
-	testSimCount    = 5
-	testSimASNCount = 5
+	testSimCount    = 7
+	testSimASNCount = 7
 	testDeclaredGB  = 100
-	testUploadBytes = 1_000_000 // < 1.25 MB, per mvp.md §3.6's own upload-size assertion
+	testUploadBytes = 1_000_000 // < 1.25 MB (mvp.md §3.6's upload-size assertion) — NOTE: this spans 2 segments under the real plaintextSegmentSize formula (DataShards*ShardSize-aontOverheadBytes = 786,384 bytes/segment), not 1 — see the comment at TestViabilityRepairSucceedsWithTwoOfFiveOffline's kill step, and mvp.md §7.10, which is stale against this same arithmetic
 )
 
 // ── skip-if-unavailable, matching internal/api/readiness_test.go's own
@@ -1032,9 +1075,19 @@ func TestViabilityRepairSucceedsWithTwoOfFiveOffline(t *testing.T) {
 	// departures must be detected, not just the first.
 	pollDeparted(t, ctx, db, 2, 11*time.Minute)
 
-	// Both lost shards belong to the one segment uploadTestFile wrote
-	// (testUploadBytes is well under one segment's plaintext capacity), so
-	// exactly 2 repair jobs — one per lost shard — must complete.
+	// [Corrected] This file's own testUploadBytes (1,000,000 bytes) actually
+	// spans 2 segments, not 1 — plaintextSegmentSize(DemoProfile) =
+	// DataShards*ShardSize-aontOverheadBytes = 786,384 bytes/segment
+	// (internal/client/upload/orchestrator.go), and
+	// ceilDiv(1_000_000, 786_384) = 2. Each of the 2 killed providers holds
+	// one shard in EACH segment, so this produces 4 repair jobs total (2
+	// providers × 2 segments), not 2. The assertion below (want=2) still
+	// passes once all 4 complete — pollRepairCompleted checks "at least
+	// wantCompleted", not "exactly" — so this was never a false-pass risk,
+	// only a stale comment describing the wrong premise. Left as want=2
+	// (a real lower bound) rather than tightened to want=4, since asserting
+	// the exact count is a separate strictness improvement, not required
+	// for this test to correctly verify what its name promises.
 	pollRepairCompleted(t, ctx, db, 2, 5*time.Minute)
 }
 
