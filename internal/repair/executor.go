@@ -225,7 +225,7 @@ func ExecuteRepairJob(
 		return fmt.Errorf("repair.ExecuteRepairJob: re-encode: %w", err)
 	}
 
-	missingIndex, err := findMissingShardIndex(survivingHolders, profile.TotalShards)
+	missingIndex, err := lookupShardIndexForChunk(ctx, db, job.ChunkID)
 	if err != nil {
 		_ = MarkJobComplete(ctx, db, job.JobID, false)
 		return fmt.Errorf("repair.ExecuteRepairJob: %w", err)
@@ -323,30 +323,54 @@ WHERE chunk_id = $1 AND provider_id = $2 AND status = 'REPAIRING'`
 	return nil
 }
 
-// findMissingShardIndex returns the single shard index in [0, totalShards)
-// not represented among holders' ShardIndex values. This package's repair
-// pipeline handles exactly one missing shard per job (matching
-// repair_jobs.provider_id identifying exactly one departed/failed holder for
-// departure-triggered jobs); an error here signals the caller supplied a
-// survivingHolders list inconsistent with that assumption.
-func findMissingShardIndex(holders []SurvivingHolder, totalShards int) (int, error) {
-	present := make(map[int]bool, len(holders))
-	for _, h := range holders {
-		present[h.ShardIndex] = true
+// lookupShardIndexForChunk returns the shard_index chunk_assignments records
+// for chunkID — the RS slot this content-addressed shard occupies within its
+// segment. [Replaces findMissingShardIndex — F-16-5, Session 16.1.1 live
+// verification]
+//
+// RS re-encoding is deterministic (this file's own header comment /
+// ExecuteRepairJob's doc comment): a given shard index always hashes to the
+// same chunk_id for the life of a segment, repair after repair. shard_index
+// is therefore a fact intrinsic to job.ChunkID itself — recorded once, at
+// original assignment time, and never contradicted afterward. It survives
+// on the departed holder's own row (soft-deleted, never hard-deleted — see
+// departure.go's soft-delete discipline, M9 review Finding #1) with
+// shard_index untouched. Querying for it directly is therefore authoritative
+// regardless of current status or how many providers have ever held it.
+//
+// findMissingShardIndex (removed; this replaces it) instead INFERRED the
+// missing index by elimination against the survivingHolders list a caller
+// supplied — silently assuming that list always contains exactly
+// TotalShards-1 present entries. That assumption broke the moment two
+// shards of the SAME segment were simultaneously non-ACTIVE (e.g. two
+// providers departing close together, each spawning its own repair job):
+// cmd/microservice/repair_loop.go's findSurvivingHolders filters
+// `WHERE status = 'ACTIVE'`, which then excludes BOTH missing shards from
+// EVERY job's holder list, not just the one that particular job is
+// repairing — elimination finds two gaps where it expects exactly one, and
+// errors out before ever reaching shard selection. Live verification
+// against TestViabilityRepairSucceedsWithTwoOfFiveOffline (mvp.md §7.2)
+// reproduced this directly: "want exactly one missing index among 3 shards
+// (TotalShards=5), found 2", for all four repair jobs spawned by that
+// test's two concurrent departures. A direct, chunk_id-keyed lookup has no
+// such multi-departure blind spot, because it never depends on which OTHER
+// shards of the segment currently happen to be ACTIVE.
+func lookupShardIndexForChunk(ctx context.Context, db *sql.DB, chunkID [32]byte) (int, error) {
+	var shardIndex sql.NullInt32
+	err := db.QueryRowContext(ctx,
+		`SELECT shard_index FROM chunk_assignments WHERE chunk_id = $1 LIMIT 1`,
+		chunkID[:],
+	).Scan(&shardIndex)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("lookupShardIndexForChunk: no chunk_assignments row found for chunk_id %x", chunkID)
 	}
-	missing := -1
-	count := 0
-	for i := 0; i < totalShards; i++ {
-		if !present[i] {
-			missing = i
-			count++
-		}
+	if err != nil {
+		return 0, fmt.Errorf("lookupShardIndexForChunk: %w", err)
 	}
-	if count != 1 {
-		return 0, fmt.Errorf("findMissingShardIndex: want exactly one missing index among %d shards (TotalShards=%d), found %d",
-			len(holders), totalShards, count)
+	if !shardIndex.Valid {
+		return 0, fmt.Errorf("lookupShardIndexForChunk: chunk_id %x has NULL shard_index (is_vetting_chunk row?)", chunkID)
 	}
-	return missing, nil
+	return int(shardIndex.Int32), nil
 }
 
 // ── Download ───────────────────────────────────────────────────────────────────

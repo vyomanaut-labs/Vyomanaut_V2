@@ -10,6 +10,7 @@
 //   - TestRepairExecutorDownloadsMinimumShards
 //   - TestRepairExecutorFallsBackOnHolderFailure
 //   - TestRepairExecutorReconstructsCorrectShardIndex
+//   - TestRepairExecutorMissingIndexNotDerivedFromHolderCount (F-16-5)
 //   - TestRepairExecutorPreRegistersBeforeUpload
 //   - TestRepairExecutorMarksCompleteOnSuccess
 //   - TestRepairExecutorMarksFailedOnExhaustedRetries
@@ -331,6 +332,21 @@ func setupFullPipelineFixture(t *testing.T, db *sql.DB, missingIndex int) (
 		TriggerSilentDeparture, profile.TotalShards-1); err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
+	// [Added — F-16-5] Mirrors departure.go's real soft-delete ordering
+	// (EnqueueJob first, then this): ExecuteRepairJob now derives
+	// missingIndex via lookupShardIndexForChunk, a direct chunk_id lookup
+	// against chunk_assignments, not by elimination against holders. Without
+	// this row, that lookup would find nothing for a chunk_id no assignment
+	// row was ever created for, and every setupFullPipelineFixture-based
+	// test below would fail at that step instead of exercising what they're
+	// actually meant to test.
+	insertTestChunkAssignment(t, db, testChunkAssignmentSpec{
+		chunkID:    chunkID,
+		segmentID:  &segmentID,
+		shardIndex: &missingIndex,
+		providerID: departedProviderID,
+		status:     "DELETED",
+	})
 	dequeued, err := DequeueNextJob(context.Background(), db)
 	if err != nil {
 		t.Fatalf("DequeueNextJob: %v", err)
@@ -393,6 +409,94 @@ func TestRepairExecutorReconstructsCorrectShardIndex(t *testing.T) {
 	if uploadedChunkID != job.ChunkID {
 		t.Errorf("uploaded chunk_id = %x, want job.ChunkID = %x (RS re-encoding is deterministic; repair re-creates the same chunk)",
 			uploadedChunkID, job.ChunkID)
+	}
+}
+
+// TestRepairExecutorMissingIndexNotDerivedFromHolderCount is a direct
+// regression guard for F-16-5, live-verification session 16.1.1(cont'd).
+//
+// cmd/microservice/repair_loop.go's findSurvivingHolders queries
+// `WHERE status = 'ACTIVE'`, so it returns fewer than profile.TotalShards-1
+// holders whenever a SECOND shard of the same segment is also concurrently
+// non-ACTIVE — exactly what TestViabilityRepairSucceedsWithTwoOfFiveOffline
+// (mvp.md §7.2) exercises live: two providers departing close together,
+// each independently spawning its own repair job, each seeing only
+// TotalShards-2 present shard indices instead of TotalShards-1. The old
+// findMissingShardIndex inferred its answer by elimination against
+// whatever holders list it was handed, and errored — "want exactly one
+// missing index ... found 2" — the moment a second shard vanished from
+// that count, even though THIS job only ever needs ONE specific index
+// (missingIndex, its own target) and has no logical need to know anything
+// about whichever OTHER shard also happens to be missing right now.
+//
+// This test reproduces that exact holder count (profile.DataShards, one
+// fewer than setupFullPipelineFixture's normal profile.TotalShards-1) by
+// dropping an extra, unrelated holder before calling ExecuteRepairJob, and
+// asserts repair still succeeds and uploads to the correct index.
+func TestRepairExecutorMissingIndexNotDerivedFromHolderCount(t *testing.T) {
+	db := openTestDB(t)
+	verify := openVerifyDB(t)
+	exclude := allActiveProviderIDs(t, verify)
+
+	const missingIndex = 3
+	profile, engine, job, holders := setupFullPipelineFixture(t, db, missingIndex)
+
+	// Drop exactly one more holder (any shard index other than
+	// missingIndex) — simulating findSurvivingHolders having excluded it
+	// too, because ITS OWN provider is also, independently, non-ACTIVE
+	// right now. profile.DataShards of the original profile.TotalShards-1
+	// remain: still enough to reconstruct, but no longer "exactly one" gap
+	// against profile.TotalShards.
+	var trimmed []SurvivingHolder
+	dropped := false
+	for _, h := range holders {
+		if !dropped {
+			dropped = true // drop exactly one, whichever comes first
+			continue
+		}
+		trimmed = append(trimmed, h)
+	}
+	if len(trimmed) != profile.DataShards {
+		t.Fatalf("test setup: trimmed to %d holders, want exactly profile.DataShards (%d)", len(trimmed), profile.DataShards)
+	}
+
+	shardsByPeer := map[string][]byte{}
+	for _, h := range trimmed {
+		shardsByPeer[h.PeerID] = randShardDataStable(h.ShardIndex)
+	}
+
+	var uploadStream *mockStream
+	transport := &mockTransport{
+		fn: func(peerID, protocolID string) (RepairStream, error) {
+			switch protocolID {
+			case repairDownloadProtocolID:
+				return &mockStream{resp: bytes.NewReader(encodeRepairDownloadResponse(repairDownloadStatusOK, shardsByPeer[peerID]))}, nil
+			case chunkUploadProtocolID:
+				uploadStream = &mockStream{resp: bytes.NewReader(encodeUploadResponse(uploadStatusOK))}
+				return uploadStream, nil
+			default:
+				return nil, fmt.Errorf("unexpected protocol %q", protocolID)
+			}
+		},
+	}
+
+	signingKey := genTestSigningKey(t)
+	if err := ExecuteRepairJob(context.Background(), db, profile, transport, engine, signingKey, "microservice-peer",
+		job, trimmed, exclude); err != nil {
+		t.Fatalf("ExecuteRepairJob: %v (a second, unrelated missing shard in the same segment must not block repair of THIS shard — F-16-5)", err)
+	}
+
+	if uploadStream == nil {
+		t.Fatal("upload stream was never opened")
+	}
+	written := uploadStream.written.Bytes()
+	if len(written) < 40 {
+		t.Fatalf("captured upload frame too short: %d bytes", len(written))
+	}
+	uploadedIndex := binary.BigEndian.Uint32(written[36:40])
+	if int(uploadedIndex) != missingIndex {
+		t.Errorf("uploaded shard_index = %d, want %d (this job's own missing index, independent of how many OTHER shards are also currently missing)",
+			uploadedIndex, missingIndex)
 	}
 }
 
