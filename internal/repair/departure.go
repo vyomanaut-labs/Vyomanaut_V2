@@ -297,10 +297,15 @@ func EnqueueRepairForRealChunks(ctx context.Context, db *sql.DB, profile config.
 		//
 		// Ordering is load-bearing: EnqueueJob above must land BEFORE this
 		// soft-delete, never after. A soft-deleted row with no matching
-		// repair job would make the shard permanently unrepairable — no
-		// detector will ever notice it's gone, since findMissingShardIndex
-		// (executor.go) derives "missing" from the surviving-holders list a
-		// caller supplies, not from a fresh scan of chunk_assignments. This
+		// repair job would make the shard permanently unrepairable — nothing
+		// else ever re-scans chunk_assignments to notice it's gone. [Updated
+		// — F-16-5] This soft-delete is also what makes the fix possible:
+		// executor.go's ExecuteRepairJob now looks up the missing shard's
+		// index directly from THIS row (by chunk_id, regardless of status),
+		// rather than inferring it by elimination against whichever other
+		// holders currently happen to be ACTIVE — see
+		// lookupShardIndexForChunk's doc comment (executor.go) for why the
+		// old elimination approach broke under concurrent departures. This
 		// UPDATE also runs per-row, immediately after each EnqueueJob call,
 		// rather than batched after the loop: a batched version would leave
 		// shards from a mid-loop failure with a fresh repair job but a
