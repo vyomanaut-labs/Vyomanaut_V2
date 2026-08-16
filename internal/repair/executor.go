@@ -125,6 +125,16 @@ const (
 // declined at capacity) and there is no reason their budgets need to match.
 const maxRepairReplacementRetries = 3
 
+// markCompleteFinalWriteRetries / markCompleteFinalWriteBackoff bound the
+// retry on ExecuteRepairJob's OWN final MarkJobComplete(..., true) call —
+// see that call site's doc comment (F-16-7) for why a bounded retry, not a
+// fallback to MarkJobComplete(..., false), is the correct shape for this
+// one specific write.
+const (
+	markCompleteFinalWriteRetries = 3
+	markCompleteFinalWriteBackoff = 500 * time.Millisecond
+)
+
 // Wire-format field sizes (IC §4.4.1 Frame 1, IC §4.1 Frame 1) — named
 // rather than inlined so no raw byte-count literal appears in the framing
 // arithmetic below (this codebase's "no magic numbers" standard, mnd linter).
@@ -296,12 +306,54 @@ func ExecuteRepairJob(
 
 	// ── 4. Confirm ───────────────────────────────────────────────────────────
 	if err := activateChunkAssignment(ctx, db, job.ChunkID, replacementProviderID); err != nil {
+		// [Fixed — F-16-7, live verification] This previously returned the
+		// bare error here with no MarkJobComplete call on this path at
+		// all — the only step in this function that didn't call it before
+		// returning. Reached only after a real shard has already been
+		// uploaded successfully, so a failure here is exactly the kind of
+		// transient DB contention this package elsewhere treats as
+		// recoverable (SelectReplacementProvider's bounded retry,
+		// STORAGE_FULL's candidate retry) — real background loops
+		// (audit-dispatch, departure-detection, vetting-chunk generation,
+		// this same executor loop for OTHER jobs) all hit the same
+		// Postgres instance concurrently, and activateChunkAssignment's
+		// UPDATE touches chunk_assignments, the single most contended
+		// table in the schema. Without a MarkJobComplete call on this
+		// path, the job was left permanently stuck at IN_PROGRESS:
+		// invisible to both repair_jobs.status = 'COMPLETED' and
+		// = 'FAILED', and never retried, since DequeueNextJob only ever
+		// looks at status = 'QUEUED'. Live verification reproduced this
+		// directly — TestDemoTimeline intermittently reporting
+		// "completed=0, failed=0" after its full poll window, with
+		// nothing in the microservice log to explain it, because nothing
+		// on this path ever logged or marked anything at all.
+		_ = MarkJobComplete(ctx, db, job.JobID, false)
 		return fmt.Errorf("repair.ExecuteRepairJob: activate: %w", err)
 	}
-	if err := MarkJobComplete(ctx, db, job.JobID, true); err != nil {
-		return fmt.Errorf("repair.ExecuteRepairJob: mark complete: %w", err)
+
+	// [Fixed — F-16-7] The shard IS uploaded and ACTIVE at this point — the
+	// repair itself has already succeeded. If this specific write fails,
+	// falling back to MarkJobComplete(ctx, db, job.JobID, false) — the
+	// pattern every OTHER error path in this function uses — would be
+	// wrong here specifically: it would misreport a successful repair as
+	// a failure, on a table nothing currently re-reads to retry (a FAILED
+	// job is terminal, per runRepairExecutorLoop's own doc comment), so
+	// the shard would sit correctly ACTIVE while its own job record
+	// permanently lied about it. A bounded retry of this exact write is
+	// the correct shape instead: it has no external dependency once
+	// activation has already committed, so a transient failure here is
+	// the only realistic cause, and should clear within a few attempts.
+	var markErr error
+	for attempt := 0; attempt < markCompleteFinalWriteRetries; attempt++ {
+		if markErr = MarkJobComplete(ctx, db, job.JobID, true); markErr == nil {
+			return nil
+		}
+		if attempt < markCompleteFinalWriteRetries-1 {
+			sleepOrDone(ctx, markCompleteFinalWriteBackoff)
+		}
 	}
-	return nil
+	return fmt.Errorf("repair.ExecuteRepairJob: mark complete: %w (shard uploaded and ACTIVE on %s; job status write failed after %d attempts — the repair succeeded, only this bookkeeping write did not)",
+		markErr, replacementProviderID, markCompleteFinalWriteRetries)
 }
 
 // abandonFailedReplacementAssignment soft-deletes a replacement candidate's
@@ -668,4 +720,20 @@ WHERE chunk_id = $1 AND provider_id = $2 AND status = 'REPAIRING'`
 		return fmt.Errorf("update chunk_assignments (REPAIRING -> ACTIVE): %w", err)
 	}
 	return nil
+}
+
+// sleepOrDone waits for d or returns early if ctx is cancelled — a local
+// equivalent of cmd/microservice/repair_loop.go's own helper of the same
+// name. Not shared: internal/repair cannot import cmd/microservice (IC §9's
+// import direction is cmd/* → internal/*, never the reverse), and this
+// package has no other caller for it yet — duplicating four lines here is
+// simpler and more honest than inventing a shared home for a helper this
+// small.
+func sleepOrDone(ctx context.Context, d time.Duration) {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
+	}
 }
