@@ -34,6 +34,8 @@ import (
 // empty-queue return), so it polls rather than busy-loops.
 const repairExecutorIdleBackoff = 2 * time.Second
 
+const sha256Size = 32
+
 // runPromotionTicker implements this session's step 14: on
 // profile.PollingInterval, promote stale QUEUED PRE_WARNING jobs to
 // PERMANENT_DEPARTURE priority (FR-043). Blocks until ctx is cancelled.
@@ -103,9 +105,9 @@ func findSurvivingHolders(ctx context.Context, db *sql.DB, segmentID uuid.UUID, 
 		// ever stored that exact chunk_id — producing a deterministic
 		// repairStatusNotFound (0x01) from every holder, every time. See
 		// SurvivingHolder.ChunkID's doc comment (internal/repair/executor.go).
-		if len(chunkIDBytes) != 32 {
-			return nil, nil, fmt.Errorf("findSurvivingHolders: chunk_assignments.chunk_id has length %d, want 32 (provider_id=%s, shard_index=%d)",
-				len(chunkIDBytes), providerID, shardIndex)
+		if len(chunkIDBytes) != sha256Size {
+			return nil, nil, fmt.Errorf("findSurvivingHolders: chunk_assignments.chunk_id has length %d, want %d (provider_id=%s, shard_index=%d)",
+				len(chunkIDBytes), sha256Size, providerID, shardIndex)
 		}
 		var chunkID [32]byte
 		copy(chunkID[:], chunkIDBytes)
