@@ -3,8 +3,12 @@
 // the provider-side ledger (Session 10.2.1) and InsertOwnerEscrowEvent for
 // the owner-side ledger (Session 10.5.1) — both are ledger-write functions
 // and belong in the same file per this package's one-ledger-file convention.
+// All amounts here are int64 paise, per NFR-038 (the CI-enforced no-float
+// rule for internal/payment/), a metric-naming requirement (numbered one
+// higher) — D-07, M17 Session 17.1.2 corrected the same mix-up in this
+// package's doc.go.
 //
-// [REF: IC §5.8, DM §4.8, DM §4.9, DM §3 Invariant 2, IC §6,
+// [REF: IC §5.8, DM §4.8, DM §4.9, DM §3 Invariant 2, IC §6, NFR-038,
 // build.md Phase 10.2 Session 10.2.1, Phase 10.5 Session 10.5.1]
 
 package payment

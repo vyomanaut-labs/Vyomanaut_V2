@@ -40,7 +40,7 @@ func (o *Orchestrator) decodeSegment(shards [][]byte) ([]byte, error) {
 			for i := range plaintext {
 				plaintext[i] = 0
 			} // zero before return (IC §5.1) — see header note
-			return nil, ErrCanaryMismatch
+			return nil, fmt.Errorf("retrieve: %w", crypto.ErrCanaryMismatch)
 		}
 		return nil, fmt.Errorf("decodeSegment: AONT decode: %w", err)
 	}
