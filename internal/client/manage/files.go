@@ -120,28 +120,27 @@ func NewManager(baseURL, token string, httpClient *http.Client) *Manager {
 // CRITICAL) to data-owner-facing copy — never render the raw enum string
 // directly.
 //
-// PRECONDITION (per this session's own TASK text): IC §14.2 is not yet
-// merged into interface-contracts.md — filed locally as
-// interface-contracts-section-14.md, pending push. Until it merges, this
-// function is a placeholder pass-through (each enum value maps to itself),
-// so applying the real mapping later is a one-file diff to this function
-// body, not a re-implementation of every call site.
-//
-// [Note for review] This session's own reference material already includes
-// what appears to be IC §14.2's full, apparently-finished content — quite
-// possibly the very "pending push" file this precondition refers to. Left
-// as a placeholder here anyway rather than silently landing content this
-// session cannot itself confirm is approved; the real mapping, ready to
-// swap in once confirmed, is:
-//
-//	OK       -> "Available"
-//	DEGRADED -> "Degraded — repair in progress"
-//	CRITICAL -> "Temporarily unavailable — emergency repair in progress"
+// [Session 15.4.1 note, closed by M17 Session 17.1.3] Session 15.4.1 left
+// this as a placeholder pass-through because IC §14.2 was not yet merged
+// into interface-contracts.md at the time, flagging its own uncertainty
+// about whether the content it had been given was actually approved.
+// interface-contracts.md §14.2 is now confirmed, authoritative reference
+// material for M17 (matching the exact mapping this function's own prior
+// doc comment already anticipated) — the real mapping below replaces the
+// placeholder.
 func AvailabilityLabel(status string) string {
 	switch status {
-	case "OK", "DEGRADED", "CRITICAL":
-		return status // placeholder pass-through — see doc comment
+	case "OK":
+		return "Available"
+	case "DEGRADED":
+		return "Degraded — repair in progress"
+	case "CRITICAL":
+		return "Temporarily unavailable — emergency repair in progress"
 	default:
+		// Not one of IC §14.2's three documented enum values — render the
+		// raw string rather than inventing copy for a case that
+		// shouldn't exist, so an unexpected server value is visible
+		// rather than silently mapped to something misleading.
 		return status
 	}
 }
