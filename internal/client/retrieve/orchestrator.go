@@ -65,7 +65,15 @@ type RetrieveOrchestrator interface {
 var (
 	ErrPointerTagMismatch = errors.New("client: pointer file Poly1305 tag verification failed")
 	ErrTooFewShards       = errors.New("client: fewer than 16 shards reachable for this segment")
-	ErrCanaryMismatch     = errors.New("client: AONT canary mismatch after decode (segment corrupt)")
+	// ErrCanaryMismatch is declared here per IC §5.9's documented interface
+	// contract, but decode.go's decodeSegment no longer actually returns
+	// it (D-10, M17 Session 17.1.2): it now wraps crypto.ErrCanaryMismatch
+	// directly, so errors.Is(err, crypto.ErrCanaryMismatch) — not this
+	// sentinel — is the correct check above the client boundary. Left
+	// declared, not removed, so this file's exported surface still matches
+	// IC §5.9's documented contract; flagged here rather than silently
+	// leaving a declared-but-unused-internally sentinel unexplained.
+	ErrCanaryMismatch = errors.New("client: AONT canary mismatch after decode (segment corrupt)")
 )
 
 // Orchestrator implements RetrieveOrchestrator.
