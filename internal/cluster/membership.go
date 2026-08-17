@@ -17,7 +17,8 @@
 // is left untouched — this file adds the SEPARATE stub ARCH §18 and this
 // session's own step 6 describe (a general gossip-cluster membership
 // object, constructed from seed addresses, with a quorum-wait method),
-// following the exact "stub until Milestone 17 Phase 17.2.1" pattern the
+// following the exact "stub until the LTS Production Hardening milestone's
+// gossip-cluster session" pattern the
 // session text uses elsewhere (e.g. the client-driven router in router.go).
 //
 // Membership's single HealthyCount() int method is intentionally identical
@@ -39,7 +40,9 @@ import (
 // productionQuorumSize mirrors ADR-025's (3, 2, 2) quorum — three replicas,
 // matching api.MockClusterMembership's own existing stub value
 // (internal/api/readiness.go) so the two independently-built stubs agree on
-// what "a healthy production cluster" reports until Milestone 17 replaces
+// what "a healthy production cluster" reports until the LTS Production
+// Hardening milestone (relocated from the old Milestone 17 by M17 Session
+// 17.3.1; see build_part4.md) replaces
 // both with the real gossip protocol.
 const productionQuorumSize = 3
 
@@ -64,7 +67,9 @@ func (SoloMembership) HealthyCount() int { return soloInstanceSize }
 
 // GossipCluster is a stub for the real gossip-based membership protocol
 // (ARCH §18: 1-second reconciliation ticker, two pre-configured seed node
-// addresses). Its permanent home is Milestone 17 Phase 17.2.1; until then
+// addresses). Its permanent home is the LTS track's Production Hardening
+// milestone (relocated from the old Milestone 17 by M17 Session 17.3.1 —
+// see build_part4.md's "LTS — Production Hardening" section); until then
 // it always reports 3 healthy replicas and WaitForQuorum returns
 // immediately once that threshold is met — no actual gossip reconciliation
 // happens yet.
@@ -74,7 +79,8 @@ type GossipCluster struct {
 
 // NewGossipCluster constructs the stub gossip cluster from the two
 // pre-configured seed node addresses (ARCH §18). seeds is retained only for
-// future use by the real Milestone 17 implementation; the stub does not
+// future use by the real LTS Production Hardening implementation; the stub
+// does not
 // dial them.
 func NewGossipCluster(seeds []string) *GossipCluster {
 	return &GossipCluster{seeds: seeds}
@@ -89,7 +95,8 @@ func (g *GossipCluster) HealthyCount() int { return productionQuorumSize }
 // split-brain guard ARCH §18 and this session's step 6 both require
 // ("BLOCK until >= 2 peers ack membership"). Stub: since HealthyCount always
 // reports 3, this returns immediately for any minPeers <= 3; there is no
-// actual peer-ack wait to perform yet (Milestone 17 Phase 17.2.1).
+// actual peer-ack wait to perform yet (the LTS Production Hardening
+// milestone's gossip-cluster session).
 func (g *GossipCluster) WaitForQuorum(ctx context.Context, minPeers int) error {
 	select {
 	case <-ctx.Done():

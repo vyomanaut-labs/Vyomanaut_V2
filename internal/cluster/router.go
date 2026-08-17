@@ -8,12 +8,14 @@
 // [Decision, build.md Milestone 12 Phase 12.1 Session 12.1.1] See
 // membership.go's header note: this file, like that one, did not exist
 // before this session despite being treated as a precondition. Built here
-// as a stub — a no-op until Milestone 17: ResponsibleReplica always returns
-// the load balancer's own address, i.e. every audit-dispatch/chunk-
-// assignment call routes exactly the way it would without this
+// as a stub — a no-op until the LTS track's Production Hardening milestone
+// (relocated from the old Milestone 17 by M17 Session 17.3.1 — see
+// build_part4.md's "LTS — Production Hardening" section): ResponsibleReplica
+// always returns the load balancer's own address, i.e. every audit-dispatch/
+// chunk-assignment call routes exactly the way it would without this
 // optimisation at all. The real membership-aware routing logic (caching
-// which replica owns which key range, dialing it directly) is Milestone 17
-// Phase 17.2.1's job — do not attempt it here.
+// which replica owns which key range, dialing it directly) is that
+// milestone's gossip-cluster session's job — do not attempt it here.
 //
 // [REF: ARCH §18, IC §2, IC §9, build.md Milestone 12 Phase 12.1 Session 12.1.1]
 
@@ -40,8 +42,9 @@ type Router struct {
 	membership       Membership
 }
 
-// NewRouter constructs a Router. membership is retained for Milestone 17's
-// real implementation to consult; the stub in this file never reads it.
+// NewRouter constructs a Router. membership is retained for the LTS
+// Production Hardening milestone's real implementation to consult; the
+// stub in this file never reads it.
 func NewRouter(membership Membership, loadBalancerAddr string) *Router {
 	return &Router{membership: membership, loadBalancerAddr: loadBalancerAddr}
 }
@@ -49,10 +52,10 @@ func NewRouter(membership Membership, loadBalancerAddr string) *Router {
 // ResponsibleReplica returns the address audit-dispatch/chunk-assignment
 // hot paths (ARCH §18) should send opType traffic to.
 //
-// STUB behaviour (no-op until Milestone 17): this always returns the load
-// balancer's own address — i.e. the 30+ ms latency optimisation ARCH §18
-// describes is a no-op until Milestone 17 Phase 17.2.1 provides the real
-// gossip-aware implementation. Do not attempt the real membership-aware
+// STUB behaviour (no-op until the LTS track's Production Hardening
+// milestone): this always returns the load balancer's own address — i.e.
+// the 30+ ms latency optimisation ARCH §18 describes is a no-op until that
+// milestone provides the real gossip-aware implementation. Do not attempt the real membership-aware
 // routing logic here; every caller of this method already tolerates
 // load-balancer-indirection latency today, so this stub changes nothing
 // about correctness — only the future optimisation is deferred.
