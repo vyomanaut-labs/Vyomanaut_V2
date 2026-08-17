@@ -98,6 +98,18 @@ func dispatchRegister(args []string, stdin io.Reader, out, errOut io.Writer) int
 }
 
 func runRegister(ctx context.Context, cfg registerConfig, in *bufio.Reader, out, errOut io.Writer) int {
+	// Fail fast, not confusingly: --json never prints the mnemonic (by
+	// design — MNEMONIC_NEVER_LOGGED_OR_SERIALISED), so a profile that
+	// actually requires confirming it (SkipMnemonicConfirm == false —
+	// i.e. anything but demo) has no channel to satisfy that
+	// confirmation under --json. Left unchecked, this surfaces many
+	// steps later as an opaque "word did not match" — this guard catches
+	// it immediately, at the one place that actually knows both facts.
+	if cfg.g.json && !cfg.profile.SkipMnemonicConfirm {
+		fmt.Fprintln(errOut, "register --json is not supported against a profile that requires mnemonic confirmation (this profile's SkipMnemonicConfirm is false): --json never prints the mnemonic, so there is no way to confirm it back. Register without --json, or use a profile where SkipMnemonicConfirm is true.")
+		return 2
+	}
+
 	if existing, err := readIdentityFile(cfg.g.dataDir); err != nil {
 		printCLIError(errOut, cfg.g.json, err, renderError)
 		return 1
@@ -424,13 +436,31 @@ func runNetworkRecover(ctx context.Context, cfg recoverConfig, masterSecretFor f
 // mnemonic itself is never subject to this, since it is only ever
 // printed, not typed back in full — ConfirmMnemonic only asks for two
 // individual words).
+// promptLine writes label to out, reads one line from in, and returns it
+// trimmed.
+//
+// EOF handling is deliberate, not an oversight: a final line with no
+// trailing newline (err == io.EOF, line != "") is valid input — common
+// when a caller writes its last response without a trailing "\n" — and is
+// returned normally. But EOF with zero bytes read at all (line == "") means
+// the input source closed or ran out before this prompt got anything,
+// which is never valid input; that case returns an explicit error instead
+// of silently treating "nothing was typed" the same as "the input source
+// is gone." Before this fix, the latter case silently returned ("", nil),
+// so a stdin closed early (e.g. a test harness calling Close() before a
+// prompt it didn't know to expect) surfaced many steps later as a
+// confusing "word did not match" instead of a clear failure here, at the
+// actual point of the problem.
 func promptLine(out io.Writer, in *bufio.Reader, label string) (string, error) {
 	if _, err := fmt.Fprint(out, label); err != nil {
 		return "", err
 	}
 	line, err := in.ReadString('\n')
-	if err != nil && err != io.EOF {
-		return "", fmt.Errorf("cmd/client: read input: %w", err)
+	if err != nil {
+		if err == io.EOF && line != "" {
+			return strings.TrimSpace(line), nil
+		}
+		return "", fmt.Errorf("cmd/client: read input for prompt %q: %w (input source closed or exhausted before a response was given)", label, err)
 	}
 	return strings.TrimSpace(line), nil
 }

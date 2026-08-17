@@ -2,12 +2,16 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/google/uuid"
+
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
 )
 
 // TestMnemonicAbsentFromJSONOutput proves the guarantee structurally, not
@@ -58,6 +62,28 @@ func TestMnemonicAbsentFromJSONOutput(t *testing.T) {
 	}
 }
 
+// TestRegisterJSONFailsFastAgainstConfirmationRequiredProfile is a
+// regression test for the second half of the same live failure
+// TestPromptLineRejectsImmediateEOF documents: register --json against a
+// profile with SkipMnemonicConfirm == false (i.e. any non-demo profile)
+// has no way to satisfy mnemonic confirmation, since --json never prints
+// the mnemonic. This must be caught immediately, not several network
+// round-trips later.
+func TestRegisterJSONFailsFastAgainstConfirmationRequiredProfile(t *testing.T) {
+	cfg := registerConfig{
+		g:       globalFlags{json: true, microserviceURL: "https://example.invalid", dataDir: t.TempDir()},
+		profile: config.ProductionProfile, // SkipMnemonicConfirm == false
+	}
+	var out, errOut bytes.Buffer
+	code := runRegister(context.Background(), cfg, bufio.NewReader(strings.NewReader("")), &out, &errOut)
+	if code == 0 {
+		t.Fatal("runRegister returned success for an unsupported --json + confirmation-required combination")
+	}
+	if !strings.Contains(errOut.String(), "SkipMnemonicConfirm") {
+		t.Errorf("error message = %q, want it to explain the actual constraint (SkipMnemonicConfirm)", errOut.String())
+	}
+}
+
 func TestPromptLineTrimsInput(t *testing.T) {
 	in := bufio.NewReader(strings.NewReader("  hello world  \n"))
 	var out strings.Builder
@@ -70,5 +96,40 @@ func TestPromptLineTrimsInput(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "label: ") {
 		t.Fatalf("prompt label not written to out: %q", out.String())
+	}
+}
+
+// TestPromptLineAcceptsFinalLineWithoutTrailingNewline confirms EOF is not
+// always an error: a caller's last write with no trailing "\n" is valid
+// input, not a closed pipe.
+func TestPromptLineAcceptsFinalLineWithoutTrailingNewline(t *testing.T) {
+	in := bufio.NewReader(strings.NewReader("last response, no newline"))
+	var out strings.Builder
+	got, err := promptLine(&out, in, "label: ")
+	if err != nil {
+		t.Fatalf("promptLine: %v", err)
+	}
+	if got != "last response, no newline" {
+		t.Fatalf("got %q, want the full final line", got)
+	}
+}
+
+// TestPromptLineRejectsImmediateEOF is a regression test for a real bug a
+// live TestDemoCLIFullLifecycle run caught: promptLine used to treat a
+// stdin that closed before giving anything at all (line == "", err ==
+// io.EOF) the same as "user pressed enter on an empty line" — silently
+// returning ("", nil). That masked a test harness closing stdin one
+// prompt too early behind a confusing downstream "mnemonic word did not
+// match" error, many steps away from the actual problem. This must now be
+// a clear, immediate error instead.
+func TestPromptLineRejectsImmediateEOF(t *testing.T) {
+	in := bufio.NewReader(strings.NewReader(""))
+	var out strings.Builder
+	_, err := promptLine(&out, in, "Confirm word #12: ")
+	if err == nil {
+		t.Fatal("promptLine on an already-closed/empty input source returned no error, want one")
+	}
+	if !strings.Contains(err.Error(), "Confirm word #12") {
+		t.Errorf("error %q should name which prompt was waiting for input, to make this diagnosable", err.Error())
 	}
 }
