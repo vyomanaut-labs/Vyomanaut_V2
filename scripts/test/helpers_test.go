@@ -87,6 +87,17 @@ func runClientJSON(t *testing.T, ctx context.Context, clientBin string, args []s
 	}
 
 	cmd := exec.CommandContext(ctx, clientBin, args...)
+	// Root-cause fix, not a workaround: config.SelectProfile defaults to
+	// prod (internal/config/select.go's own deliberate, safe-by-default
+	// behavior) whenever neither --mode nor VYOMANAUT_MODE is set — and
+	// this file never set either, on any call site. That silently ran
+	// every CLI invocation in this file against the prod profile (real
+	// Argon2 cost, SkipMnemonicConfirm=false, ...), not demo. Setting it
+	// here once, centrally, means no individual call site can forget it
+	// again — the earlier alternative (adding --mode=demo to every
+	// runClientJSON/startInteractiveClient call) fixes today's call
+	// sites but not the next one someone adds.
+	cmd.Env = append(os.Environ(), "VYOMANAUT_MODE=demo")
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
@@ -165,6 +176,7 @@ func (b *syncBuffer) String() string {
 func startInteractiveClient(t *testing.T, ctx context.Context, clientBin string, args []string) *interactiveClient {
 	t.Helper()
 	cmd := exec.CommandContext(ctx, clientBin, args...)
+	cmd.Env = append(os.Environ(), "VYOMANAUT_MODE=demo") // see runClientJSON's own note on why this is set here, not per call site
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatalf("StdinPipe: %v", err)
