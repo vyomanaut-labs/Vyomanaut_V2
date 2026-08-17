@@ -6,6 +6,6 @@ Components:
   - Razorpay implementation
   - Escrow ledger
 
-Ref: ADR-011, ADR-016, NFR-046
+Ref: ADR-011, ADR-016, NFR-038
 */
 package payment
