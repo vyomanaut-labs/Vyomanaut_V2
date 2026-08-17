@@ -407,8 +407,14 @@ func TestRetrieveCanaryMismatchZeroesBufferAndReturnsSentinel(t *testing.T) {
 
 	o := &Orchestrator{engine: engine, aesNI: crypto.DetectAESNI()}
 	plaintext, err := o.decodeSegment(shards)
-	if !errors.Is(err, ErrCanaryMismatch) {
-		t.Fatalf("decodeSegment error = %v, want ErrCanaryMismatch", err)
+	// D-10 (M17 Session 17.1.2): decodeSegment now wraps crypto.
+	// ErrCanaryMismatch directly rather than this package's own
+	// ErrCanaryMismatch sentinel, so errors.Is(err, crypto.ErrCanaryMismatch)
+	// succeeds above the client boundary — see orchestrator.go's own note
+	// on why the package-local sentinel is still declared but no longer
+	// what this call path actually returns.
+	if !errors.Is(err, crypto.ErrCanaryMismatch) {
+		t.Fatalf("decodeSegment error = %v, want crypto.ErrCanaryMismatch", err)
 	}
 	if plaintext != nil {
 		t.Errorf("decodeSegment returned non-nil plaintext (%d bytes) alongside ErrCanaryMismatch", len(plaintext))
