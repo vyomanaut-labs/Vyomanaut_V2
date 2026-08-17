@@ -18,7 +18,9 @@
 # TRANSITION RULES (mirror the pattern in .github/workflows/ci.yml):
 #   M12 — replace microservice stub with cmd/microservice binary
 #   M13 — replace provider stub with cmd/provider binary + real flags
-#   M17 — replace relay placeholder with cmd/relay binary
+#   LTS Production Hardening milestone — replace relay placeholder with
+#     cmd/relay binary (relocated from the old M17 by M17 Session 17.3.1;
+#     see docs/system-design/build_part4.md)
 #
 # SCALE NOTE (architecture.md §27.5): provision a 4th relay node before
 # provider count reaches 400 in production. This dev compose runs zero
@@ -55,8 +57,10 @@ services:
       retries: 5
 
   # ──────────────────────────────────────────────────────────────────────────
-  # relay  (placeholder — cmd/relay binary created in M17 Session 17.2.2)
-  # Keeps docker-compose valid and explicitly documented until M17.
+  # relay  (placeholder — cmd/relay binary belongs to the LTS track's
+  # Production Hardening milestone, relocated from the old M17 by M17
+  # Session 17.3.1; see docs/system-design/build_part4.md)
+  # Keeps docker-compose valid and explicitly documented until then.
   # REF: MVP §8.5, architecture.md §27.5
   # ──────────────────────────────────────────────────────────────────────────
   relay:
@@ -64,8 +68,8 @@ services:
     command:
       - sh
       - -c
-      - "echo 'relay placeholder — implement M17' && sleep infinity"
-    # TODO(M17): replace with:
+      - "echo 'relay placeholder — see LTS Production Hardening milestone' && sleep infinity"
+    # TODO(LTS Production Hardening): replace with:
     #   build:
     #     context: ../..
     #     dockerfile: deployments/docker/Dockerfile.relay
