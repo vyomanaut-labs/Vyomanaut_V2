@@ -522,9 +522,17 @@ func TestRepairExecutorPreRegistersBeforeUpload(t *testing.T) {
 			case chunkUploadProtocolID:
 				// At the moment the upload stream opens, the chunk_assignments
 				// row for job.ChunkID must already exist with status='REPAIRING'.
+				// ... chunk_id alone doesn't pin a single row: repair
+				// re-uploads under job.ChunkID unchanged, so the fixture's
+				// original, now-DELETED assignment for the departed provider
+				// shares this chunk_id too — query by provider_id as well.
+				candidateID, err := uuid.Parse(peerID)
+				if err != nil {
+					t.Fatalf("upload peerID %q is not a valid provider UUID: %v", peerID, err)
+				}
 				var status string
-				if err := verify.QueryRow(`SELECT status FROM chunk_assignments WHERE chunk_id = $1`, job.ChunkID[:]).
-					Scan(&status); err == nil && status == "REPAIRING" {
+				if err := verify.QueryRow(`SELECT status FROM chunk_assignments WHERE chunk_id = $1 AND provider_id = $2`,
+					job.ChunkID[:], candidateID).Scan(&status); err == nil && status == "REPAIRING" {
 					sawRepairingBeforeUpload = true
 				}
 				return &mockStream{resp: bytes.NewReader(encodeUploadResponse(uploadStatusOK))}, nil
@@ -556,11 +564,13 @@ func TestRepairExecutorMarksCompleteOnSuccess(t *testing.T) {
 	for _, h := range holders {
 		shardsByPeer[h.PeerID] = randShardDataStable(h.ShardIndex)
 	}
+	var replacementPeerID string
 	transport := &mockTransport{
 		fn: func(peerID, protocolID string) (RepairStream, error) {
 			if protocolID == repairDownloadProtocolID {
 				return &mockStream{resp: bytes.NewReader(encodeRepairDownloadResponse(repairDownloadStatusOK, shardsByPeer[peerID]))}, nil
 			}
+			replacementPeerID = peerID
 			return &mockStream{resp: bytes.NewReader(encodeUploadResponse(uploadStatusOK))}, nil
 		},
 	}
@@ -584,9 +594,16 @@ func TestRepairExecutorMarksCompleteOnSuccess(t *testing.T) {
 		t.Error("completed_at is NULL, want set")
 	}
 
+	if replacementPeerID == "" {
+		t.Fatal("upload stream was never opened — no replacement provider observed")
+	}
+	replacementID, err := uuid.Parse(replacementPeerID)
+	if err != nil {
+		t.Fatalf("upload peerID %q is not a valid provider UUID: %v", replacementPeerID, err)
+	}
 	var assignmentStatus string
-	if err := verify.QueryRow(`SELECT status FROM chunk_assignments WHERE chunk_id = $1`, job.ChunkID[:]).
-		Scan(&assignmentStatus); err != nil {
+	if err := verify.QueryRow(`SELECT status FROM chunk_assignments WHERE chunk_id = $1 AND provider_id = $2`,
+		job.ChunkID[:], replacementID).Scan(&assignmentStatus); err != nil {
 		t.Fatalf("query chunk_assignments: %v", err)
 	}
 	if assignmentStatus != "ACTIVE" {
