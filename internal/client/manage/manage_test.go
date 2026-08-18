@@ -263,7 +263,7 @@ func TestDepositRendersIntentURLWhenPresent(t *testing.T) {
 	}
 
 	m := newTestManager(ts.URL)
-	info, err := m.Deposit(context.Background(), 10000)
+	info, err := m.Deposit(context.Background(), uuid.New(), uuid.New(), 10000)
 	if err != nil {
 		t.Fatalf("Deposit: %v", err)
 	}
@@ -284,7 +284,7 @@ func TestDepositFallsBackToVPAAndQRWhenIntentURLAbsent(t *testing.T) {
 	}
 
 	m := newTestManager(ts.URL)
-	info, err := m.Deposit(context.Background(), 10000)
+	info, err := m.Deposit(context.Background(), uuid.New(), uuid.New(), 10000)
 	if err != nil {
 		t.Fatalf("Deposit: %v", err)
 	}

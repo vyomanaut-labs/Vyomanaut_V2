@@ -58,7 +58,8 @@ func (m *Manager) Balance(ctx context.Context, ownerID uuid.UUID) (balancePaise,
 // ── POST /api/v1/owner/deposit ─────────────────────────────────────────────
 
 type depositInitiateRequest struct {
-	AmountPaise int64 `json:"amount_paise"`
+	AmountPaise    int64  `json:"amount_paise"`
+	IdempotencyKey string `json:"idempotency_key"`
 }
 
 type depositInitiateResponse struct {
@@ -78,10 +79,45 @@ type DepositInfo struct {
 	ExpiresAt     time.Time
 }
 
-// Deposit calls POST /api/v1/owner/deposit.
-func (m *Manager) Deposit(ctx context.Context, amountPaise int64) (DepositInfo, error) {
+// DepositRequestID is the client-generated, per-deposit-attempt identifier
+// Deposit's idempotency key is derived from — the same shape and purpose
+// as WithdrawalRequestID above (generate once per attempt, reuse across
+// retries of that same attempt).
+//
+// [Bug found and fixed, M17 Session 17.2.1 live verification] Deposit
+// previously sent no idempotency_key at all — internal/api/owner.go's
+// OwnerDepositHandler has required a 64-hex-char one since at least this
+// package's own withdrawIdempotencyKey precedent was written (this file
+// already had the pattern for Withdraw; Deposit was simply never brought
+// in line with it). Every prior unit test in this package used a mock
+// server that didn't enforce the real validation, so this went uncaught
+// until a live TestDemoCLIFullLifecycle run hit the real microservice and
+// got a 400 INVALID_REQUEST back. Fixed here rather than papered over in
+// cmd/client, since the missing field was in the SDK's own request
+// construction, not anything the CLI does.
+type DepositRequestID = uuid.UUID
+
+// depositIdempotencyKey computes the same shape of key
+// withdrawIdempotencyKey does, for the same reason: deterministic from
+// (ownerID, depositRequestID), so retry-safety is a property of Deposit's
+// signature rather than something a caller could get wrong by
+// regenerating a key inline.
+func depositIdempotencyKey(ownerID uuid.UUID, depositRequestID DepositRequestID) string {
+	input := make([]byte, 0, len(ownerID)+len(depositRequestID))
+	input = append(input, ownerID[:]...)
+	input = append(input, depositRequestID[:]...)
+	sum := sha256.Sum256(input)
+	return fmt.Sprintf("%x", sum)
+}
+
+// Deposit calls POST /api/v1/owner/deposit. depositRequestID must be the
+// same value across every retry of a single deposit attempt (see
+// DepositRequestID's own doc comment).
+func (m *Manager) Deposit(ctx context.Context, ownerID uuid.UUID, depositRequestID DepositRequestID, amountPaise int64) (DepositInfo, error) {
+	key := depositIdempotencyKey(ownerID, depositRequestID)
 	var resp depositInitiateResponse
-	httpResp, rawBody, err := m.api.doJSON(ctx, http.MethodPost, "/api/v1/owner/deposit", depositInitiateRequest{AmountPaise: amountPaise}, &resp)
+	httpResp, rawBody, err := m.api.doJSON(ctx, http.MethodPost, "/api/v1/owner/deposit",
+		depositInitiateRequest{AmountPaise: amountPaise, IdempotencyKey: key}, &resp)
 	if err != nil {
 		return DepositInfo{}, fmt.Errorf("manage: Deposit: %w", err)
 	}
