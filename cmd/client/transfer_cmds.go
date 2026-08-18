@@ -77,6 +77,45 @@ func renderTransferError(err error) string {
 	}
 }
 
+// localCodedError lets a purely client-detected condition (never a server
+// error_code) still carry a real IC §14.1-style code through --json
+// output, by implementing the exact codedError interface render.go's
+// generic errorCodeOf/renderErrorJSON already check for — no changes
+// needed there.
+type localCodedError struct {
+	error
+	code string
+}
+
+func (e *localCodedError) ErrorCode() string { return e.code }
+func (e *localCodedError) Unwrap() error     { return e.error }
+
+// withTransferErrorCode maps two of renderTransferError's four local
+// sentinels to the same IC §14.1 codes for --json mode (the other two,
+// ErrTooFewShards/ErrCanaryMismatch, have no IC §14.1 row at all — see
+// renderTransferError's own note — so they're left unwrapped and fall
+// through to errorCodeOf's ordinary fallback).
+//
+// [Bug found and fixed, live TestDemoCLIUploadFailsBeforeDeposit run]
+// printCLIError's --json path always called the generic errorCodeOf,
+// which has no knowledge of local sentinels — only renderTransferError
+// (the human-readable path) did. A live run got error_code="" instead of
+// INSUFFICIENT_ESCROW_BALANCE because of exactly this gap; every call
+// site below now wraps err before handing it to printCLIError. Wrapping
+// preserves errors.Is/errors.As on the original sentinel via Unwrap, so
+// renderTransferError's own switch above still matches correctly on the
+// wrapped value.
+func withTransferErrorCode(err error) error {
+	switch {
+	case errors.Is(err, upload.ErrInsufficientEscrow):
+		return &localCodedError{error: err, code: "INSUFFICIENT_ESCROW_BALANCE"}
+	case errors.Is(err, upload.ErrNetworkNotReady):
+		return &localCodedError{error: err, code: "NETWORK_NOT_READY"}
+	default:
+		return err
+	}
+}
+
 // buildHostAndEngine constructs the p2p.Host (client-only: no ListenAddr,
 // so it accepts no inbound streams — this is a data-owner CLI, not a
 // provider daemon) and erasure.Engine every upload/retrieve call shares.
@@ -157,7 +196,7 @@ func dispatchUpload(args []string, stdin io.Reader, out, errOut io.Writer) int {
 		err = orch.ResumeUpload(ctx, id.MasterSecret, id.OwnerID, fileID)
 		stopProgress()
 		if err != nil {
-			printCLIError(errOut, g.json, err, renderTransferError)
+			printCLIError(errOut, g.json, withTransferErrorCode(err), renderTransferError)
 			return 1
 		}
 		printUploadResult(g.json, fileID, out)
@@ -178,7 +217,7 @@ func dispatchUpload(args []string, stdin io.Reader, out, errOut io.Writer) int {
 		if errors.Is(err, upload.ErrUploadIncomplete) {
 			fmt.Fprintf(errOut, "Upload incomplete; resume later with: cmd/client upload --resume %s\n", fileID)
 		}
-		printCLIError(errOut, g.json, err, renderTransferError)
+		printCLIError(errOut, g.json, withTransferErrorCode(err), renderTransferError)
 		return 1
 	}
 	printUploadResult(g.json, fileID, out)
@@ -372,7 +411,7 @@ func dispatchRetrieve(args []string, stdin io.Reader, out, errOut io.Writer) int
 	plaintext, err := orch.RetrieveFile(context.Background(), id.MasterSecret, id.OwnerID, fileID)
 	fmt.Fprintln(errOut)
 	if err != nil {
-		printCLIError(errOut, g.json, err, renderTransferError)
+		printCLIError(errOut, g.json, withTransferErrorCode(err), renderTransferError)
 		return 1
 	}
 
