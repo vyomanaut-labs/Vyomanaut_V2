@@ -197,6 +197,15 @@ func NewRouter(cfg RouterConfig) *http.ServeMux {
 	mux.Handle("GET /api/v1/file/{file_id}/pointer", owner(pointerFileHandler.HandlePointer)) // getPointerFile
 	mux.Handle("DELETE /api/v1/file/{file_id}", owner(fileDeleteHandler.HandleDelete))        // deleteFile
 
+	// retrieveResolveHandler mints download capability tokens (ADR-078) —
+	// same signing key as uploadAssignHandler's upload tokens above
+	// (cfg.JWTPrivateKey), so both verify against the single msPublicKey
+	// every provider daemon already holds. No Readiness gate: unlike
+	// upload, resolving an already-ACTIVE file's existing shards has no
+	// network-readiness precondition to check.
+	retrieveResolveHandler := NewRetrieveResolveHandler(cfg.DB, cfg.JWTPrivateKey)
+	mux.Handle("POST /api/v1/owner/files/{file_id}/retrieve/resolve", owner(retrieveResolveHandler.HandleResolve)) // resolveRetrieval
+
 	// ── AdminApiKey routes ──────────────────────────────────────────────────
 	if auditChallengeHandler != nil {
 		mux.Handle("POST /api/v1/audit/challenge", admin(auditChallengeHandler.HandleDispatch)) // dispatchAuditChallenge
