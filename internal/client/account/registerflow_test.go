@@ -177,7 +177,11 @@ func TestRegisterOwnerSignsCanonicalPayloadAndPreservesKeypair(t *testing.T) {
 	if wantPubHex != gotReq.Ed25519PublicKey {
 		t.Fatalf("returned PublicKey %q does not match the key that signed the request %q", wantPubHex, gotReq.Ed25519PublicKey)
 	}
-	if !ed25519.PublicKey(result.PublicKey).Equal(result.PrivateKey.Public().(ed25519.PublicKey)) {
+	derivedPub, ok := result.PrivateKey.Public().(ed25519.PublicKey)
+	if !ok {
+		t.Fatalf("PrivateKey.Public() did not return an ed25519.PublicKey")
+	}
+	if !ed25519.PublicKey(result.PublicKey).Equal(derivedPub) {
 		t.Fatalf("returned PublicKey/PrivateKey are not a matching pair")
 	}
 }
