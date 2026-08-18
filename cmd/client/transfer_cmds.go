@@ -148,16 +148,16 @@ func dispatchUpload(args []string, stdin io.Reader, out, errOut io.Writer) int {
 	passphrase := fs.String("passphrase", "", "Passphrase to unlock the local identity. Prompted if omitted.")
 	mnemonic := fs.String("mnemonic", "", "Mnemonic to unlock the local identity, as an alternative to --passphrase.")
 	if err := fs.Parse(args); err != nil {
-		return 2
+		return exitUsage
 	}
 	if err := validateGlobalFlags(g); err != nil {
 		fprintln(errOut, err)
-		return 2
+		return exitUsage
 	}
 	rest := fs.Args()
 	if *resume == "" && len(rest) < 1 {
 		fprintln(errOut, "usage: cmd/client upload <path> [flags]   OR   cmd/client upload --resume <file_id> [flags]")
-		return 2
+		return exitUsage
 	}
 
 	profile := config.SelectProfile(g.mode)
@@ -190,7 +190,7 @@ func dispatchUpload(args []string, stdin io.Reader, out, errOut io.Writer) int {
 		fileID, err := uuid.Parse(*resume)
 		if err != nil {
 			fprintf(errOut, "--resume must be a valid file_id (UUID): %v\n", err)
-			return 2
+			return exitUsage
 		}
 		stopProgress := startUploadProgress(sessionDir, fileID, errOut)
 		err = orch.ResumeUpload(ctx, id.MasterSecret, id.OwnerID, fileID)
@@ -236,6 +236,10 @@ func printUploadResult(jsonMode bool, fileID uuid.UUID, out io.Writer) {
 }
 
 const uploadProgressPollInterval = 500 * time.Millisecond
+
+// progressPercentScale converts an acked/total shard ratio to a percentage
+// for reportUploadProgress's display text below.
+const progressPercentScale = 100
 
 // startUploadProgressForNewSession watches sessionDir for the new session
 // file UploadFile is about to create (its file_id isn't known to the
@@ -333,7 +337,7 @@ func reportUploadProgress(sessionDir string, fileID uuid.UUID, errOut io.Writer)
 	if total == 0 {
 		return
 	}
-	pct := acked * 100 / total
+	pct := acked * progressPercentScale / total
 	fprintf(errOut, "\rUploading... %d%%", pct)
 }
 
@@ -367,21 +371,21 @@ func dispatchRetrieve(args []string, stdin io.Reader, out, errOut io.Writer) int
 	passphrase := fs.String("passphrase", "", "Passphrase to unlock the local identity. Prompted if omitted.")
 	mnemonic := fs.String("mnemonic", "", "Mnemonic to unlock the local identity, as an alternative to --passphrase.")
 	if err := fs.Parse(args); err != nil {
-		return 2
+		return exitUsage
 	}
 	if err := validateGlobalFlags(g); err != nil {
 		fprintln(errOut, err)
-		return 2
+		return exitUsage
 	}
 	rest := fs.Args()
 	if len(rest) < 1 {
 		fprintln(errOut, "usage: cmd/client retrieve <file_id> [-o out] [flags]")
-		return 2
+		return exitUsage
 	}
 	fileID, err := uuid.Parse(rest[0])
 	if err != nil {
 		fprintf(errOut, "<file_id> must be a valid UUID: %v\n", err)
-		return 2
+		return exitUsage
 	}
 
 	profile := config.SelectProfile(g.mode)
@@ -416,7 +420,11 @@ func dispatchRetrieve(args []string, stdin io.Reader, out, errOut io.Writer) int
 	}
 
 	outFile := defaultRetrieveOutputPath(*outPath, fileID, "")
-	if err := os.WriteFile(outFile, plaintext, 0600); err != nil {
+
+	// privateFilePermissions (localstore.go): a retrieved file is decrypted
+	// plaintext of the owner's own data, same privacy bar as the local
+	// keystore — owner-only read/write.
+	if err := os.WriteFile(outFile, plaintext, privateFilePermissions); err != nil {
 		fprintf(errOut, "Downloaded but could not write %s: %v\n", outFile, err)
 		return 1
 	}

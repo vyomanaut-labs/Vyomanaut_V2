@@ -27,6 +27,14 @@ func buildManager(g globalFlags, id *unlockedIdentity) *manage.Manager {
 	return manage.NewManager(g.microserviceURL, id.Token, &http.Client{Timeout: cliHTTPClientTimeout})
 }
 
+// tabWriterTabWidth/tabWriterPadding are dispatchLs's text/tabwriter column
+// tab width and inter-column padding — display-only constants, no IC/DM
+// significance.
+const (
+	tabWriterTabWidth = 4
+	tabWriterPadding  = 2
+)
+
 // unlockForReadOnly is the shared prologue every subcommand in this file
 // needs: select the profile, load and decrypt the local identity. Named
 // distinctly from transfer_cmds.go's own inline sequence only because
@@ -57,11 +65,11 @@ func dispatchLs(args []string, stdin io.Reader, out, errOut io.Writer) int {
 	passphrase := fs.String("passphrase", "", "Passphrase to unlock the local identity. Prompted if omitted.")
 	mnemonic := fs.String("mnemonic", "", "Mnemonic to unlock the local identity, as an alternative to --passphrase.")
 	if err := fs.Parse(args); err != nil {
-		return 2
+		return exitUsage
 	}
 	if err := validateGlobalFlags(g); err != nil {
 		fprintln(errOut, err)
-		return 2
+		return exitUsage
 	}
 
 	in := bufio.NewReader(stdin)
@@ -105,7 +113,7 @@ func dispatchLs(args []string, stdin io.Reader, out, errOut io.Writer) int {
 	// AvailabilityLabel is already IC §14.2-mapped by manage.ListFiles —
 	// this table prints it verbatim and never re-derives or invents a
 	// label from the raw Availability enum itself.
-	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	tw := tabwriter.NewWriter(out, 0, tabWriterTabWidth, tabWriterPadding, ' ', 0)
 	fprintln(tw, "FILE_ID\tNAME\tSIZE\tMONTHLY_COST\tAVAILABILITY")
 	for _, e := range entries {
 		fprintf(tw, "%s\t%s\t%d bytes\t%s\t%s\n", e.FileID, e.DisplayName, e.SizeBytes, formatPaise(e.MonthlyCostPaise), e.AvailabilityLabel)
@@ -128,21 +136,21 @@ func dispatchRm(args []string, stdin io.Reader, out, errOut io.Writer) int {
 	passphrase := fs.String("passphrase", "", "Passphrase to unlock the local identity. Prompted if omitted.")
 	mnemonic := fs.String("mnemonic", "", "Mnemonic to unlock the local identity, as an alternative to --passphrase.")
 	if err := fs.Parse(args); err != nil {
-		return 2
+		return exitUsage
 	}
 	if err := validateGlobalFlags(g); err != nil {
 		fprintln(errOut, err)
-		return 2
+		return exitUsage
 	}
 	rest := fs.Args()
 	if len(rest) < 1 {
 		fprintln(errOut, "usage: cmd/client rm <file_id> [--yes] [flags]")
-		return 2
+		return exitUsage
 	}
 	fileID, err := uuid.Parse(rest[0])
 	if err != nil {
 		fprintf(errOut, "<file_id> must be a valid UUID: %v\n", err)
-		return 2
+		return exitUsage
 	}
 
 	in := bufio.NewReader(stdin)
@@ -204,11 +212,11 @@ func dispatchBalance(args []string, stdin io.Reader, out, errOut io.Writer) int 
 	passphrase := fs.String("passphrase", "", "Passphrase to unlock the local identity. Prompted if omitted.")
 	mnemonic := fs.String("mnemonic", "", "Mnemonic to unlock the local identity, as an alternative to --passphrase.")
 	if err := fs.Parse(args); err != nil {
-		return 2
+		return exitUsage
 	}
 	if err := validateGlobalFlags(g); err != nil {
 		fprintln(errOut, err)
-		return 2
+		return exitUsage
 	}
 
 	in := bufio.NewReader(stdin)
@@ -254,15 +262,15 @@ func dispatchDeposit(args []string, stdin io.Reader, out, errOut io.Writer) int 
 	passphrase := fs.String("passphrase", "", "Passphrase to unlock the local identity. Prompted if omitted.")
 	mnemonic := fs.String("mnemonic", "", "Mnemonic to unlock the local identity, as an alternative to --passphrase.")
 	if err := fs.Parse(args); err != nil {
-		return 2
+		return exitUsage
 	}
 	if err := validateGlobalFlags(g); err != nil {
 		fprintln(errOut, err)
-		return 2
+		return exitUsage
 	}
 	if *amountPaise <= 0 {
 		fprintln(errOut, "--amount-paise must be a positive integer.")
-		return 2
+		return exitUsage
 	}
 
 	in := bufio.NewReader(stdin)

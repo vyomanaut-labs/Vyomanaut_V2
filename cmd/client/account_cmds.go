@@ -53,6 +53,13 @@ import (
 
 const cliHTTPClientTimeout = 30 * time.Second
 
+// minPassphraseLength mirrors internal/crypto's DeriveMasterSecret
+// precondition (see register.go's own doc comment: "len(passphrase) >= 8").
+// This is a CLI-side early check only, letting the user retype without a
+// round trip through FinalizeIdentity — not the source of truth for the
+// constraint, which lives in internal/crypto.
+const minPassphraseLength = 8
+
 // ── register ─────────────────────────────────────────────────────────────
 
 type registerConfig struct {
@@ -73,11 +80,12 @@ func dispatchRegister(args []string, stdin io.Reader, out, errOut io.Writer) int
 	otpCode := fs.String("otp-code", "", "6-digit OTP code. Prompted if omitted (useful for scripted/demo-harness runs that already know the code).")
 	passphrase := fs.String("passphrase", "", "Passphrase for Argon2id derivation (profile.Argon2Time/Argon2Memory/Argon2Threads — never hardcoded). Prompted if omitted; a flag is convenient for automation but leaves the passphrase in shell history, so interactive use should prefer the prompt.")
 	if err := fs.Parse(args); err != nil {
-		return 2
+		return exitUsage
 	}
 	if err := validateGlobalFlags(g); err != nil {
 		fprintln(errOut, err)
-		return 2
+		fprintln(errOut, err)
+		return exitUsage
 	}
 
 	profile := config.SelectProfile(g.mode)
@@ -107,7 +115,7 @@ func runRegister(ctx context.Context, cfg registerConfig, in *bufio.Reader, out,
 	// it immediately, at the one place that actually knows both facts.
 	if cfg.g.json && !cfg.profile.SkipMnemonicConfirm {
 		fprintln(errOut, "register --json is not supported against a profile that requires mnemonic confirmation (this profile's SkipMnemonicConfirm is false): --json never prints the mnemonic, so there is no way to confirm it back. Register without --json, or use a profile where SkipMnemonicConfirm is true.")
-		return 2
+		return exitUsage
 	}
 
 	if existing, err := readIdentityFile(cfg.g.dataDir); err != nil {
@@ -183,7 +191,7 @@ func runRegister(ctx context.Context, cfg registerConfig, in *bufio.Reader, out,
 			return 1
 		}
 	}
-	if len(passphrase) < 8 {
+	if len(passphrase) < minPassphraseLength {
 		fprintf(errOut, "Passphrase must be at least 8 characters. Your account IS registered (owner_id=%s); re-run register to finish with a longer passphrase.\n", registered.OwnerID)
 		return 1
 	}
@@ -191,8 +199,14 @@ func runRegister(ctx context.Context, cfg registerConfig, in *bufio.Reader, out,
 	// Argon2id parameters are read from profile.Argon2Time/Argon2Memory/
 	// Argon2Threads inside account.FinalizeIdentity — never hardcoded here
 	// or anywhere in cmd/client (ADR-031).
+	// No local passphrase-scrubbing step here: Go strings are immutable, so
+	// reassigning the local variable afterward doesn't touch the original
+	// backing bytes — that used to be attempted here (`passphrase = ""`)
+	// but did nothing real and was flagged as dead by ineffassign. Genuine
+	// hygiene would need []byte from the start and an explicit zeroing
+	// pass (the pattern account.ZeroMasterSecret already uses elsewhere in
+	// this file) — out of scope for this fix; flagged, not silently done.
 	identity, err := account.FinalizeIdentity(registered.PublicKey, registered.PrivateKey, registered.OwnerID, []byte(passphrase), cfg.profile)
-	passphrase = "" // best-effort local hygiene; Go can't guarantee this string's backing bytes are gone
 	if err != nil {
 		printCLIError(errOut, cfg.g.json, err, renderError)
 		return 1
@@ -264,19 +278,19 @@ func dispatchRecover(args []string, stdin io.Reader, out, errOut io.Writer) int 
 	passphrase := fs.String("passphrase", "", "Passphrase recovery path (MVP §8.3). Mutually exclusive with --mnemonic.")
 	mnemonic := fs.String("mnemonic", "", "24-word BIP-39 mnemonic recovery path (MVP §8.3), space-separated. Mutually exclusive with --passphrase.")
 	if err := fs.Parse(args); err != nil {
-		return 2
+		return exitUsage
 	}
 	if err := validateGlobalFlags(g); err != nil {
 		fprintln(errOut, err)
-		return 2
+		return exitUsage
 	}
 	if *passphrase == "" && *mnemonic == "" {
 		fprintln(errOut, "recover requires --passphrase or --mnemonic (MVP §8.3).")
-		return 2
+		return exitUsage
 	}
 	if *passphrase != "" && *mnemonic != "" {
 		fprintln(errOut, "recover accepts only one of --passphrase or --mnemonic, not both.")
-		return 2
+		return exitUsage
 	}
 
 	profile := config.SelectProfile(g.mode)
@@ -319,7 +333,7 @@ func runLocalRecover(cfg recoverConfig, masterSecretFor func(uuid.UUID) ([32]byt
 	ownerID, err := uuid.Parse(cfg.ownerID)
 	if err != nil {
 		fprintf(errOut, "--owner-id is not a valid UUID: %v\n", err)
-		return 2
+		return exitUsage
 	}
 	stored, err := readIdentityFile(cfg.g.dataDir)
 	if err != nil {
