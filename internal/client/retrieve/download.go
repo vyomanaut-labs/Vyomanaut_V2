@@ -1,55 +1,39 @@
 // Package retrieve is declared in doc.go.
-// This file implements parallel shard download (TASK step 2, FR-016).
+// This file implements parallel shard download (TASK step 2, FR-016), on
+// the retrieval protocol ratified by ADR-078.
 //
-// ⚠ [MAJOR FLAG — genuine architecture gap, not an implementation detail]
-// There is no documented, ratified protocol anywhere in IC §4 for a DATA
-// OWNER CLIENT to download its own shard from a provider daemon:
-//   - IC §4.1 (chunk-upload) is write-only.
-//   - IC §4.2 (audit-challenge) returns only a response_hash proof, never
-//     raw chunk data.
-//   - IC §4.4.1 (repair-download) explicitly authenticates the caller as
-//     THE MICROSERVICE specifically ("the provider daemon must verify that
-//     the requesting Peer ID is registered as a microservice replica...
-//     requests from unregistered Peer IDs are rejected immediately with
-//     status 0x02 NOT_AUTHORISED") — a data-owner client's Peer ID is not,
-//     and must not be, on that list.
-//   - IC §4.5 (vetting-gc) is a deletion instruction, not a data path.
-// Separately, pointerFileSegment (pointer.go) only carries provider_id +
-// chunk_id — never multiaddrs, correctly so, since multiaddrs stored once
-// at upload time would go stale by retrieval time. No OAS endpoint resolves
-// provider_id → current multiaddrs for a client either:
-// GET /api/v1/provider/{provider_id}/status requires the caller's own JWT
-// `sub` to match the target provider_id (a provider's own self-status
-// call), and its response schema has no multiaddr field regardless.
+// [Resolved, M17 — history preserved for context] Until ADR-078, IC §4 had
+// no ratified protocol for a data owner client to download its own shard:
+// upload (§4.1) is write-only, audit (§4.2) returns only a proof, repair
+// download (§4.4.1) authenticates the caller AS the microservice
+// specifically, and vetting-gc (§4.5) is a deletion instruction. This file
+// originally implemented two PROPOSED, NOT-YET-RATIFIED placeholders
+// against that gap — a bare-chunk_id "knowledge of the hash is the
+// capability" download protocol, and a provider-resolve endpoint — which
+// were never built server-side and had never once executed successfully
+// live. A Design Council session ("Data Owner File Retrieval", M17
+// Session 17.2.1 live verification) considered both proposals and
+// rejected the bare-chunk_id one: it is stable and identical across all
+// 56 holders for a file's entire lifetime, which makes it unrevocable
+// (breaks `rm`'s delete guarantee) and conflates an integrity identifier
+// with an authorization secret. ADR-078 is the resulting decision, now
+// implemented below.
 //
-// FR-016 and IC §5.9's RetrieveFile are both real, intended requirements —
-// this is a genuine hole between "requirements level" and "protocol/API
-// level" for retrieval specifically, not something resolvable by a locally
-// scoped interpretation the way (for example) the AONT-overhead padding
-// math in the upload package was. This is exactly the class of "BUILD
-// BLOCKER that doesn't resolve from IC/DM/ARCH alone" the project's own
-// design-council process exists for — recommended before either proposal
-// below is treated as anything more than a placeholder to unblock this
-// session mechanically.
+// AUTHORIZATION (ADR-078 §1). Every shard fetch below carries a download
+// capability token — the same 72-byte Ed25519-signed shape IC §4.1's
+// upload capability_token already uses, with a distinct domain-separation
+// prefix so the two can never be replayed as each other. The client never
+// constructs or signs this token; it only forwards, verbatim, what
+// resolveFileForRetrieval (below) received from the microservice.
 //
-// Two PROPOSED, NOT YET RATIFIED additions are implemented below purely so
-// this session has something concrete and testable to build and verify
-// against:
-//  1. POST /api/v1/providers/resolve — resolveProviderAddresses below —
-//     mirrors the shape ShardAssignment.multiaddrs already uses elsewhere
-//     in the OAS, minimally extended to arbitrary provider_ids.
-//  2. /vyomanaut/chunk-download/1.0.0 — a new libp2p protocol, deliberately
-//     as close to the existing repair-download frame shape (IC §4.4.1) as
-//     the different (no microservice-only) auth model allows: a bare
-//     chunk_id request, relying on content-addressing itself as the access
-//     gate (an owner needs the pointer file's chunk_ids to ask at all) —
-//     the same "knowledge of the hash is the capability" model several
-//     real content-addressed P2P storage systems already use. This is a
-//     genuine security-relevant decision, not a detail, and belongs in
-//     front of the design council, not decided unilaterally here.
+// RESOLUTION (ADR-078 §2). resolveFileForRetrieval calls POST
+// /api/v1/owner/files/{file_id}/retrieve/resolve ONCE for the entire file,
+// not per segment — at prod parameters a 1 GB file is ~1,365 segments,
+// and per-segment resolution would be over a thousand serial REST
+// round-trips before any shard data moved.
 //
-// [REF: FR-016, IC §5.9 RetrieveFile, IC §4.1/4.2/4.4.1/4.5 (for what does
-// NOT apply here), MVP §8.2 Phase 15.3 Session 15.3.1]
+// [REF: ADR-078, FR-016, IC §5.9 RetrieveFile, IC §4.1/4.2/4.4.1/4.5,
+// MVP §8.2 Phase 15.3 Session 15.3.1]
 
 package retrieve
 
@@ -70,59 +54,115 @@ import (
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/p2p"
 )
 
-// ── PROPOSED: /vyomanaut/chunk-download/1.0.0 (NOT ratified) ──────────────
+// ── /vyomanaut/chunk-download/1.0.0 (ADR-078 §3, Accepted) ────────────────
 
 const (
-	chunkDownloadProtocolID = p2p.ProtocolID("/vyomanaut/chunk-download/1.0.0") // PROPOSED
-	chunkDownloadTimeout    = 10 * time.Second                                  // mirrors repair-download's 10s (cold disk reads), IC §4.4.1
+	chunkDownloadProtocolID = p2p.ProtocolID("/vyomanaut/chunk-download/1.0.0")
+	chunkDownloadTimeout    = 10 * time.Second // mirrors repair-download's 10s (cold disk reads), IC §4.4.1
 
 	downloadLengthPrefixSize = 4
 	downloadChunkIDSize      = 32
+	// downloadExpirySize/downloadCapSigSize/downloadFrame1PayloadBytes:
+	// Frame 1 is chunk_id(32) || expiry_unix_ms(8) || cap_sig(64) = 104
+	// bytes (ADR-078 §3) — every signed field transmitted, per the
+	// REPAIR-AUTH-TS-GAP discipline cmd/provider/handler_repair.go's own
+	// header explains. Must match
+	// cmd/provider/handler_chunk_download.go's identical constants
+	// exactly; a mismatch on either side is a wire break.
+	downloadExpirySize         = 8
+	downloadCapSigSize         = 64
+	downloadFrame1PayloadBytes = downloadChunkIDSize + downloadExpirySize + downloadCapSigSize // 104
+
+	// downloadTokenByteLen is the server-issued token's own length
+	// (expiry_unix_ms(8) || cap_sig(64) = 72), the same 72-byte shape IC
+	// §4.1's upload capability_token uses — chunk_id is NOT part of the
+	// token itself; it travels separately in Frame 1 (and is already
+	// known client-side from the pointer file), exactly mirroring how
+	// upload's UploadRequest frame carries chunk_id and capability_token
+	// as sibling fields rather than nesting one inside the other.
+	downloadTokenByteLen = 72
 )
 
-// ChunkDownloadResponse status codes (PROPOSED — mirrors repair-download's
-// status shape, IC §4.4.1, minus NOT_AUTHORISED since this protocol has no
-// authentication step to fail).
+// ChunkDownloadResponse status codes (ADR-078 §3, mirrors IC §4.4.1
+// exactly). NOT_AUTHORISED IS present — unlike the earlier PROPOSED draft
+// assumed, this protocol has a real authentication step (the download
+// token), and ADR-078 §4 makes the status-code semantics deliberate: a
+// token that fails to verify returns NOT_AUTHORISED regardless of whether
+// the chunk is present, so an unauthenticated prober learns nothing about
+// a provider's holder-set from the code alone.
 const (
 	downloadStatusOK            = 0x00
 	downloadStatusNotFound      = 0x01
-	downloadStatusCorruption    = 0x02
-	downloadStatusInternalError = 0x03
+	downloadStatusNotAuthorised = 0x02
+	downloadStatusCorruption    = 0x03
+	downloadStatusInternalError = 0x04
 )
 
-// ── PROPOSED: POST /api/v1/providers/resolve (NOT ratified) ───────────────
+// ── POST /api/v1/owner/files/{file_id}/retrieve/resolve (ADR-078 §2) ──────
+//
+// One call per file, not per segment: at prod parameters a 1 GB file is
+// ~1,365 segments, and per-segment resolution would be ~1,365 serial REST
+// round-trips before any shard data moves. The client already holds the
+// full decrypted pointer file (and therefore every provider_id) before
+// this is called, so there is no reason to resolve incrementally.
 
-type resolveProvidersRequest struct {
-	ProviderIDs []uuid.UUID `json:"provider_ids"`
+type retrieveResolveShardBody struct {
+	ShardIndex     int       `json:"shard_index"`
+	ProviderID     uuid.UUID `json:"provider_id"`
+	ChunkID        string    `json:"chunk_id"`
+	Multiaddrs     []string  `json:"multiaddrs"`
+	MultiaddrStale bool      `json:"multiaddr_stale"`
+	DownloadToken  string    `json:"download_token"`
 }
 
-type providerAddress struct {
-	ProviderID uuid.UUID `json:"provider_id"`
-	Multiaddrs []string  `json:"multiaddrs"`
+type retrieveResolveSegmentBody struct {
+	SegmentIndex int                        `json:"segment_index"`
+	SegmentID    uuid.UUID                  `json:"segment_id"`
+	Shards       []retrieveResolveShardBody `json:"shards"`
 }
 
-type resolveProvidersResponse struct {
-	Providers []providerAddress `json:"providers"`
+type retrieveResolveResponseBody struct {
+	FileID   uuid.UUID                    `json:"file_id"`
+	Segments []retrieveResolveSegmentBody `json:"segments"`
 }
 
-// resolveProviderAddresses calls the PROPOSED POST /api/v1/providers/resolve
-// endpoint (see this file's header comment) to map provider_id → current
-// multiaddrs for a batch of providers.
-func (o *Orchestrator) resolveProviderAddresses(ctx context.Context, providerIDs []uuid.UUID) (map[uuid.UUID][]string, error) {
-	var resp resolveProvidersResponse
-	httpResp, rawBody, err := o.api.doJSON(ctx, http.MethodPost, "/api/v1/providers/resolve", resolveProvidersRequest{ProviderIDs: providerIDs}, &resp)
+// resolvedShard is one shard's dial + authorization information, keyed by
+// chunk_id_hex in the map resolveFileForRetrieval returns — chunk_id is a
+// 256-bit content address (ADR-073), globally unique per shard, so it is
+// sufficient as a map key on its own without also carrying segment/shard
+// index.
+type resolvedShard struct {
+	multiaddrs     []string
+	multiaddrStale bool
+	downloadToken  string // hex, downloadTokenByteLen bytes when decoded
+}
+
+// resolveFileForRetrieval calls POST
+// /api/v1/owner/files/{file_id}/retrieve/resolve ONCE for the whole file
+// (ADR-078 §2) and returns every shard's resolution keyed by chunk_id_hex.
+func (o *Orchestrator) resolveFileForRetrieval(ctx context.Context, fileID uuid.UUID) (map[string]resolvedShard, error) {
+	var resp retrieveResolveResponseBody
+	path := fmt.Sprintf("/api/v1/owner/files/%s/retrieve/resolve", fileID)
+	httpResp, rawBody, err := o.api.doJSON(ctx, http.MethodPost, path, nil, &resp)
 	if err != nil {
-		return nil, fmt.Errorf("retrieve: resolveProviderAddresses: %w", err)
+		return nil, fmt.Errorf("retrieve: resolveFileForRetrieval: %w", err)
 	}
 	if httpResp.StatusCode != http.StatusOK {
 		if apiErr := decodeAPIError(rawBody); apiErr != nil {
-			return nil, fmt.Errorf("retrieve: resolveProviderAddresses: unexpected status %d: %w", httpResp.StatusCode, apiErr)
+			return nil, fmt.Errorf("retrieve: resolveFileForRetrieval: unexpected status %d: %w", httpResp.StatusCode, apiErr)
 		}
-		return nil, fmt.Errorf("retrieve: resolveProviderAddresses: unexpected status %d", httpResp.StatusCode)
+		return nil, fmt.Errorf("retrieve: resolveFileForRetrieval: unexpected status %d", httpResp.StatusCode)
 	}
-	out := make(map[uuid.UUID][]string, len(resp.Providers))
-	for _, p := range resp.Providers {
-		out[p.ProviderID] = p.Multiaddrs
+
+	out := make(map[string]resolvedShard)
+	for _, seg := range resp.Segments {
+		for _, shard := range seg.Shards {
+			out[shard.ChunkID] = resolvedShard{
+				multiaddrs:     shard.Multiaddrs,
+				multiaddrStale: shard.MultiaddrStale,
+				downloadToken:  shard.DownloadToken,
+			}
+		}
 	}
 	return out, nil
 }
@@ -141,12 +181,7 @@ type shardFetchResult struct {
 // pattern — never hardcoded to 16; demo mode cancels at
 // config.DemoProfile.DataShards = 3). Returns ErrTooFewShards if fewer than
 // profile.DataShards succeed once every dial has settled.
-func (o *Orchestrator) downloadSegment(ctx context.Context, seg pointerFileSegment) ([][]byte, error) {
-	addrsByProvider, err := o.resolveProviderAddresses(ctx, seg.ProviderIDs)
-	if err != nil {
-		return nil, fmt.Errorf("downloadSegment: %w", err)
-	}
-
+func (o *Orchestrator) downloadSegment(ctx context.Context, seg pointerFileSegment, resolved map[string]resolvedShard) ([][]byte, error) {
 	need := o.profile.DataShards
 	dlCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -158,7 +193,8 @@ func (o *Orchestrator) downloadSegment(ctx context.Context, seg pointerFileSegme
 		go func(shardIdx int) {
 			defer wg.Done()
 			providerID := seg.ProviderIDs[shardIdx]
-			data, err := o.fetchOneShard(dlCtx, providerID, addrsByProvider[providerID], seg.ChunkIDs[shardIdx])
+			chunkIDHex := seg.ChunkIDs[shardIdx]
+			data, err := o.fetchOneShard(dlCtx, providerID, chunkIDHex, resolved[chunkIDHex])
 			if err != nil {
 				return // dropped: downloadSegment only needs `need` successes total
 			}
@@ -197,10 +233,10 @@ func (o *Orchestrator) downloadSegment(ctx context.Context, seg pointerFileSegme
 	return shards, nil
 }
 
-// fetchOneShard resolves a peer, connects, opens the PROPOSED
-// chunk-download stream, and verifies the shard's content address BEFORE
-// returning it (TASK step 2: "before it is handed to RS decode").
-func (o *Orchestrator) fetchOneShard(ctx context.Context, providerID uuid.UUID, multiaddrs []string, chunkIDHex string) ([]byte, error) {
+// fetchOneShard resolves a peer, connects, opens the chunk-download
+// stream, and verifies the shard's content address BEFORE returning it
+// (TASK step 2: "before it is handed to RS decode").
+func (o *Orchestrator) fetchOneShard(ctx context.Context, providerID uuid.UUID, chunkIDHex string, shard resolvedShard) ([]byte, error) {
 	chunkIDBytes, err := hex.DecodeString(chunkIDHex)
 	if err != nil || len(chunkIDBytes) != downloadChunkIDSize {
 		return nil, fmt.Errorf("provider %s: malformed chunk_id", providerID)
@@ -208,7 +244,16 @@ func (o *Orchestrator) fetchOneShard(ctx context.Context, providerID uuid.UUID, 
 	var chunkID [32]byte
 	copy(chunkID[:], chunkIDBytes)
 
-	peerID, addrs, err := resolveDownloadPeer(providerID, multiaddrs)
+	tokenBytes, err := hex.DecodeString(shard.downloadToken)
+	if err != nil || len(tokenBytes) != downloadTokenByteLen {
+		return nil, fmt.Errorf("provider %s: malformed download_token", providerID)
+	}
+	var expiryBytes [downloadExpirySize]byte
+	copy(expiryBytes[:], tokenBytes[0:downloadExpirySize])
+	var capSig [downloadCapSigSize]byte
+	copy(capSig[:], tokenBytes[downloadExpirySize:downloadTokenByteLen])
+
+	peerID, addrs, err := resolveDownloadPeer(providerID, shard.multiaddrs)
 	if err != nil {
 		return nil, fmt.Errorf("provider %s: %w", providerID, err)
 	}
@@ -224,7 +269,7 @@ func (o *Orchestrator) fetchOneShard(ctx context.Context, providerID uuid.UUID, 
 		return nil, fmt.Errorf("provider %s: set deadline: %w", providerID, err)
 	}
 
-	if err := writeChunkDownloadRequest(stream, chunkID); err != nil {
+	if err := writeChunkDownloadRequest(stream, chunkID, expiryBytes, capSig); err != nil {
 		return nil, fmt.Errorf("provider %s: %w", providerID, err)
 	}
 	status, data, err := readChunkDownloadResponse(stream)
@@ -290,18 +335,28 @@ func extractPeerIDFromMultiaddr(raw string) (p2p.PeerID, bool) {
 	return p2p.PeerID(id), true
 }
 
-// writeChunkDownloadRequest writes the PROPOSED Frame 1 —
-// ChunkDownloadRequest: length(4) || chunk_id(32).
-func writeChunkDownloadRequest(s p2p.Stream, chunkID [32]byte) error {
-	frame := make([]byte, downloadLengthPrefixSize+downloadChunkIDSize)
-	binary.BigEndian.PutUint32(frame[0:downloadLengthPrefixSize], downloadChunkIDSize)
-	copy(frame[downloadLengthPrefixSize:], chunkID[:])
+// writeChunkDownloadRequest writes Frame 1 — ChunkDownloadRequest
+// (ADR-078 §3): length(4) || chunk_id(32) || expiry_unix_ms(8) ||
+// cap_sig(64) = 104 bytes total. expiryBytes and capSig come directly
+// from the server-issued download_token (fetchOneShard splits the
+// 72-byte token into these two fields) — nothing is recomputed
+// client-side; the client only ever forwards what the microservice signed.
+func writeChunkDownloadRequest(s p2p.Stream, chunkID [32]byte, expiryBytes [downloadExpirySize]byte, capSig [downloadCapSigSize]byte) error {
+	frame := make([]byte, downloadLengthPrefixSize+downloadFrame1PayloadBytes)
+	binary.BigEndian.PutUint32(frame[0:downloadLengthPrefixSize], downloadFrame1PayloadBytes)
+	offset := downloadLengthPrefixSize
+	copy(frame[offset:offset+downloadChunkIDSize], chunkID[:])
+	offset += downloadChunkIDSize
+	copy(frame[offset:offset+downloadExpirySize], expiryBytes[:])
+	offset += downloadExpirySize
+	copy(frame[offset:offset+downloadCapSigSize], capSig[:])
 	_, err := s.Write(frame)
 	return err
 }
 
-// readChunkDownloadResponse reads the PROPOSED Frame 2 —
-// ChunkDownloadResponse: length(4) || status(1) || chunk_data(present only
+// readChunkDownloadResponse reads Frame 2 — ChunkDownloadResponse
+// (ADR-078 §3, mirrors IC §4.4.1): length(4) || status(1) ||
+// chunk_data(present only
 // on status = 0x00).
 func readChunkDownloadResponse(s p2p.Stream) (status byte, data []byte, err error) {
 	var lengthBuf [downloadLengthPrefixSize]byte
