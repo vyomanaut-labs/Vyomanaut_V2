@@ -273,7 +273,14 @@ func dispatchDeposit(args []string, stdin io.Reader, out, errOut io.Writer) int 
 	defer account.ZeroMasterSecret(&id.MasterSecret)
 
 	m := buildManager(g, id)
-	info, err := m.Deposit(context.Background(), *amountPaise)
+	// depositRequestID is fresh per CLI invocation — this session doesn't
+	// give deposit a --resume-style flag the way upload has one, so there
+	// is no persisted state across separate `deposit` runs to reuse a
+	// prior attempt's ID from. Retry-safety within THIS invocation (if
+	// manage.Deposit's own HTTP call were ever retried internally) is
+	// still correct, since the same ID would be reused for that.
+	depositRequestID := uuid.New()
+	info, err := m.Deposit(context.Background(), id.OwnerID, depositRequestID, *amountPaise)
 	if err != nil {
 		printCLIError(errOut, g.json, err, renderError)
 		return 1
