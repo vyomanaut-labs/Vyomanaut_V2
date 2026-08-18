@@ -113,26 +113,106 @@ func runClientJSON(t *testing.T, ctx context.Context, clientBin string, args []s
 	return stdout, stderr
 }
 
-// lastJSONLine returns the last non-empty line of stdout, decoded into
-// out. cmd/client's own --json contract is one JSON object per invocation
-// on stdout (progress and prompts, where they exist, go to stderr) — this
-// helper is deliberately "last line", not "only line", so it also works
-// for register (whose interactive prompts share stdout with its final
-// --json payload; see runClientRegisterInteractive's own note).
+// lastJSONLine finds the last complete, standalone JSON value in stdout
+// and decodes it into out.
+//
+// This is deliberately not "split on newlines, take the last non-empty
+// one" (an earlier version of this function did exactly that, and a live
+// TestDemoCLIFullLifecycle run caught why it's wrong): promptLine
+// (account_cmds.go) correctly writes an interactive prompt's label with
+// no trailing newline, so the cursor stays on the same line for a
+// response — proper CLI behavior, not a bug. register's final --json
+// payload is written right after its last prompt is answered, with
+// nothing separating them on a newline basis, so "Enter the 6-digit
+// code: " and the JSON object end up looking like one "line" to a
+// newline-splitter. This instead scans backward for every '{' or '['
+// (every plausible start of a JSON value — cmd/client's own JSON shapes
+// are either top-level objects like registerOutput or top-level arrays
+// like ls's []jsonEntry) and tries each from the end of the string
+// forward, taking the first candidate that parses as one complete,
+// self-contained JSON value with nothing trailing. That last condition
+// is what makes this safe even if the payload itself contains nested
+// objects: a candidate starting at an inner '{' would have unmatched
+// trailing bytes left over (e.g. an extra '}') and fail to parse as a
+// complete value on its own, so the search correctly continues past it
+// to the real, outer start.
 func lastJSONLine(t *testing.T, stdout string, out any) {
 	t.Helper()
-	lines := strings.Split(strings.TrimRight(stdout, "\n"), "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := strings.TrimSpace(lines[i])
-		if line == "" {
+	trimmed := strings.TrimRight(stdout, "\n")
+
+	var starts []int
+	for i, r := range trimmed {
+		if r == '{' || r == '[' {
+			starts = append(starts, i)
+		}
+	}
+	for i := len(starts) - 1; i >= 0; i-- {
+		candidate := trimmed[starts[i]:]
+		if !json.Valid([]byte(candidate)) {
 			continue
 		}
-		if err := json.Unmarshal([]byte(line), out); err != nil {
-			t.Fatalf("last non-empty stdout line is not valid JSON: %q: %v\nfull stdout:\n%s", line, err, stdout)
+		if err := json.Unmarshal([]byte(candidate), out); err == nil {
+			return
 		}
-		return
+		// Syntactically valid JSON, but doesn't match out's type (e.g. an
+		// object found where an array-typed target was expected) — keep
+		// searching earlier candidates instead of failing on the first
+		// valid-but-wrong-shaped match.
 	}
-	t.Fatalf("stdout had no non-empty lines to decode as JSON\nfull stdout:\n%s", stdout)
+	t.Fatalf("no valid, complete JSON value found anywhere in stdout\nfull stdout:\n%s", stdout)
+}
+
+// TestLastJSONLine is a regression test for a real bug a live
+// TestDemoCLIFullLifecycle run caught: the original implementation split
+// stdout on newlines and took the last non-empty line, which broke the
+// moment a --json payload landed right after a no-trailing-newline prompt
+// (register's actual, correct behavior) on what looked like one "line".
+func TestLastJSONLine(t *testing.T) {
+	cases := []struct {
+		name   string
+		stdout string
+	}{
+		{
+			name:   "JSON on its own line (the common case)",
+			stdout: "2026/08/18 [STARTUP] ...\nOTP sent.\nEnter the 6-digit code: \n{\"owner_id\":\"abc\",\"registered\":true}\n",
+		},
+		{
+			name: "JSON glued to a no-trailing-newline prompt — the live failure this test pins",
+			stdout: "2026/08/18 [STARTUP] ...\n" +
+				"OTP sent. In demo mode there is no real SMS integration — look up the 6-digit code from the otp_codes table.\n" +
+				"Enter the 6-digit code: {\"owner_id\":\"ae843cf3-29b0-41f6-a51f-6f0e573765f3\",\"registered\":true}\n",
+		},
+		{
+			name:   "trailing whitespace after the newline",
+			stdout: "{\"owner_id\":\"abc\",\"registered\":true}\n  \n",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var decoded struct {
+				OwnerID    string `json:"owner_id"`
+				Registered bool   `json:"registered"`
+			}
+			lastJSONLine(t, c.stdout, &decoded)
+			if decoded.Registered != true || decoded.OwnerID == "" {
+				t.Fatalf("decoded %+v from stdout %q", decoded, c.stdout)
+			}
+		})
+	}
+}
+
+// TestLastJSONLineHandlesArrayPayloads confirms ls's top-level-array
+// shape (unlike register/upload/retrieve/balance/deposit's top-level
+// objects) is also found correctly — '[' is a valid JSON-value start too.
+func TestLastJSONLineHandlesArrayPayloads(t *testing.T) {
+	stdout := "some preceding text with no newline{\"decoy\": true}\n[{\"file_id\":\"abc\"},{\"file_id\":\"def\"}]\n"
+	var decoded []struct {
+		FileID string `json:"file_id"`
+	}
+	lastJSONLine(t, stdout, &decoded)
+	if len(decoded) != 2 || decoded[0].FileID != "abc" || decoded[1].FileID != "def" {
+		t.Fatalf("decoded %+v from stdout %q", decoded, stdout)
+	}
 }
 
 // ── interactive: register's live phone/OTP round-trip ──────────────────
