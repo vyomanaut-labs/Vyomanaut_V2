@@ -197,7 +197,7 @@ func NewRouter(cfg RouterConfig) *http.ServeMux {
 	mux.Handle("GET /api/v1/file/{file_id}/pointer", owner(pointerFileHandler.HandlePointer)) // getPointerFile
 	mux.Handle("DELETE /api/v1/file/{file_id}", owner(fileDeleteHandler.HandleDelete))        // deleteFile
 
-	// retrieveResolveHandler mints download capability tokens (ADR-078) —
+	// retrieveResolveHandler mints download capability tokens (ADR-080) —
 	// same signing key as uploadAssignHandler's upload tokens above
 	// (cfg.JWTPrivateKey), so both verify against the single msPublicKey
 	// every provider daemon already holds. No Readiness gate: unlike

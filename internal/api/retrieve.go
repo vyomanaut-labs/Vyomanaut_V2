@@ -1,16 +1,16 @@
 // Package api is declared in doc.go.
 // This file implements the data owner retrieval resolve endpoint
-// (ADR-078 §2): POST /api/v1/owner/files/{file_id}/retrieve/resolve.
+// (ADR-080 §2): POST /api/v1/owner/files/{file_id}/retrieve/resolve.
 //
-// WHY THIS FILE EXISTS. Until ADR-078, IC §4 had no data-owner read path
+// WHY THIS FILE EXISTS. Until ADR-080, IC §4 had no data-owner read path
 // at all — every shard read was microservice-initiated (§4.4.1 repair
 // download authenticates the caller AS a microservice replica and rejects
 // everyone else with 0x02 NOT_AUTHORISED). internal/client/retrieve was
 // built at M15 against a PROPOSED, never-ratified endpoint that did not
-// exist, so RetrieveFile had never once succeeded live. See ADR-078's
+// exist, so RetrieveFile had never once succeeded live. See ADR-080's
 // Context for the full account.
 //
-// AUTHORIZATION MODEL (ADR-078 §1). This endpoint mints DOWNLOAD
+// AUTHORIZATION MODEL (ADR-080 §1). This endpoint mints DOWNLOAD
 // capability tokens that are structurally identical to IC §4.1's upload
 // capability_token — same 72-byte layout, same Ed25519 signing key, same
 // verification path shape on the daemon — but with a DISTINCT
@@ -18,7 +18,7 @@
 // be replayed as the other. The provider verifies with the msPublicKey it
 // already holds: no new key material, no new trust root.
 //
-// DISCLOSURE (ADR-078 §2). Returning provider multiaddrs to an
+// DISCLOSURE (ADR-080 §2). Returning provider multiaddrs to an
 // authenticated owner is not a new disclosure category: POST
 // /api/v1/upload/assign already returns exactly this field, from exactly
 // this column (providers.last_known_multiaddrs), to exactly this audience.
@@ -28,9 +28,9 @@
 // `rm` enforceable on the read path. Once a file leaves ACTIVE, no further
 // tokens are minted for its chunks and outstanding ones expire on their
 // own short clock. A bare-chunk_id protocol (the rejected M15 proposal)
-// could not have done this — see ADR-078's "rejected alternative".
+// could not have done this — see ADR-080's "rejected alternative".
 //
-// [REF: ADR-078, IC §4.1 (the token model mirrored here), IC §4.4.1,
+// [REF: ADR-080, IC §4.1 (the token model mirrored here), IC §4.4.1,
 // ADR-036, ADR-073, FR-016, IC §5.9 RetrieveFile]
 
 package api
@@ -52,7 +52,7 @@ import (
 	localcrypto "github.com/vyomanaut-labs/Vyomanaut_V2/internal/crypto"
 )
 
-// ── Download capability token (ADR-078 §1) ──────────────────────────────
+// ── Download capability token (ADR-080 §1) ──────────────────────────────
 
 const (
 	// downloadCapabilityTokenDomainPrefix is deliberately NOT
@@ -64,12 +64,12 @@ const (
 
 	// downloadCapabilityTokenLifetime is short by design — revocation for
 	// this protocol is "the microservice stops issuing", so the expiry IS
-	// the revocation latency (ADR-078's Revocation note). Deliberately
+	// the revocation latency (ADR-080's Revocation note). Deliberately
 	// shorter than IC §4.1's 1-hour upload lifetime: an upload holds a
 	// stream open for one large write, whereas a retrieval resolves once
 	// and then fans out reads that should all start promptly.
 	//
-	// [UNDERIVED — Q-ADR78-2, ADR-077 governance] This value is not
+	// [UNDERIVED — Q-ADR80-2, ADR-077 governance] This value is not
 	// derived from any measured retrieval duration; it is a defensible
 	// starting point, not a justified constant, and belongs in
 	// NetworkProfile (demo/prod split) once a real figure exists.
@@ -87,7 +87,7 @@ const (
 //	signing_input    = domain_prefix || chunk_id || provider_id || expiry_unix_ms
 //	download_token   = expiry_unix_ms (8B) || Ed25519_sign(ms_signing_key, signing_input)
 //
-// Every signed field is transmitted on the wire in Frame 1 (ADR-078 §1).
+// Every signed field is transmitted on the wire in Frame 1 (ADR-080 §1).
 // That is not incidental: IC §4.4.1 shipped a signing formula over
 // request_ts_ms, a field its own Frame 1 did not carry, so the responder
 // could not verify it — the REPAIR-AUTH-TS-GAP finding, corrected in
@@ -137,7 +137,7 @@ type RetrieveSegmentBody struct {
 }
 
 // RetrieveResolveResponseBody carries EVERY segment of the file in one
-// response (ADR-078 §2's batching requirement). Per-segment resolution
+// response (ADR-080 §2's batching requirement). Per-segment resolution
 // would cost ~1,365 serial REST round-trips for a 1 GB file at prod
 // parameters before a single byte of shard data moved.
 type RetrieveResolveResponseBody struct {
@@ -181,7 +181,7 @@ func (h *RetrieveResolveHandler) HandleResolve(w http.ResponseWriter, r *http.Re
 
 	// Ownership AND status in one query. Both are load-bearing: ownership
 	// is the authorization gate, and the ACTIVE check is what makes `rm`
-	// enforceable on the read path (ADR-078's Revocation note) — a
+	// enforceable on the read path (ADR-080's Revocation note) — a
 	// deleted file stops yielding tokens immediately.
 	var ownerID uuid.UUID
 	var status string
@@ -199,7 +199,7 @@ func (h *RetrieveResolveHandler) HandleResolve(w http.ResponseWriter, r *http.Re
 	if ownerID != claims.Subject {
 		// Deliberately NOT_FOUND-shaped rather than a distinct "not
 		// yours" code: a non-owner must not be able to probe which
-		// file_ids exist. Same reasoning as ADR-078 §4's status-code
+		// file_ids exist. Same reasoning as ADR-080 §4's status-code
 		// treatment on the wire protocol.
 		WriteError(w, http.StatusNotFound, ErrNotFound, "file not found", nil, "file_id", nil)
 		return

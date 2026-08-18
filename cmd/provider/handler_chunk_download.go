@@ -1,6 +1,6 @@
 // Command provider is the Vyomanaut V2 provider daemon entrypoint.
 // This file implements the /vyomanaut/chunk-download/1.0.0 stream handler
-// (ADR-078 §3) — the data owner's read counterpart to handler_upload.go's
+// (ADR-080 §3) — the data owner's read counterpart to handler_upload.go's
 // write path.
 //
 // AUTH MODEL — deliberately NOT handler_repair.go's pattern. Repair
@@ -15,7 +15,7 @@
 // capability_token — no caller-identity check there either, and this file
 // mirrors that verification code directly, not handler_repair.go's.
 //
-// STATUS-CODE SEMANTICS (ADR-078 §4, security-relevant, not mechanical):
+// STATUS-CODE SEMANTICS (ADR-080 §4, security-relevant, not mechanical):
 // a token that fails to verify (bad signature, expired, wrong provider)
 // returns 0x02 NOT_AUTHORISED unconditionally — BEFORE any storage
 // lookup — regardless of whether this provider actually holds the chunk.
@@ -25,7 +25,7 @@
 // valid token is itself proof the microservice already told the caller
 // this provider holds this chunk, so NOT_FOUND leaks nothing new to them.
 //
-// [REF: ADR-078, IC §4.1 (capability_token model mirrored here), IC
+// [REF: ADR-080, IC §4.1 (capability_token model mirrored here), IC
 // §4.4.1 (frame/status template), cmd/provider/handler_upload.go
 // (verifyCapabilityTokenFrame — the direct precedent for this file's
 // verification logic)]
@@ -42,11 +42,11 @@ import (
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/storage"
 )
 
-// ── Protocol ID (ADR-078 §3) ─────────────────────────────────────────────
+// ── Protocol ID (ADR-080 §3) ─────────────────────────────────────────────
 
 const chunkDownloadProtocolID = p2p.ProtocolID("/vyomanaut/chunk-download/1.0.0")
 
-// ── Wire-format field sizes (ADR-078 §3) ─────────────────────────────────
+// ── Wire-format field sizes (ADR-080 §3) ─────────────────────────────────
 // Frame 1: chunk_id(32) || expiry_unix_ms(8) || cap_sig(64) = 104 bytes.
 // Every signed field is transmitted — the REPAIR-AUTH-TS-GAP discipline
 // handler_repair.go's own header explains; this protocol was designed
@@ -84,7 +84,7 @@ const chunkDownloadTimeout = 10 * time.Second
 // downloadCapabilityTokenDomainPrefix MUST match
 // internal/api/retrieve.go's downloadCapabilityTokenDomainPrefix exactly,
 // and MUST differ from handler_upload.go's own capabilityTokenDomainPrefix
-// — that difference is the entire domain-separation guarantee ADR-078 §1
+// — that difference is the entire domain-separation guarantee ADR-080 §1
 // specifies. Changing this string on one side without the other is a
 // silent wire break: every token would fail to verify.
 const downloadCapabilityTokenDomainPrefix = "vyomanaut-chunk-download-cap-v1"
@@ -92,7 +92,7 @@ const downloadCapabilityTokenDomainPrefix = "vyomanaut-chunk-download-cap-v1"
 // ── ChunkDownloadHandler ──────────────────────────────────────────────────
 
 // ChunkDownloadHandler implements the /vyomanaut/chunk-download/1.0.0
-// responder (ADR-078 §3).
+// responder (ADR-080 §3).
 type ChunkDownloadHandler struct {
 	store       storage.ChunkStore
 	msPublicKey ed25519.PublicKey
@@ -135,7 +135,7 @@ func (h *ChunkDownloadHandler) HandleStream(s p2p.Stream) {
 	var sig [64]byte
 	copy(sig[:], payload[sigOffset:sigOffset+downloadCapSigSize])
 
-	// ── Step 1: verify the token BEFORE any storage lookup (ADR-078 §4:
+	// ── Step 1: verify the token BEFORE any storage lookup (ADR-080 §4:
 	//    NOT_AUTHORISED must never depend on whether the chunk exists). ──
 	if !h.verifyDownloadToken(chunkID, expiryUnixMs, sig) {
 		h.writeStatusOnly(s, downloadStatusNotAuthorised)

@@ -113,7 +113,7 @@ func (o *Orchestrator) RetrieveFile(ctx context.Context, masterSecret [32]byte, 
 	segments := pointerPlaintext.Segments
 	sort.Slice(segments, func(i, j int) bool { return segments[i].SegmentIndex < segments[j].SegmentIndex })
 
-	// ADR-078 §2: resolve every segment's shard addresses and download
+	// ADR-080 §2: resolve every segment's shard addresses and download
 	// tokens in one call, before any shard is dialled — not per segment.
 	resolved, err := o.resolveFileForRetrieval(ctx, fileID)
 	if err != nil {

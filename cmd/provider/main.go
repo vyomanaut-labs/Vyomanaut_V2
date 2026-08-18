@@ -616,7 +616,7 @@ func runProviderInstance(ctx context.Context, profile config.NetworkProfile, cfg
 	vettingGCHandler := NewVettingGCHandler(store, msPublicKey, authorizer, profile.AuthRequestFreshnessWindow, microservicePeerID)
 	host.SetStreamHandler(vettingGCProtocolID, vettingGCHandler.HandleStream)
 
-	// chunkDownloadHandler (ADR-078) — the data owner's read counterpart
+	// chunkDownloadHandler (ADR-080) — the data owner's read counterpart
 	// to uploadHandler above. Deliberately NOT wired through authorizer:
 	// its caller set is arbitrary data owners, never pre-registered with
 	// this provider, so there is nothing to allowlist — authorization is

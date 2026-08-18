@@ -1,8 +1,8 @@
 // Package retrieve is declared in doc.go.
 // This file implements parallel shard download (TASK step 2, FR-016), on
-// the retrieval protocol ratified by ADR-078.
+// the retrieval protocol ratified by ADR-080.
 //
-// [Resolved, M17 — history preserved for context] Until ADR-078, IC §4 had
+// [Resolved, M17 — history preserved for context] Until ADR-080, IC §4 had
 // no ratified protocol for a data owner client to download its own shard:
 // upload (§4.1) is write-only, audit (§4.2) returns only a proof, repair
 // download (§4.4.1) authenticates the caller AS the microservice
@@ -16,23 +16,23 @@
 // rejected the bare-chunk_id one: it is stable and identical across all
 // 56 holders for a file's entire lifetime, which makes it unrevocable
 // (breaks `rm`'s delete guarantee) and conflates an integrity identifier
-// with an authorization secret. ADR-078 is the resulting decision, now
+// with an authorization secret. ADR-080 is the resulting decision, now
 // implemented below.
 //
-// AUTHORIZATION (ADR-078 §1). Every shard fetch below carries a download
+// AUTHORIZATION (ADR-080 §1). Every shard fetch below carries a download
 // capability token — the same 72-byte Ed25519-signed shape IC §4.1's
 // upload capability_token already uses, with a distinct domain-separation
 // prefix so the two can never be replayed as each other. The client never
 // constructs or signs this token; it only forwards, verbatim, what
 // resolveFileForRetrieval (below) received from the microservice.
 //
-// RESOLUTION (ADR-078 §2). resolveFileForRetrieval calls POST
+// RESOLUTION (ADR-080 §2). resolveFileForRetrieval calls POST
 // /api/v1/owner/files/{file_id}/retrieve/resolve ONCE for the entire file,
 // not per segment — at prod parameters a 1 GB file is ~1,365 segments,
 // and per-segment resolution would be over a thousand serial REST
 // round-trips before any shard data moved.
 //
-// [REF: ADR-078, FR-016, IC §5.9 RetrieveFile, IC §4.1/4.2/4.4.1/4.5,
+// [REF: ADR-080, FR-016, IC §5.9 RetrieveFile, IC §4.1/4.2/4.4.1/4.5,
 // MVP §8.2 Phase 15.3 Session 15.3.1]
 
 package retrieve
@@ -54,7 +54,7 @@ import (
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/p2p"
 )
 
-// ── /vyomanaut/chunk-download/1.0.0 (ADR-078 §3, Accepted) ────────────────
+// ── /vyomanaut/chunk-download/1.0.0 (ADR-080 §3, Accepted) ────────────────
 
 const (
 	chunkDownloadProtocolID = p2p.ProtocolID("/vyomanaut/chunk-download/1.0.0")
@@ -64,7 +64,7 @@ const (
 	downloadChunkIDSize      = 32
 	// downloadExpirySize/downloadCapSigSize/downloadFrame1PayloadBytes:
 	// Frame 1 is chunk_id(32) || expiry_unix_ms(8) || cap_sig(64) = 104
-	// bytes (ADR-078 §3) — every signed field transmitted, per the
+	// bytes (ADR-080 §3) — every signed field transmitted, per the
 	// REPAIR-AUTH-TS-GAP discipline cmd/provider/handler_repair.go's own
 	// header explains. Must match
 	// cmd/provider/handler_chunk_download.go's identical constants
@@ -83,10 +83,10 @@ const (
 	downloadTokenByteLen = 72
 )
 
-// ChunkDownloadResponse status codes (ADR-078 §3, mirrors IC §4.4.1
+// ChunkDownloadResponse status codes (ADR-080 §3, mirrors IC §4.4.1
 // exactly). NOT_AUTHORISED IS present — unlike the earlier PROPOSED draft
 // assumed, this protocol has a real authentication step (the download
-// token), and ADR-078 §4 makes the status-code semantics deliberate: a
+// token), and ADR-080 §4 makes the status-code semantics deliberate: a
 // token that fails to verify returns NOT_AUTHORISED regardless of whether
 // the chunk is present, so an unauthenticated prober learns nothing about
 // a provider's holder-set from the code alone.
@@ -98,7 +98,7 @@ const (
 	downloadStatusInternalError = 0x04
 )
 
-// ── POST /api/v1/owner/files/{file_id}/retrieve/resolve (ADR-078 §2) ──────
+// ── POST /api/v1/owner/files/{file_id}/retrieve/resolve (ADR-080 §2) ──────
 //
 // One call per file, not per segment: at prod parameters a 1 GB file is
 // ~1,365 segments, and per-segment resolution would be ~1,365 serial REST
@@ -139,7 +139,7 @@ type resolvedShard struct {
 
 // resolveFileForRetrieval calls POST
 // /api/v1/owner/files/{file_id}/retrieve/resolve ONCE for the whole file
-// (ADR-078 §2) and returns every shard's resolution keyed by chunk_id_hex.
+// (ADR-080 §2) and returns every shard's resolution keyed by chunk_id_hex.
 func (o *Orchestrator) resolveFileForRetrieval(ctx context.Context, fileID uuid.UUID) (map[string]resolvedShard, error) {
 	var resp retrieveResolveResponseBody
 	path := fmt.Sprintf("/api/v1/owner/files/%s/retrieve/resolve", fileID)
@@ -336,7 +336,7 @@ func extractPeerIDFromMultiaddr(raw string) (p2p.PeerID, bool) {
 }
 
 // writeChunkDownloadRequest writes Frame 1 — ChunkDownloadRequest
-// (ADR-078 §3): length(4) || chunk_id(32) || expiry_unix_ms(8) ||
+// (ADR-080 §3): length(4) || chunk_id(32) || expiry_unix_ms(8) ||
 // cap_sig(64) = 104 bytes total. expiryBytes and capSig come directly
 // from the server-issued download_token (fetchOneShard splits the
 // 72-byte token into these two fields) — nothing is recomputed
@@ -355,7 +355,7 @@ func writeChunkDownloadRequest(s p2p.Stream, chunkID [32]byte, expiryBytes [down
 }
 
 // readChunkDownloadResponse reads Frame 2 — ChunkDownloadResponse
-// (ADR-078 §3, mirrors IC §4.4.1): length(4) || status(1) ||
+// (ADR-080 §3, mirrors IC §4.4.1): length(4) || status(1) ||
 // chunk_data(present only
 // on status = 0x00).
 func readChunkDownloadResponse(s p2p.Stream) (status byte, data []byte, err error) {

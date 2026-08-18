@@ -2,8 +2,8 @@
 // Unit tests for the retrieval orchestrator. No live database is needed —
 // this package never touches Postgres directly. An httptest.Server stands
 // in for the microservice REST API (the pointer-file fetch and the
-// ADR-078 retrieve/resolve endpoint), and a fake p2p.Host/p2p.Stream
-// stands in for provider daemons, encoding the real ADR-078
+// ADR-080 retrieve/resolve endpoint), and a fake p2p.Host/p2p.Stream
+// stands in for provider daemons, encoding the real ADR-080
 // chunk-download wire frames so the actual framing code is genuinely
 // exercised.
 //
@@ -159,7 +159,7 @@ func mustHexDecode(t *testing.T, s string) []byte {
 	return b
 }
 
-// ── Fake p2p.Host / p2p.Stream for the chunk-download protocol (ADR-078) ──
+// ── Fake p2p.Host / p2p.Stream for the chunk-download protocol (ADR-080) ──
 
 // fakeDownloadHost serves real shard bytes for known chunk_ids (from
 // shardsByChunk), optionally corrupting or failing specific ones per
@@ -239,7 +239,7 @@ func (s *fakeDownloadStream) SetDeadline(time.Time) error      { return nil }
 func (s *fakeDownloadStream) SetReadDeadline(time.Time) error  { return nil }
 func (s *fakeDownloadStream) SetWriteDeadline(time.Time) error { return nil }
 
-// ── Test HTTP server (pointer fetch + ADR-078 retrieve/resolve) ───────────
+// ── Test HTTP server (pointer fetch + ADR-080 retrieve/resolve) ───────────
 
 type retrieveTestServer struct {
 	*httptest.Server
@@ -248,7 +248,7 @@ type retrieveTestServer struct {
 }
 
 // newRetrieveTestServer mocks both endpoints RetrieveFile calls: the
-// pointer-file fetch, and POST .../retrieve/resolve (ADR-078 §2). segments
+// pointer-file fetch, and POST .../retrieve/resolve (ADR-080 §2). segments
 // may be nil for tests that call downloadSegment directly rather than the
 // full RetrieveFile — those never reach the resolve endpoint at all, since
 // resolveFileForRetrieval is now called once by RetrieveFile itself, not
