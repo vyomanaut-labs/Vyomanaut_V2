@@ -616,8 +616,18 @@ func runProviderInstance(ctx context.Context, profile config.NetworkProfile, cfg
 	vettingGCHandler := NewVettingGCHandler(store, msPublicKey, authorizer, profile.AuthRequestFreshnessWindow, microservicePeerID)
 	host.SetStreamHandler(vettingGCProtocolID, vettingGCHandler.HandleStream)
 
-	log.Printf("[STARTUP]%s registered stream handlers: %s %s %s %s",
-		logTag, chunkUploadProtocolID, auditChallengeProtocolID, repairDownloadProtocolID, vettingGCProtocolID)
+	// chunkDownloadHandler (ADR-078) — the data owner's read counterpart
+	// to uploadHandler above. Deliberately NOT wired through authorizer:
+	// its caller set is arbitrary data owners, never pre-registered with
+	// this provider, so there is nothing to allowlist — authorization is
+	// entirely the download_token verification inside the handler itself
+	// (see that file's own header for why this mirrors uploadHandler's
+	// auth model, not repairHandler's).
+	chunkDownloadHandler := NewChunkDownloadHandler(store, msPublicKey, providerIDBytes)
+	host.SetStreamHandler(chunkDownloadProtocolID, chunkDownloadHandler.HandleStream)
+
+	log.Printf("[STARTUP]%s registered stream handlers: %s %s %s %s %s",
+		logTag, chunkUploadProtocolID, auditChallengeProtocolID, repairDownloadProtocolID, vettingGCProtocolID, chunkDownloadProtocolID)
 
 	// ── Step 9: heartbeat goroutine + DHT republication ─────────────────
 	// p2p.NewDHT registers the DHT custom validator (dht_namespace.go's
