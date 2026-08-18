@@ -1,11 +1,11 @@
 // Package retrieve is declared in doc.go.
 // Unit tests for the retrieval orchestrator. No live database is needed —
 // this package never touches Postgres directly. An httptest.Server stands
-// in for the microservice REST API (including the two PROPOSED endpoints
-// this package's download.go documents — see that file's header comment),
-// and a fake p2p.Host/p2p.Stream stands in for provider daemons, encoding
-// the PROPOSED chunk-download wire frames so the actual framing code is
-// genuinely exercised.
+// in for the microservice REST API (the pointer-file fetch and the
+// ADR-078 retrieve/resolve endpoint), and a fake p2p.Host/p2p.Stream
+// stands in for provider daemons, encoding the real ADR-078
+// chunk-download wire frames so the actual framing code is genuinely
+// exercised.
 //
 // Tests:
 //   - TestRetrieveTagMismatchReturnsNoPlaintext
@@ -159,7 +159,7 @@ func mustHexDecode(t *testing.T, s string) []byte {
 	return b
 }
 
-// ── Fake p2p.Host / p2p.Stream for the PROPOSED chunk-download protocol ───
+// ── Fake p2p.Host / p2p.Stream for the chunk-download protocol (ADR-078) ──
 
 // fakeDownloadHost serves real shard bytes for known chunk_ids (from
 // shardsByChunk), optionally corrupting or failing specific ones per
@@ -239,38 +239,83 @@ func (s *fakeDownloadStream) SetDeadline(time.Time) error      { return nil }
 func (s *fakeDownloadStream) SetReadDeadline(time.Time) error  { return nil }
 func (s *fakeDownloadStream) SetWriteDeadline(time.Time) error { return nil }
 
-// ── Test HTTP server (pointer fetch + PROPOSED providers/resolve) ─────────
+// ── Test HTTP server (pointer fetch + ADR-078 retrieve/resolve) ───────────
 
 type retrieveTestServer struct {
 	*httptest.Server
 	pointerResp pointerFileResponse
+	resolveResp retrieveResolveResponseBody
 }
 
-func newRetrieveTestServer(t *testing.T, pointerResp pointerFileResponse) *retrieveTestServer {
+// newRetrieveTestServer mocks both endpoints RetrieveFile calls: the
+// pointer-file fetch, and POST .../retrieve/resolve (ADR-078 §2). segments
+// may be nil for tests that call downloadSegment directly rather than the
+// full RetrieveFile — those never reach the resolve endpoint at all, since
+// resolveFileForRetrieval is now called once by RetrieveFile itself, not
+// per-segment (see download.go's own header on why).
+func newRetrieveTestServer(t *testing.T, pointerResp pointerFileResponse, segments []pointerFileSegment) *retrieveTestServer {
 	t.Helper()
-	ts := &retrieveTestServer{pointerResp: pointerResp}
+	ts := &retrieveTestServer{pointerResp: pointerResp, resolveResp: buildTestResolveResponse(segments)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/file/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(ts.pointerResp)
 	})
-	mux.HandleFunc("/api/v1/providers/resolve", func(w http.ResponseWriter, r *http.Request) {
-		var req resolveProvidersRequest
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		resp := resolveProvidersResponse{Providers: make([]providerAddress, len(req.ProviderIDs))}
-		for i, pid := range req.ProviderIDs {
-			resp.Providers[i] = providerAddress{
-				ProviderID: pid,
-				Multiaddrs: []string{fmt.Sprintf("/ip4/127.0.0.1/tcp/4001/p2p/fake-peer-%s", pid)},
-			}
-		}
+	mux.HandleFunc("/api/v1/owner/files/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(ts.resolveResp)
 	})
 	ts.Server = httptest.NewServer(mux)
 	return ts
+}
+
+// testDownloadTokenHex is a placeholder download_token for tests: 72
+// bytes (downloadTokenByteLen) of arbitrary content, hex-encoded.
+// fetchOneShard only checks the DECODED LENGTH before splitting it into
+// expiry/cap_sig fields and forwarding them verbatim — it never verifies
+// the signature itself (only the provider does, and fakeDownloadStream
+// stands in for the provider here without replicating that check) — so
+// this does not need to be a real signature to exercise the client-side
+// framing code genuinely.
+var testDownloadTokenHex = fmt.Sprintf("%0144x", 0) // 72 bytes of zeros, hex-encoded
+
+// buildResolvedMap constructs the map RetrieveFile would have gotten from
+// resolveFileForRetrieval, directly in Go — for the tests that call
+// downloadSegment without going through the full RetrieveFile/HTTP path.
+func buildResolvedMap(segments []pointerFileSegment) map[string]resolvedShard {
+	out := make(map[string]resolvedShard)
+	for _, seg := range segments {
+		for i, chunkIDHex := range seg.ChunkIDs {
+			out[chunkIDHex] = resolvedShard{
+				multiaddrs:    []string{fmt.Sprintf("/ip4/127.0.0.1/tcp/4001/p2p/fake-peer-%s", seg.ProviderIDs[i])},
+				downloadToken: testDownloadTokenHex,
+			}
+		}
+	}
+	return out
+}
+
+// buildTestResolveResponse builds the resolve response newRetrieveTestServer
+// serves, from the same segments a test already constructed via
+// buildTestSegment — real chunk_ids and provider_ids, placeholder tokens.
+func buildTestResolveResponse(segments []pointerFileSegment) retrieveResolveResponseBody {
+	var out retrieveResolveResponseBody
+	for _, seg := range segments {
+		segBody := retrieveResolveSegmentBody{SegmentIndex: seg.SegmentIndex, SegmentID: seg.SegmentID}
+		for i, chunkIDHex := range seg.ChunkIDs {
+			segBody.Shards = append(segBody.Shards, retrieveResolveShardBody{
+				ShardIndex:    i,
+				ProviderID:    seg.ProviderIDs[i],
+				ChunkID:       chunkIDHex,
+				Multiaddrs:    []string{fmt.Sprintf("/ip4/127.0.0.1/tcp/4001/p2p/fake-peer-%s", seg.ProviderIDs[i])},
+				DownloadToken: testDownloadTokenHex,
+			})
+		}
+		out.Segments = append(out.Segments, segBody)
+	}
+	return out
 }
 
 // buildEncryptedPointerResponse encrypts segments the same way
@@ -321,7 +366,7 @@ func TestRetrieveTagMismatchReturnsNoPlaintext(t *testing.T) {
 	_, _ = cryptorand.Read(badTag)
 	resp.PointerTag = base64.StdEncoding.EncodeToString(badTag)
 
-	ts := newRetrieveTestServer(t, resp)
+	ts := newRetrieveTestServer(t, resp, []pointerFileSegment{fx.segment})
 	defer ts.Close()
 	host := newFakeDownloadHost(fx.shardsByChunk)
 	o := newTestRetrieveOrchestrator(t, ts.URL, host, profile)
@@ -338,12 +383,12 @@ func TestRetrieveTagMismatchReturnsNoPlaintext(t *testing.T) {
 func TestRetrieveCancelsAfterProfileDataShardsValidResponses(t *testing.T) {
 	profile := config.DemoProfile // TotalShards=5, DataShards=3
 	fx := buildTestSegment(t, profile, 0)
-	ts := newRetrieveTestServer(t, pointerFileResponse{})
+	ts := newRetrieveTestServer(t, pointerFileResponse{}, nil)
 	defer ts.Close()
 	host := newFakeDownloadHost(fx.shardsByChunk) // every provider succeeds
 	o := newTestRetrieveOrchestrator(t, ts.URL, host, profile)
 
-	shards, err := o.downloadSegment(context.Background(), fx.segment)
+	shards, err := o.downloadSegment(context.Background(), fx.segment, buildResolvedMap([]pointerFileSegment{fx.segment}))
 	if err != nil {
 		t.Fatalf("downloadSegment: %v", err)
 	}
@@ -364,7 +409,7 @@ func TestRetrieveCancelsAfterProfileDataShardsValidResponses(t *testing.T) {
 func TestRetrieveVerifiesContentAddressBeforeDecode(t *testing.T) {
 	profile := config.DemoProfile
 	fx := buildTestSegment(t, profile, 0)
-	ts := newRetrieveTestServer(t, pointerFileResponse{})
+	ts := newRetrieveTestServer(t, pointerFileResponse{}, nil)
 	defer ts.Close()
 	host := newFakeDownloadHost(fx.shardsByChunk)
 	// Corrupt every provider's data so none can pass content-address
@@ -375,7 +420,7 @@ func TestRetrieveVerifiesContentAddressBeforeDecode(t *testing.T) {
 	}
 	o := newTestRetrieveOrchestrator(t, ts.URL, host, profile)
 
-	_, err := o.downloadSegment(context.Background(), fx.segment)
+	_, err := o.downloadSegment(context.Background(), fx.segment, buildResolvedMap([]pointerFileSegment{fx.segment}))
 	if !errors.Is(err, ErrTooFewShards) {
 		t.Fatalf("downloadSegment with every shard corrupted: error = %v, want ErrTooFewShards "+
 			"(corrupted data must be rejected before ever reaching RS decode)", err)
@@ -424,7 +469,7 @@ func TestRetrieveCanaryMismatchZeroesBufferAndReturnsSentinel(t *testing.T) {
 func TestRetrieveTooFewShardsReturnsSentinel(t *testing.T) {
 	profile := config.DemoProfile
 	fx := buildTestSegment(t, profile, 0)
-	ts := newRetrieveTestServer(t, pointerFileResponse{})
+	ts := newRetrieveTestServer(t, pointerFileResponse{}, nil)
 	defer ts.Close()
 	host := newFakeDownloadHost(fx.shardsByChunk)
 	// Fail every provider but one — fewer than profile.DataShards (3)
@@ -438,7 +483,7 @@ func TestRetrieveTooFewShardsReturnsSentinel(t *testing.T) {
 	}
 	o := newTestRetrieveOrchestrator(t, ts.URL, host, profile)
 
-	_, err := o.downloadSegment(context.Background(), fx.segment)
+	_, err := o.downloadSegment(context.Background(), fx.segment, buildResolvedMap([]pointerFileSegment{fx.segment}))
 	if !errors.Is(err, ErrTooFewShards) {
 		t.Fatalf("downloadSegment error = %v, want ErrTooFewShards", err)
 	}
@@ -459,7 +504,7 @@ func TestRetrieveConcatenatesSegmentsInOrder(t *testing.T) {
 	resp := buildEncryptedPointerResponse(t, masterSecret, ownerID, fileID,
 		[]pointerFileSegment{fx1.segment, fx0.segment}, originalSize)
 
-	ts := newRetrieveTestServer(t, resp)
+	ts := newRetrieveTestServer(t, resp, []pointerFileSegment{fx1.segment, fx0.segment})
 	defer ts.Close()
 	shardsByChunk := map[string][]byte{}
 	for k, v := range fx0.shardsByChunk {
@@ -497,7 +542,7 @@ func TestRetrieveStripsPaddingToOriginalSizeBytes(t *testing.T) {
 	}
 	resp := buildEncryptedPointerResponse(t, masterSecret, ownerID, fileID, []pointerFileSegment{fx.segment}, wantSize)
 
-	ts := newRetrieveTestServer(t, resp)
+	ts := newRetrieveTestServer(t, resp, []pointerFileSegment{fx.segment})
 	defer ts.Close()
 	host := newFakeDownloadHost(fx.shardsByChunk)
 	o := newTestRetrieveOrchestrator(t, ts.URL, host, profile)
