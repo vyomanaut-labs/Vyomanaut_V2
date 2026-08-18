@@ -43,6 +43,14 @@ func addGlobalFlags(fs *flag.FlagSet, g *globalFlags) {
 
 var errMicroserviceURLRequired = fmt.Errorf("--microservice-url is required")
 
+// exitUsage is the conventional Unix CLI exit code for a usage error (bad
+// flags, missing subcommand) — the same value Go's own flag package uses
+// internally for flag.ExitOnError. exitUsage is the only cmd/client exit
+// code that needed a name: 0 and 1 are mnd's own default-ignored numbers,
+// and every "return 1" in this package already reads unambiguously as
+// "runtime failure" at its call site.
+const exitUsage = 2
+
 func validateGlobalFlags(g globalFlags) error {
 	if g.microserviceURL == "" {
 		return errMicroserviceURLRequired
@@ -50,23 +58,35 @@ func validateGlobalFlags(g globalFlags) error {
 	return nil
 }
 
-func printUsage(errOut io.Writer) {
-	fmt.Fprintln(errOut, "usage: cmd/client <subcommand> [flags]")
-	fmt.Fprintln(errOut, "subcommands:")
-	for _, name := range knownSubcommands {
-		fmt.Fprintf(errOut, "  %s\n", name)
-	}
-	fmt.Fprintln(errOut, "global flags (accepted by every subcommand): --mode --microservice-url --data-dir --json")
+// fprint/fprintln/fprintf wrap the fmt.Fprint family for errOut/out, the
+// two io.Writers every dispatchX function in this package writes to (in
+// the live binary, os.Stdout/os.Stderr; in tests, a bytes.Buffer — see
+// transfer_cmds.go's own header note). Neither stream realistically fails
+// to write in this CLI's operating envelope, and cmd/ is wiring only (IC
+// §11) with no meaningful recovery path for a broken output stream anyway
+// — centralising the discard here means every call site states that
+// judgment once, not at each of this package's ~80 print calls. Any call
+// site that DOES need the write error (see promptLine below) keeps calling
+// fmt.Fprint directly instead.
+func fprint(w io.Writer, a ...any) {
+	_, _ = fmt.Fprint(w, a...)
 }
 
-// notYetImplemented is the placeholder response for MVP §8.3 subcommands
-// whose real implementation lands in a later M17 session — dispatch.go
-// already recognises all eight names now (this session's own VERIFY block
-// requires it); a later session replaces the call with a real
-// dispatchX(...), same shape as dispatchRegister/dispatchRecover above.
-func notYetImplemented(sub, session string, errOut io.Writer) int {
-	fmt.Fprintf(errOut, "%s: not yet implemented — lands in Session %s\n", sub, session)
-	return 1
+func fprintln(w io.Writer, a ...any) {
+	_, _ = fmt.Fprintln(w, a...)
+}
+
+func fprintf(w io.Writer, format string, a ...any) {
+	_, _ = fmt.Fprintf(w, format, a...)
+}
+
+func printUsage(errOut io.Writer) {
+	fprintln(errOut, "usage: cmd/client <subcommand> [flags]")
+	fprintln(errOut, "subcommands:")
+	for _, name := range knownSubcommands {
+		fprintf(errOut, "  %s\n", name)
+	}
+	fprintln(errOut, "global flags (accepted by every subcommand): --mode --microservice-url --data-dir --json")
 }
 
 // run is main's entire logic, factored out so it's testable without
@@ -75,7 +95,7 @@ func notYetImplemented(sub, session string, errOut io.Writer) int {
 func run(args []string, stdin io.Reader, out, errOut io.Writer) int {
 	if len(args) < 1 {
 		printUsage(errOut)
-		return 2
+		return exitUsage
 	}
 	sub, rest := args[0], args[1:]
 
@@ -98,6 +118,6 @@ func run(args []string, stdin io.Reader, out, errOut io.Writer) int {
 		return dispatchDeposit(rest, stdin, out, errOut)
 	default:
 		printUsage(errOut)
-		return 2
+		return exitUsage
 	}
 }

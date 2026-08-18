@@ -76,13 +76,13 @@ func dispatchRegister(args []string, stdin io.Reader, out, errOut io.Writer) int
 		return 2
 	}
 	if err := validateGlobalFlags(g); err != nil {
-		fmt.Fprintln(errOut, err)
+		fprintln(errOut, err)
 		return 2
 	}
 
 	profile := config.SelectProfile(g.mode)
 	if err := config.ValidateStartupGuards(profile); err != nil {
-		fmt.Fprintln(errOut, err)
+		fprintln(errOut, err)
 		return 1
 	}
 
@@ -106,7 +106,7 @@ func runRegister(ctx context.Context, cfg registerConfig, in *bufio.Reader, out,
 	// steps later as an opaque "word did not match" — this guard catches
 	// it immediately, at the one place that actually knows both facts.
 	if cfg.g.json && !cfg.profile.SkipMnemonicConfirm {
-		fmt.Fprintln(errOut, "register --json is not supported against a profile that requires mnemonic confirmation (this profile's SkipMnemonicConfirm is false): --json never prints the mnemonic, so there is no way to confirm it back. Register without --json, or use a profile where SkipMnemonicConfirm is true.")
+		fprintln(errOut, "register --json is not supported against a profile that requires mnemonic confirmation (this profile's SkipMnemonicConfirm is false): --json never prints the mnemonic, so there is no way to confirm it back. Register without --json, or use a profile where SkipMnemonicConfirm is true.")
 		return 2
 	}
 
@@ -114,14 +114,14 @@ func runRegister(ctx context.Context, cfg registerConfig, in *bufio.Reader, out,
 		printCLIError(errOut, cfg.g.json, err, renderError)
 		return 1
 	} else if existing != nil {
-		fmt.Fprintf(errOut, "An identity is already saved at %s (owner_id=%s). Use `recover` to restore a session, or point --data-dir somewhere new.\n", identityFilePath(cfg.g.dataDir), existing.OwnerID)
+		fprintf(errOut, "An identity is already saved at %s (owner_id=%s). Use `recover` to restore a session, or point --data-dir somewhere new.\n", identityFilePath(cfg.g.dataDir), existing.OwnerID)
 		return 1
 	}
 	if pending, err := readPendingRegistration(cfg.g.dataDir); err != nil {
 		printCLIError(errOut, cfg.g.json, err, renderError)
 		return 1
 	} else if pending != nil {
-		fmt.Fprintf(errOut, "A previous registration for owner_id=%s reached the server but never finished saving locally (found %s). This phone number cannot register again — the server already has an owner row for it. Complete recovery manually or contact support with this owner_id; remove that file yourself once you've confirmed it's abandoned.\n", pending.OwnerID, pendingRegistrationFilePath(cfg.g.dataDir))
+		fprintf(errOut, "A previous registration for owner_id=%s reached the server but never finished saving locally (found %s). This phone number cannot register again — the server already has an owner row for it. Complete recovery manually or contact support with this owner_id; remove that file yourself once you've confirmed it's abandoned.\n", pending.OwnerID, pendingRegistrationFilePath(cfg.g.dataDir))
 		return 1
 	}
 
@@ -139,7 +139,7 @@ func runRegister(ctx context.Context, cfg registerConfig, in *bufio.Reader, out,
 		printCLIError(errOut, cfg.g.json, err, renderError)
 		return 1
 	}
-	fmt.Fprintln(errOut, "OTP sent. In demo mode there is no real SMS integration — look up the 6-digit code from the otp_codes table.")
+	fprintln(errOut, "OTP sent. In demo mode there is no real SMS integration — look up the 6-digit code from the otp_codes table.")
 
 	code := cfg.otpCode
 	if code == "" {
@@ -157,8 +157,8 @@ func runRegister(ctx context.Context, cfg registerConfig, in *bufio.Reader, out,
 		return 1
 	}
 	if !verifyResult.IsNewEntity {
-		fmt.Fprintln(errOut, formatCopy(copyTable["PHONE_ALREADY_REGISTERED"]))
-		fmt.Fprintln(errOut, "Use `recover` instead.")
+		fprintln(errOut, formatCopy(copyTable["PHONE_ALREADY_REGISTERED"]))
+		fprintln(errOut, "Use `recover` instead.")
 		return 1
 	}
 
@@ -184,7 +184,7 @@ func runRegister(ctx context.Context, cfg registerConfig, in *bufio.Reader, out,
 		}
 	}
 	if len(passphrase) < 8 {
-		fmt.Fprintf(errOut, "Passphrase must be at least 8 characters. Your account IS registered (owner_id=%s); re-run register to finish with a longer passphrase.\n", registered.OwnerID)
+		fprintf(errOut, "Passphrase must be at least 8 characters. Your account IS registered (owner_id=%s); re-run register to finish with a longer passphrase.\n", registered.OwnerID)
 		return 1
 	}
 
@@ -199,9 +199,9 @@ func runRegister(ctx context.Context, cfg registerConfig, in *bufio.Reader, out,
 	}
 
 	if !cfg.g.json {
-		fmt.Fprintln(out, "\nWrite down these 24 words in order. They are shown once, never saved to disk, never logged, and never included in --json output:")
-		fmt.Fprintln(out, strings.Join(identity.Mnemonic, " "))
-		fmt.Fprintln(out)
+		fprintln(out, "\nWrite down these 24 words in order. They are shown once, never saved to disk, never logged, and never included in --json output:")
+		fprintln(out, strings.Join(identity.Mnemonic, " "))
+		fprintln(out)
 	}
 	// --json + a non-demo profile (SkipMnemonicConfirm == false) would need
 	// an interactive confirmation channel this mode doesn't have, since the
@@ -215,8 +215,8 @@ func runRegister(ctx context.Context, cfg registerConfig, in *bufio.Reader, out,
 		return typed
 	})
 	if err := account.ConfirmMnemonic(identity.Mnemonic, cfg.profile, confirmPrompt); err != nil {
-		fmt.Fprintf(errOut, "Mnemonic confirmation failed: %v\n", err)
-		fmt.Fprintf(errOut, "Your account IS registered (owner_id=%s) but the local keystore was NOT saved. Re-run register to try confirmation again.\n", registered.OwnerID)
+		fprintf(errOut, "Mnemonic confirmation failed: %v\n", err)
+		fprintf(errOut, "Your account IS registered (owner_id=%s) but the local keystore was NOT saved. Re-run register to try confirmation again.\n", registered.OwnerID)
 		return 1
 	}
 
@@ -233,9 +233,9 @@ func runRegister(ctx context.Context, cfg registerConfig, in *bufio.Reader, out,
 	_ = clearPendingRegistration(cfg.g.dataDir)
 
 	if cfg.g.json {
-		fmt.Fprintln(out, renderRegisterJSON(registered.OwnerID))
+		fprintln(out, renderRegisterJSON(registered.OwnerID))
 	} else {
-		fmt.Fprintf(out, "Registered. owner_id=%s\n", registered.OwnerID)
+		fprintf(out, "Registered. owner_id=%s\n", registered.OwnerID)
 	}
 	return 0
 }
@@ -267,21 +267,21 @@ func dispatchRecover(args []string, stdin io.Reader, out, errOut io.Writer) int 
 		return 2
 	}
 	if err := validateGlobalFlags(g); err != nil {
-		fmt.Fprintln(errOut, err)
+		fprintln(errOut, err)
 		return 2
 	}
 	if *passphrase == "" && *mnemonic == "" {
-		fmt.Fprintln(errOut, "recover requires --passphrase or --mnemonic (MVP §8.3).")
+		fprintln(errOut, "recover requires --passphrase or --mnemonic (MVP §8.3).")
 		return 2
 	}
 	if *passphrase != "" && *mnemonic != "" {
-		fmt.Fprintln(errOut, "recover accepts only one of --passphrase or --mnemonic, not both.")
+		fprintln(errOut, "recover accepts only one of --passphrase or --mnemonic, not both.")
 		return 2
 	}
 
 	profile := config.SelectProfile(g.mode)
 	if err := config.ValidateStartupGuards(profile); err != nil {
-		fmt.Fprintln(errOut, err)
+		fprintln(errOut, err)
 		return 1
 	}
 
@@ -318,7 +318,7 @@ func runRecover(ctx context.Context, cfg recoverConfig, in *bufio.Reader, out, e
 func runLocalRecover(cfg recoverConfig, masterSecretFor func(uuid.UUID) ([32]byte, error), out, errOut io.Writer) int {
 	ownerID, err := uuid.Parse(cfg.ownerID)
 	if err != nil {
-		fmt.Fprintf(errOut, "--owner-id is not a valid UUID: %v\n", err)
+		fprintf(errOut, "--owner-id is not a valid UUID: %v\n", err)
 		return 2
 	}
 	stored, err := readIdentityFile(cfg.g.dataDir)
@@ -327,7 +327,7 @@ func runLocalRecover(cfg recoverConfig, masterSecretFor func(uuid.UUID) ([32]byt
 		return 1
 	}
 	if stored == nil {
-		fmt.Fprintf(errOut, "No local keystore found at %s. Use --phone instead so recover can re-authenticate over the network.\n", identityFilePath(cfg.g.dataDir))
+		fprintf(errOut, "No local keystore found at %s. Use --phone instead so recover can re-authenticate over the network.\n", identityFilePath(cfg.g.dataDir))
 		return 1
 	}
 	ciphertext, nonce, err := decodeStoredKeystore(*stored)
@@ -344,14 +344,14 @@ func runLocalRecover(cfg recoverConfig, masterSecretFor func(uuid.UUID) ([32]byt
 	_, decErr := account.DecryptKeystore(ciphertext, nonce, masterSecret, ownerID[:])
 	account.ZeroMasterSecret(&masterSecret)
 	if decErr != nil {
-		fmt.Fprintln(errOut, "Could not decrypt the local keystore with the given passphrase/mnemonic for this --owner-id.")
+		fprintln(errOut, "Could not decrypt the local keystore with the given passphrase/mnemonic for this --owner-id.")
 		return 1
 	}
 
 	if cfg.g.json {
-		fmt.Fprintln(out, renderRecoverJSON(ownerID, true))
+		fprintln(out, renderRecoverJSON(ownerID, true))
 	} else {
-		fmt.Fprintf(out, "Recovered locally. owner_id=%s (signing identity restored from existing keystore; the session token on file may be stale — network calls will reject it once expired, at which point recover with --phone instead).\n", ownerID)
+		fprintf(out, "Recovered locally. owner_id=%s (signing identity restored from existing keystore; the session token on file may be stale — network calls will reject it once expired, at which point recover with --phone instead).\n", ownerID)
 	}
 	return 0
 }
@@ -380,7 +380,7 @@ func runNetworkRecover(ctx context.Context, cfg recoverConfig, masterSecretFor f
 		printCLIError(errOut, cfg.g.json, err, renderError)
 		return 1
 	}
-	fmt.Fprintln(errOut, "OTP sent. In demo mode there is no real SMS integration — look up the 6-digit code from the otp_codes table.")
+	fprintln(errOut, "OTP sent. In demo mode there is no real SMS integration — look up the 6-digit code from the otp_codes table.")
 
 	code := cfg.otpCode
 	if code == "" {
@@ -398,7 +398,7 @@ func runNetworkRecover(ctx context.Context, cfg recoverConfig, masterSecretFor f
 		return 1
 	}
 	if verifyResult.IsNewEntity {
-		fmt.Fprintln(errOut, "No account exists yet for this phone number. Use `register` instead.")
+		fprintln(errOut, "No account exists yet for this phone number. Use `register` instead.")
 		return 1
 	}
 
@@ -420,11 +420,11 @@ func runNetworkRecover(ctx context.Context, cfg recoverConfig, masterSecretFor f
 	account.ZeroMasterSecret(&masterSecret)
 
 	if cfg.g.json {
-		fmt.Fprintln(out, renderRecoverJSON(verifyResult.EntityID, signingKeyRestored))
+		fprintln(out, renderRecoverJSON(verifyResult.EntityID, signingKeyRestored))
 	} else {
-		fmt.Fprintf(out, "Recovered. owner_id=%s\n", verifyResult.EntityID)
+		fprintf(out, "Recovered. owner_id=%s\n", verifyResult.EntityID)
 		if !signingKeyRestored {
-			fmt.Fprintln(out, "Note: no local keystore was found or decryptable at this data-dir, so your Ed25519 signing identity could not be restored. File data can still be decoded with this master secret, but new uploads need the original keystore — there is currently no server-side way to register a replacement signing key for an existing owner_id.")
+			fprintln(out, "Note: no local keystore was found or decryptable at this data-dir, so your Ed25519 signing identity could not be restored. File data can still be decoded with this master secret, but new uploads need the original keystore — there is currently no server-side way to register a replacement signing key for an existing owner_id.")
 		}
 	}
 	return 0

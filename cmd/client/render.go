@@ -243,14 +243,14 @@ func formatCopy(e copyEntry) string {
 // generically; transfer_cmds.go's renderTransferError, which additionally
 // handles four local, non-server sentinels) while every call site shares
 // one JSON path. Every dispatchX function in this package should route
-// through this rather than calling fmt.Fprintln(errOut, renderError(err))
+// through this rather than calling fprintln(errOut, renderError(err))
 // directly, which silently stays human-readable even under --json.
 func printCLIError(errOut io.Writer, jsonMode bool, err error, humanRender func(error) string) {
 	if jsonMode {
-		fmt.Fprintln(errOut, renderErrorJSON(err))
+		fprintln(errOut, renderErrorJSON(err))
 		return
 	}
-	fmt.Fprintln(errOut, humanRender(err))
+	fprintln(errOut, humanRender(err))
 }
 
 // errorCodeOf extracts the raw error_code from err for --json error

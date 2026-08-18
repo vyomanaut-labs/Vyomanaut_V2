@@ -151,18 +151,18 @@ func dispatchUpload(args []string, stdin io.Reader, out, errOut io.Writer) int {
 		return 2
 	}
 	if err := validateGlobalFlags(g); err != nil {
-		fmt.Fprintln(errOut, err)
+		fprintln(errOut, err)
 		return 2
 	}
 	rest := fs.Args()
 	if *resume == "" && len(rest) < 1 {
-		fmt.Fprintln(errOut, "usage: cmd/client upload <path> [flags]   OR   cmd/client upload --resume <file_id> [flags]")
+		fprintln(errOut, "usage: cmd/client upload <path> [flags]   OR   cmd/client upload --resume <file_id> [flags]")
 		return 2
 	}
 
 	profile := config.SelectProfile(g.mode)
 	if err := config.ValidateStartupGuards(profile); err != nil {
-		fmt.Fprintln(errOut, err)
+		fprintln(errOut, err)
 		return 1
 	}
 
@@ -189,7 +189,7 @@ func dispatchUpload(args []string, stdin io.Reader, out, errOut io.Writer) int {
 	if *resume != "" {
 		fileID, err := uuid.Parse(*resume)
 		if err != nil {
-			fmt.Fprintf(errOut, "--resume must be a valid file_id (UUID): %v\n", err)
+			fprintf(errOut, "--resume must be a valid file_id (UUID): %v\n", err)
 			return 2
 		}
 		stopProgress := startUploadProgress(sessionDir, fileID, errOut)
@@ -206,7 +206,7 @@ func dispatchUpload(args []string, stdin io.Reader, out, errOut io.Writer) int {
 	path := rest[0]
 	plaintext, err := os.ReadFile(path)
 	if err != nil {
-		fmt.Fprintf(errOut, "Could not read %s: %v\n", path, err)
+		fprintf(errOut, "Could not read %s: %v\n", path, err)
 		return 1
 	}
 
@@ -215,7 +215,7 @@ func dispatchUpload(args []string, stdin io.Reader, out, errOut io.Writer) int {
 	stopProgress()
 	if err != nil {
 		if errors.Is(err, upload.ErrUploadIncomplete) {
-			fmt.Fprintf(errOut, "Upload incomplete; resume later with: cmd/client upload --resume %s\n", fileID)
+			fprintf(errOut, "Upload incomplete; resume later with: cmd/client upload --resume %s\n", fileID)
 		}
 		printCLIError(errOut, g.json, withTransferErrorCode(err), renderTransferError)
 		return 1
@@ -229,9 +229,9 @@ func printUploadResult(jsonMode bool, fileID uuid.UUID, out io.Writer) {
 		data := marshalJSONNoEscape(struct {
 			FileID string `json:"file_id"`
 		}{FileID: fileID.String()})
-		fmt.Fprintln(out, data)
+		fprintln(out, data)
 	} else {
-		fmt.Fprintln(out, fileID.String())
+		fprintln(out, fileID.String())
 	}
 }
 
@@ -283,7 +283,7 @@ func startUploadProgressForNewSession(sessionDir string, errOut io.Writer) (stop
 			}
 		}
 	}()
-	return func() { close(done); fmt.Fprintln(errOut) }
+	return func() { close(done); fprintln(errOut) }
 }
 
 // startUploadProgress is the --resume variant: file_id is already known.
@@ -301,7 +301,7 @@ func startUploadProgress(sessionDir string, fileID uuid.UUID, errOut io.Writer) 
 			}
 		}
 	}()
-	return func() { close(done); fmt.Fprintln(errOut) }
+	return func() { close(done); fprintln(errOut) }
 }
 
 func fileIDFromSessionFileName(name string) (uuid.UUID, bool) {
@@ -334,7 +334,7 @@ func reportUploadProgress(sessionDir string, fileID uuid.UUID, errOut io.Writer)
 		return
 	}
 	pct := acked * 100 / total
-	fmt.Fprintf(errOut, "\rUploading... %d%%", pct)
+	fprintf(errOut, "\rUploading... %d%%", pct)
 }
 
 // ── retrieve ─────────────────────────────────────────────────────────────
@@ -370,23 +370,23 @@ func dispatchRetrieve(args []string, stdin io.Reader, out, errOut io.Writer) int
 		return 2
 	}
 	if err := validateGlobalFlags(g); err != nil {
-		fmt.Fprintln(errOut, err)
+		fprintln(errOut, err)
 		return 2
 	}
 	rest := fs.Args()
 	if len(rest) < 1 {
-		fmt.Fprintln(errOut, "usage: cmd/client retrieve <file_id> [-o out] [flags]")
+		fprintln(errOut, "usage: cmd/client retrieve <file_id> [-o out] [flags]")
 		return 2
 	}
 	fileID, err := uuid.Parse(rest[0])
 	if err != nil {
-		fmt.Fprintf(errOut, "<file_id> must be a valid UUID: %v\n", err)
+		fprintf(errOut, "<file_id> must be a valid UUID: %v\n", err)
 		return 2
 	}
 
 	profile := config.SelectProfile(g.mode)
 	if err := config.ValidateStartupGuards(profile); err != nil {
-		fmt.Fprintln(errOut, err)
+		fprintln(errOut, err)
 		return 1
 	}
 
@@ -407,9 +407,9 @@ func dispatchRetrieve(args []string, stdin io.Reader, out, errOut io.Writer) int
 
 	orch := retrieve.NewOrchestrator(g.microserviceURL, id.Token, &http.Client{Timeout: cliHTTPClientTimeout}, host, engine, profile)
 
-	fmt.Fprint(errOut, "Retrieving...")
+	fprint(errOut, "Retrieving...")
 	plaintext, err := orch.RetrieveFile(context.Background(), id.MasterSecret, id.OwnerID, fileID)
-	fmt.Fprintln(errOut)
+	fprintln(errOut)
 	if err != nil {
 		printCLIError(errOut, g.json, withTransferErrorCode(err), renderTransferError)
 		return 1
@@ -417,7 +417,7 @@ func dispatchRetrieve(args []string, stdin io.Reader, out, errOut io.Writer) int
 
 	outFile := defaultRetrieveOutputPath(*outPath, fileID, "")
 	if err := os.WriteFile(outFile, plaintext, 0600); err != nil {
-		fmt.Fprintf(errOut, "Downloaded but could not write %s: %v\n", outFile, err)
+		fprintf(errOut, "Downloaded but could not write %s: %v\n", outFile, err)
 		return 1
 	}
 
@@ -427,9 +427,9 @@ func dispatchRetrieve(args []string, stdin io.Reader, out, errOut io.Writer) int
 			OutputPath string `json:"output_path"`
 			Bytes      int    `json:"bytes"`
 		}{FileID: fileID.String(), OutputPath: outFile, Bytes: len(plaintext)})
-		fmt.Fprintln(out, data)
+		fprintln(out, data)
 	} else {
-		fmt.Fprintf(out, "Retrieved %d bytes to %s\n", len(plaintext), outFile)
+		fprintf(out, "Retrieved %d bytes to %s\n", len(plaintext), outFile)
 	}
 	return 0
 }
