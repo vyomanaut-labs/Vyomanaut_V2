@@ -80,6 +80,47 @@ func TestInsufficientEscrowRendersIC14CodeAndPointsAtDeposit(t *testing.T) {
 	}
 }
 
+// TestWithTransferErrorCodeSurvivesToJSONOutput is a regression test for a
+// real bug a live TestDemoCLIUploadFailsBeforeDeposit run caught: --json
+// mode got error_code="" instead of INSUFFICIENT_ESCROW_BALANCE, because
+// printCLIError's --json path always called the generic errorCodeOf,
+// which has no knowledge of upload.ErrInsufficientEscrow (a local
+// sentinel, never a server error_code) — only renderTransferError (the
+// human-readable path) mapped it correctly. withTransferErrorCode is the
+// fix; this pins both that the code now comes through AND that the
+// original sentinel is still detectable via errors.Is on the wrapped
+// value (the human-readable path depends on that still working).
+func TestWithTransferErrorCodeSurvivesToJSONOutput(t *testing.T) {
+	original := fmt.Errorf("upload: requestAssignment: %w", upload.ErrInsufficientEscrow)
+	wrapped := withTransferErrorCode(original)
+
+	if !errors.Is(wrapped, upload.ErrInsufficientEscrow) {
+		t.Fatal("errors.Is(wrapped, upload.ErrInsufficientEscrow) = false — wrapping must preserve this for renderTransferError's own switch to keep matching")
+	}
+
+	jsonOut := renderErrorJSON(wrapped)
+	var decoded jsonErrorOutput
+	if err := json.Unmarshal([]byte(jsonOut), &decoded); err != nil {
+		t.Fatalf("renderErrorJSON output is not valid JSON: %v (%q)", err, jsonOut)
+	}
+	if decoded.ErrorCode != "INSUFFICIENT_ESCROW_BALANCE" {
+		t.Errorf("error_code = %q, want INSUFFICIENT_ESCROW_BALANCE", decoded.ErrorCode)
+	}
+
+	// NETWORK_NOT_READY is the other of the two sentinels this function
+	// maps; confirm it too rather than assuming the switch's second arm
+	// works because the first one does.
+	wrappedReady := withTransferErrorCode(fmt.Errorf("upload: requestAssignment: %w", upload.ErrNetworkNotReady))
+	jsonReady := renderErrorJSON(wrappedReady)
+	var decodedReady jsonErrorOutput
+	if err := json.Unmarshal([]byte(jsonReady), &decodedReady); err != nil {
+		t.Fatalf("renderErrorJSON output is not valid JSON: %v (%q)", err, jsonReady)
+	}
+	if decodedReady.ErrorCode != "NETWORK_NOT_READY" {
+		t.Errorf("error_code = %q, want NETWORK_NOT_READY", decodedReady.ErrorCode)
+	}
+}
+
 // TestCanaryMismatchIsErrorsIsCryptoSentinel confirms D-10's fix end to
 // end from cmd/client's own vantage point: errors.Is against
 // crypto.ErrCanaryMismatch succeeds above the client boundary (not
