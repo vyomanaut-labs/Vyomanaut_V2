@@ -198,16 +198,14 @@ func TestDemoCLIFullLifecycle(t *testing.T) {
 	}
 
 	// balance
-	stdout, _ = runClientJSON(t, env.ctx, env.clientBin, []string{
-		"balance", "--microservice-url=" + env.ms.baseURL, "--data-dir=" + dataDir, "--json",
-		"--passphrase=" + cliTestPassphrase,
-	}, false)
-	var balanceResult struct {
-		BalancePaise int64 `json:"balance_paise"`
-	}
-	lastJSONLine(t, stdout, &balanceResult)
-	if balanceResult.BalancePaise <= 0 {
-		t.Errorf("balance_paise = %d after a deposit and one small upload, want > 0", balanceResult.BalancePaise)
+	//
+	// [Changed, M17 CLI debugging session, fourth pass] was a single
+	// balance check immediately after retrieve — see
+	// pollOwnerBalancePositive's own doc comment (helpers_test.go) for why
+	// that raced mv_owner_escrow_balance's background refresh cadence live.
+	balancePaise := pollOwnerBalancePositive(t, env.ctx, env.clientBin, env.ms.baseURL, dataDir, 15*time.Second)
+	if balancePaise <= 0 {
+		t.Errorf("balance_paise = %d after a deposit and one small upload, want > 0", balancePaise)
 	}
 
 	// rm

@@ -162,6 +162,56 @@ func lastJSONLine(t *testing.T, stdout string, out any) {
 	t.Fatalf("no valid, complete JSON value found anywhere in stdout\nfull stdout:\n%s", stdout)
 }
 
+// pollOwnerBalancePositive repeatedly invokes the balance subcommand,
+// returning as soon as balance_paise > 0 or once timeout has elapsed
+// (returning whatever the last observed balance_paise was either way — it
+// does not call t.Fatalf/t.Errorf itself, since a caller may still want to
+// proceed to other assertions, e.g. rm, even if balance never went
+// positive).
+//
+// [Added, M17 CLI debugging session, fourth pass] mv_owner_escrow_balance
+// (DM §7) is refreshed on a background cadence
+// (NetworkProfile.BackgroundViewRefreshInterval — see
+// cmd/microservice/background_loops.go's runBackgroundViewRefreshLoop),
+// not synchronously on deposit. A single balance check immediately after
+// deposit genuinely raced that cadence live: a real run's microservice
+// log showed InitiateEscrow's deposit and this test's own balance check
+// landing within the same one-second window, one full refresh tick before
+// the next scheduled 5s-interval tick could run — an inherent property of
+// time.NewTicker firing on a fixed schedule from when it started, not
+// re-triggered by the write that just happened. This was never a dead or
+// broken refresh loop (a diagnostic pass instrumented every tick and
+// confirmed 3/3 views refreshing successfully throughout, every run) —
+// the bug was this test asserting synchronous consistency against a
+// design that explicitly documents itself as eventually consistent
+// (build_part2.md's owner-balance TASK text: "≤60s stale" in production).
+// Polling here — instead of shrinking BackgroundViewRefreshInterval
+// further — treats the actual documented contract as correct and fixes
+// the test to match it, the same pattern this file's own
+// pollReadiness/pollAllProvidersActive/pollGCDelivered/pollDeparted/
+// pollRepairCompleted (demo_timeline_test.go) already established for
+// every other eventually-consistent condition in this suite.
+func pollOwnerBalancePositive(t *testing.T, ctx context.Context, clientBin, msBaseURL, dataDir string, timeout time.Duration) int64 {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var lastBalance int64
+	for {
+		stdout, _ := runClientJSON(t, ctx, clientBin, []string{
+			"balance", "--microservice-url=" + msBaseURL, "--data-dir=" + dataDir, "--json",
+			"--passphrase=" + cliTestPassphrase,
+		}, false)
+		var balanceResult struct {
+			BalancePaise int64 `json:"balance_paise"`
+		}
+		lastJSONLine(t, stdout, &balanceResult)
+		lastBalance = balanceResult.BalancePaise
+		if lastBalance > 0 || time.Now().After(deadline) {
+			return lastBalance
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
 // TestLastJSONLine is a regression test for a real bug a live
 // TestDemoCLIFullLifecycle run caught: the original implementation split
 // stdout on newlines and took the last non-empty line, which broke the
