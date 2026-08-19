@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"regexp"
 	"time"
@@ -227,9 +228,22 @@ func (h *OwnerDepositHandler) HandleDeposit(w http.ResponseWriter, r *http.Reque
 	contractID := uuid.NewSHA1(depositContractNamespace, []byte("vyomanaut-deposit:"+claims.Subject.String()+":"+req.IdempotencyKey))
 	vpa, qrURL, err := h.provider.InitiateEscrow(r.Context(), claims.Subject, req.AmountPaise, contractID)
 	if err != nil {
+		// [Added, M17 CLI debugging session, third pass] TestDemoCLIFullLifecycle's
+		// balance assertion keeps failing with balance_paise=0 despite a
+		// proven-working refresh loop (see background_loops.go's own note) and a
+		// proven-working REFRESH/read mechanism (local repro). This handler's own
+		// response body never reflected whether InitiateEscrow's ledger write
+		// actually happened — logging both outcomes here (not just the failure
+		// path) so the next live run's log shows the exact owner_id/amount this
+		// deposit tried to credit, and whether the call that's supposed to write
+		// it ever returned an error at all.
+		log.Printf("[DEPOSIT] InitiateEscrow FAILED: owner_id=%s amount_paise=%d contract_id=%s err=%v",
+			claims.Subject, req.AmountPaise, contractID, err)
 		WriteError(w, http.StatusServiceUnavailable, ErrRazorpayUnavailable, "escrow initiation failed", nil, "", nil)
 		return
 	}
+	log.Printf("[DEPOSIT] InitiateEscrow ok: owner_id=%s amount_paise=%d contract_id=%s vpa=%s",
+		claims.Subject, req.AmountPaise, contractID, vpa)
 
 	resp := depositInitiateResponseBody{
 		VPA:       vpa,
@@ -280,6 +294,12 @@ func (h *OwnerBalanceHandler) HandleBalance(w http.ResponseWriter, r *http.Reque
 		WriteError(w, http.StatusInternalServerError, ErrInternal, "balance lookup failed", nil, "", nil)
 		return
 	}
+	// [Added, M17 CLI debugging session, third pass] see HandleDeposit's
+	// matching log line — pairing the two shows directly whether a specific
+	// owner_id's deposit and a specific owner_id's balance read are even
+	// talking about the same owner, and what mv_owner_escrow_balance
+	// actually returned for it.
+	log.Printf("[BALANCE] owner_id=%s balance_paise=%d reserved_paise=%d", ownerID, balance, reserved)
 
 	available := balance - reserved
 	if available < 0 {
@@ -299,6 +319,11 @@ func (h *OwnerBalanceHandler) HandleBalance(w http.ResponseWriter, r *http.Reque
 func ownerBalanceAndReserved(ctx context.Context, db *sql.DB, profile config.NetworkProfile, ownerID uuid.UUID) (balancePaise, reservedPaise int64, err error) {
 	err = db.QueryRowContext(ctx, `SELECT balance_paise FROM mv_owner_escrow_balance WHERE owner_id = $1`, ownerID).Scan(&balancePaise)
 	if errors.Is(err, sql.ErrNoRows) {
+		// [Added, M17 CLI debugging session, third pass] Distinguishing this
+		// from "a row exists with balance_paise=0" (which requires a genuine
+		// row to have been read and floored) is the whole point of this log
+		// line — see HandleDeposit/HandleBalance's matching lines.
+		log.Printf("[BALANCE] mv_owner_escrow_balance: NO ROW for owner_id=%s (sql.ErrNoRows)", ownerID)
 		balancePaise = 0
 	} else if err != nil {
 		return 0, 0, fmt.Errorf("ownerBalanceAndReserved: balance: %w", err)
