@@ -156,6 +156,28 @@ type NetworkProfile struct {
 	// runtime branching inside business logic — use the typed fields above.
 	Mode string // "demo" | "prod"
 
+	// ── Background materialized-view refresh cycle ───────────────────────────
+	// mv_owner_escrow_balance, mv_provider_escrow_balance, and
+	// mv_segment_shard_counts (DM §7) are materialized views, not live
+	// queries — every write path that changes their underlying tables
+	// (InsertOwnerEscrowEvent, InsertEscrowEvent, chunk_assignments status
+	// UPDATEs) appends/updates the source rows but never refreshes the view
+	// itself. Each view's own DM §7 comment documents an intended refresh
+	// trigger ("≤60s stale" for the two escrow views per build_part2.md's
+	// owner-balance TASK text; "after each chunk_assignment status change"
+	// for the shard-count view) but no session ever assigned a file to
+	// implement it. This is background_loops.go's own header comment's
+	// "view refresh" — one of the three categories of background work
+	// NFR-028 names (alongside repair queuing and Merkle log compaction,
+	// both already wired). One ticker-driven cadence for all three views,
+	// the same shape as ReleaseComputationInterval/ChargeComputationInterval
+	// above, rather than refreshing inline inside every writer (which would
+	// serialize unrelated callers against REFRESH MATERIALIZED VIEW
+	// CONCURRENTLY's own lock and couple internal/payment and internal/repair
+	// to a schedule neither has any other reason to know about).
+	// [Added, M17 CLI debugging session — no ADR/FR gives a concrete figure]
+	BackgroundViewRefreshInterval time.Duration
+
 	// ── Storage pricing ────────────────────────────────────────────────────────
 	// [Added, build.md Milestone 11 Phase 11.5/11.8] FR-057 and FileListItem's
 	// monthly_cost_paise both need a concrete storage rate, but ADR-024 only

@@ -99,6 +99,11 @@ var ProductionProfile = NetworkProfile{
 		15 * time.Minute,
 		60 * time.Minute,
 	},
+
+	// ── Background materialized-view refresh cycle ───────────────────────────
+	// 60s matches build_part2.md's own "≤60s stale" figure for the owner-
+	// balance endpoint read. [REF: M17 CLI debugging session]
+	BackgroundViewRefreshInterval: 60 * time.Second,
 }
 
 // DemoProfile is the canonical NetworkProfile for local demo and CI runs.
@@ -200,4 +205,13 @@ var DemoProfile = NetworkProfile{
 		30 * time.Second,
 		2 * time.Minute,
 	},
+
+	// ── Background materialized-view refresh cycle ───────────────────────────
+	// 5s — fast enough that TestDemoCLIFullLifecycle's deposit (at t=0) is
+	// reflected in mv_owner_escrow_balance well before its balance assertion
+	// runs several minutes later (upload+retrieve dominate the wall-clock
+	// time between them), without refreshing so often that three
+	// REFRESH MATERIALIZED VIEW CONCURRENTLY statements meaningfully compete
+	// with foreground demo-scale traffic. [REF: M17 CLI debugging session]
+	BackgroundViewRefreshInterval: 5 * time.Second,
 }

@@ -263,6 +263,11 @@ func TestDemoDiffersFromProduction(t *testing.T) {
 			{"VettingMinDuration", prod.VettingMinDuration, demo.VettingMinDuration},
 			// RazorpayCoolingPeriod: production 24h, demo 0 (instant). Prod > demo.
 			{"RazorpayCoolingPeriod", prod.RazorpayCoolingPeriod, demo.RazorpayCoolingPeriod},
+			// BackgroundViewRefreshInterval: production 60s, demo 5s — demo
+			// refreshes faster so a deposit is reflected in
+			// mv_owner_escrow_balance well within a live CLI test's runtime.
+			// [Added, M17 CLI debugging session]
+			{"BackgroundViewRefreshInterval", prod.BackgroundViewRefreshInterval, demo.BackgroundViewRefreshInterval},
 		}
 		for _, tf := range timeFields {
 			if tf.p == tf.d {
