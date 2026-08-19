@@ -1,5 +1,43 @@
 //go:build integration
 
+// This test runs successfully
+// ... Vyomanaut_V2 % go test -tags integration -v -run TestDemoTimeline ./scripts/test/ -timeout 40m
+
+// go test -tags integration -v -run TestViability ./scripts/test/ -timeout 30m
+
+// === RUN   TestDemoTimeline
+
+// 2026/08/17 01:26:14 [STARTUP] Vyomanaut — mode=DEMO — do not use for real data
+// 2026/08/17 01:26:14 [STARTUP] NetworkProfile: {DataShards:3 ParityShards:2 TotalShards:5 ShardSize:262144 LazyRepairR0:1 MinActiveProviders:5 MinDistinctASNs:5 MinMetroRegions:1 MinRelayNodes:0 MinCooledAccounts:5 ASNCapFraction:0.2 HeartbeatInterval:30s HeartbeatJitter:5s PollingInterval:2m0s DeparturePollingInterval:30s DHTRepublishInterval:2m0s DHTExpiryDuration:4m0s DepartureThreshold:10m0s PromisedDowntimeMaximum:10m0s AuditPeriodDuration:2m0s EscrowHoldWindow:1m0s VettingHoldWindow:2m0s PendingReceiptGCAge:5m0s RepairPromotionTimeout:3m0s ScoreWindowShort:2m0s ScoreWindowMedium:6m0s ScoreWindowLong:20m0s DualWindowDrop:0.2 VettingMinPasses:5 VettingMinDuration:5m0s VettingCapFraction:0.1 Argon2Time:1 Argon2Memory:4096 Argon2Threads:1 RequireSecretsManager:false RequireQuorum:false AllowLivePayments:false PaymentMode:mock SkipMnemonicConfirm:true RazorpayCoolingPeriod:0s ReleaseComputationInterval:2m0s ChargeComputationInterval:1m30s AuthRequestFreshnessWindow:2m0s GCRetryBackoff:[10s 30s 2m0s] Mode:demo StorageRatePaisePerGBPerMonth:100}
+
+// 2026/08/17 01:33:40 [STARTUP] Vyomanaut — mode=DEMO — do not use for real data
+// 2026/08/17 01:33:40 [STARTUP] NetworkProfile: {DataShards:3 ParityShards:2 TotalShards:5 ShardSize:262144 LazyRepairR0:1 MinActiveProviders:5 MinDistinctASNs:5 MinMetroRegions:1 MinRelayNodes:0 MinCooledAccounts:5 ASNCapFraction:0.2 HeartbeatInterval:30s HeartbeatJitter:5s PollingInterval:2m0s DeparturePollingInterval:30s DHTRepublishInterval:2m0s DHTExpiryDuration:4m0s DepartureThreshold:10m0s PromisedDowntimeMaximum:10m0s AuditPeriodDuration:2m0s EscrowHoldWindow:1m0s VettingHoldWindow:2m0s PendingReceiptGCAge:5m0s RepairPromotionTimeout:3m0s ScoreWindowShort:2m0s ScoreWindowMedium:6m0s ScoreWindowLong:20m0s DualWindowDrop:0.2 VettingMinPasses:5 VettingMinDuration:5m0s VettingCapFraction:0.1 Argon2Time:1 Argon2Memory:4096 Argon2Threads:1 RequireSecretsManager:false RequireQuorum:false AllowLivePayments:false PaymentMode:mock SkipMnemonicConfirm:true RazorpayCoolingPeriod:0s ReleaseComputationInterval:2m0s ChargeComputationInterval:1m30s AuthRequestFreshnessWindow:2m0s GCRetryBackoff:[10s 30s 2m0s] Mode:demo StorageRatePaisePerGBPerMonth:100}
+
+// demo_timeline_test.go:962: uploaded file_id=01a00c2c-3b1a-7242-890e-81acb137e566
+// --- PASS: TestDemoTimeline (1121.84s)
+// PASS
+// ok      github.com/vyomanaut-labs/Vyomanaut_V2/scripts/test     1122.786s
+
+// === RUN   TestViabilityASNCapMatchesRunningDemoProfile
+// --- PASS: TestViabilityASNCapMatchesRunningDemoProfile (42.66s)
+
+// === RUN   TestViabilityRepairSucceedsWithTwoOfFiveOffline
+
+// 2026/08/17 00:35:51 [STARTUP] Vyomanaut — mode=DEMO — do not use for real data
+// 2026/08/17 00:35:51 [STARTUP] NetworkProfile: {DataShards:3 ParityShards:2 TotalShards:5 ShardSize:262144 LazyRepairR0:1 MinActiveProviders:5 MinDistinctASNs:5 MinMetroRegions:1 MinRelayNodes:0 MinCooledAccounts:5 ASNCapFraction:0.2 HeartbeatInterval:30s HeartbeatJitter:5s PollingInterval:2m0s DeparturePollingInterval:30s DHTRepublishInterval:2m0s DHTExpiryDuration:4m0s DepartureThreshold:10m0s PromisedDowntimeMaximum:10m0s AuditPeriodDuration:2m0s EscrowHoldWindow:1m0s VettingHoldWindow:2m0s PendingReceiptGCAge:5m0s RepairPromotionTimeout:3m0s ScoreWindowShort:2m0s ScoreWindowMedium:6m0s ScoreWindowLong:20m0s DualWindowDrop:0.2 VettingMinPasses:5 VettingMinDuration:5m0s VettingCapFraction:0.1 Argon2Time:1 Argon2Memory:4096 Argon2Threads:1 RequireSecretsManager:false RequireQuorum:false AllowLivePayments:false PaymentMode:mock SkipMnemonicConfirm:true RazorpayCoolingPeriod:0s ReleaseComputationInterval:2m0s ChargeComputationInterval:1m30s AuthRequestFreshnessWindow:2m0s GCRetryBackoff:[10s 30s 2m0s] Mode:demo StorageRatePaisePerGBPerMonth:100}
+
+// demo_timeline_test.go:1067: uploaded file_id=01a00bf7-4c78-7e4c-827a-cd3510a92731
+// --- PASS: TestViabilityRepairSucceedsWithTwoOfFiveOffline (969.21s)
+
+// === RUN   TestViabilityActiveTransitionAtTenMinutes
+// --- PASS: TestViabilityActiveTransitionAtTenMinutes (369.96s)
+
+// === RUN   TestViabilityDuplicateWebhookProducesExactlyOneEscrowRow
+// --- PASS: TestViabilityDuplicateWebhookProducesExactlyOneEscrowRow (9.20s)
+// PASS
+// ok      github.com/vyomanaut-labs/Vyomanaut_V2/scripts/test     (cached)
+
+
 // Package test drives the full demo lifecycle from mvp.md §3.6 against a
 // real, live stack: a real Postgres instance, a real cmd/microservice
 // binary, and real cmd/provider processes — no step mocked, stubbed, or

@@ -1,5 +1,20 @@
 //go:build integration
 
+// This test runs successfully
+// ... Vyomanaut_V2 %  go test -tags integration -v -run TestDemoCLI ./scripts/test/ -timeout 90m
+// === RUN   TestDemoCLIFullLifecycle
+//     demo_cli_test.go:154: uploaded file_id=01a0199b-b90e-745d-9656-2582a20c5b81
+// --- PASS: TestDemoCLIFullLifecycle (613.42s)
+// === RUN   TestDemoCLIRetrievedBytesIdenticalToUploaded
+// --- PASS: TestDemoCLIRetrievedBytesIdenticalToUploaded (494.41s)
+// === RUN   TestDemoCLIUploadFailsBeforeDeposit
+// --- PASS: TestDemoCLIUploadFailsBeforeDeposit (373.01s)
+// === RUN   TestDemoCLIReadinessReportsDemoMode
+// --- PASS: TestDemoCLIReadinessReportsDemoMode (9.74s)
+// PASS
+// ok      github.com/vyomanaut-labs/Vyomanaut_V2/scripts/test     1491.561s
+
+
 // Drives the compiled cmd/client binary through the full demo lifecycle
 // (MVP §8.3's subcommand table) rather than internal/client's SDK
 // packages directly, per Session 17.2.1's own mandate: demo_timeline_test.go's
