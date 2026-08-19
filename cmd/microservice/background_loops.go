@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/api"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
 )
 
 // readinessEvaluationCycle is IC §3.4's 60-second re-evaluation cadence.
@@ -144,4 +145,56 @@ func resizeBackgroundSemaphore(size int) {
 	// avoid unused var error
 	_ = cap(backgroundSemaphore)
 	backgroundSemaphore = make(chan struct{}, size)
+}
+
+// backgroundRefreshedViews are the materialized views this loop keeps
+// current. Order is deliberate but not load-bearing: none of the three
+// views reads from another, so a partial failure partway through (logged,
+// not fatal — see runBackgroundViewRefreshLoop) only leaves whichever views
+// weren't reached yet stale until the next tick, same as if the whole tick
+// were skipped.
+var backgroundRefreshedViews = [...]string{
+	"mv_owner_escrow_balance",
+	"mv_provider_escrow_balance",
+	"mv_segment_shard_counts",
+}
+
+// runBackgroundViewRefreshLoop implements the "view refresh" background
+// task NFR-028 and this file's own header comment name but which no session
+// ever assigned a file to build (see NetworkProfile.BackgroundViewRefreshInterval's
+// doc comment for the full trail). Every
+// profile.BackgroundViewRefreshInterval, REFRESH MATERIALIZED VIEW
+// CONCURRENTLY runs against each view in backgroundRefreshedViews in turn —
+// CONCURRENTLY so foreground readers (owner balance checks, provider balance
+// checks, the owner file-list endpoint) are never blocked behind it, which
+// every view's own unique index (DM §7) exists to support. A failed refresh
+// is logged and this tick moves on to the next view rather than aborting —
+// matching runBackgroundThrottleLoop's own probe-failure handling
+// immediately above — since a transient failure on one view has no bearing
+// on whether the others can still be refreshed, and the next tick will
+// retry the one that failed anyway. Blocks until ctx is cancelled.
+//
+// db MUST be a vyomanaut_migrator connection, never the request-path
+// vyomanaut_app pool — REFRESH MATERIALIZED VIEW requires owning the view
+// object; vyomanaut_app's GRANT SELECT does not confer this (ADR-032), the
+// same reason regenerateProviderScoresView (scores_view.go) already uses a
+// migrator connection instead of the app pool for its own DROP/CREATE.
+// main.go passes a.viewRefreshDB, never a.db.
+func runBackgroundViewRefreshLoop(ctx context.Context, db *sql.DB, profile config.NetworkProfile) {
+	ticker := time.NewTicker(profile.BackgroundViewRefreshInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for _, view := range backgroundRefreshedViews {
+				stmt := "REFRESH MATERIALIZED VIEW CONCURRENTLY " + view
+				if _, err := db.ExecContext(ctx, stmt); err != nil {
+					log.Printf("[VIEW-REFRESH] refresh %s failed: %v", view, err)
+				}
+			}
+		}
+	}
 }

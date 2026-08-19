@@ -53,12 +53,13 @@ const databasePingTimeout = 5 * time.Second
 // graceful shutdown and so tests can inspect the result without re-running
 // main().
 type app struct {
-	db         *sql.DB
-	primaryDB  *sql.DB
-	profile    config.NetworkProfile
-	httpServer *http.Server
-	p2pHost    p2p.Host
-	cancel     context.CancelFunc
+	db            *sql.DB
+	primaryDB     *sql.DB
+	viewRefreshDB *sql.DB
+	profile       config.NetworkProfile
+	httpServer    *http.Server
+	p2pHost       p2p.Host
+	cancel        context.CancelFunc
 }
 
 // shutdown tears down every resource runMicroservice started, in reverse
@@ -87,6 +88,11 @@ func (a *app) shutdown() {
 	if a.primaryDB != nil && a.primaryDB != a.db {
 		if err := a.primaryDB.Close(); err != nil {
 			log.Printf("[SHUTDOWN] primary db: %v", err)
+		}
+	}
+	if a.viewRefreshDB != nil {
+		if err := a.viewRefreshDB.Close(); err != nil {
+			log.Printf("[SHUTDOWN] view-refresh (migrator) db: %v", err)
 		}
 	}
 }
@@ -242,7 +248,15 @@ func runMicroservice(ctx context.Context, cfg startupConfig) (*app, error) {
 	// vyomanaut_app role cannot perform this DROP/CREATE MATERIALIZED VIEW
 	// (ownership + FORCE-RLS visibility, ADR-032). Opened and closed within
 	// this step: nothing else needs elevated privileges for the rest of the
-	// process's lifetime.
+	// process's lifetime — EXCEPT runBackgroundViewRefreshLoop (Step 22,
+	// added M17 CLI debugging session), which needs the SAME elevated role
+	// for the SAME ownership reason (REFRESH MATERIALIZED VIEW requires
+	// owning the view object; vyomanaut_app's GRANT SELECT does not confer
+	// this — ADR-032). Rather than open a second migrator connection later,
+	// a.viewRefreshDB is opened here alongside this step's own migratorDB
+	// and kept alive for the process's lifetime (closed in shutdown()),
+	// while migratorDB itself is still closed immediately after this one-time
+	// call exactly as before.
 	migratorDB, err := openDBPool(cfg.MigratorDBDSN)
 	if err != nil {
 		a.shutdown()
@@ -254,6 +268,12 @@ func runMicroservice(ctx context.Context, cfg startupConfig) (*app, error) {
 		a.shutdown()
 		return nil, fmt.Errorf("runMicroservice: regenerate mv_provider_scores: %w", err)
 	}
+	viewRefreshDB, err := openDBPool(cfg.MigratorDBDSN)
+	if err != nil {
+		a.shutdown()
+		return nil, fmt.Errorf("runMicroservice: open view-refresh (migrator) db pool: %w", err)
+	}
+	a.viewRefreshDB = viewRefreshDB
 
 	// ── Step 6 — gossipCluster: MUST complete before step 7 starts ──────────
 	clusterMembership, err := waitForGossipQuorum(ctx, profile, cfg.SeedNode1, cfg.SeedNode2)
@@ -364,6 +384,19 @@ func runMicroservice(ctx context.Context, cfg startupConfig) (*app, error) {
 
 	// ── Step 21 (added post-hoc, same session as Steps 19-20) ────────────
 	go runVettingGCLoop(ctx, db, vettingchunk.NewGCDelivery(db, p2pHost, jwtPriv))
+
+	// ── Step 22 (added post-hoc — M17 CLI debugging session; resolves the
+	// build blocker found live: mv_owner_escrow_balance/
+	// mv_provider_escrow_balance/mv_segment_shard_counts were never
+	// refreshed by any code path, so owner/provider balance reads stayed
+	// frozen at their initial (empty) state regardless of real deposits).
+	// Uses a.viewRefreshDB (vyomanaut_migrator), NOT db (vyomanaut_app) —
+	// see Step 5's own note: REFRESH MATERIALIZED VIEW requires owning the
+	// view object, which vyomanaut_app's GRANT SELECT does not confer
+	// (ADR-032), the exact same reason regenerateProviderScoresView above
+	// already uses a migrator connection instead of db.
+	// ──────────────────────────────────────────────────────────────────
+	go runBackgroundViewRefreshLoop(ctx, a.viewRefreshDB, profile)
 
 	return a, nil
 }
