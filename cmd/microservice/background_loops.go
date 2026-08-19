@@ -180,21 +180,50 @@ var backgroundRefreshedViews = [...]string{
 // same reason regenerateProviderScoresView (scores_view.go) already uses a
 // migrator connection instead of the app pool for its own DROP/CREATE.
 // main.go passes a.viewRefreshDB, never a.db.
+//
+// [Added, M17 CLI debugging session, second pass] Every other line in this
+// file logs only on state transitions or failures (readiness, throttle) —
+// correct for those, but it means a live run's log can't distinguish
+// "this loop never started" from "this loop is ticking and succeeding"
+// from "this loop is ticking and failing every time": all three look like
+// silence. A first live run after this loop's own introduction still
+// failed TestDemoCLIFullLifecycle's balance assertion with unchanged
+// symptoms, and a faithful local repro of the exact schema/role/statement
+// (same CREATE MATERIALIZED VIEW, same GRANT structure, same
+// vyomanaut_migrator-vs-vyomanaut_app split) proved the underlying
+// REFRESH MATERIALIZED VIEW CONCURRENTLY mechanism itself works correctly
+// end-to-end — so the remaining unknown is specifically whether THIS
+// goroutine, in the real process, ever runs or ever succeeds. Logging
+// unconditionally (start + every tick's outcome) trades a few hundred
+// extra log lines over a 490s demo run for a log that can actually answer
+// that question on the next run, rather than adding another layer of
+// silent-either-way code on top of the existing silent-either-way pattern.
 func runBackgroundViewRefreshLoop(ctx context.Context, db *sql.DB, profile config.NetworkProfile) {
+	log.Printf("[VIEW-REFRESH] loop started: interval=%s views=%v",
+		profile.BackgroundViewRefreshInterval, backgroundRefreshedViews)
+
 	ticker := time.NewTicker(profile.BackgroundViewRefreshInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
+			log.Printf("[VIEW-REFRESH] loop stopping: %v", ctx.Err())
 			return
 		case <-ticker.C:
+			start := time.Now()
+			succeeded, failed := 0, 0
 			for _, view := range backgroundRefreshedViews {
 				stmt := "REFRESH MATERIALIZED VIEW CONCURRENTLY " + view
 				if _, err := db.ExecContext(ctx, stmt); err != nil {
+					failed++
 					log.Printf("[VIEW-REFRESH] refresh %s failed: %v", view, err)
+				} else {
+					succeeded++
 				}
 			}
+			log.Printf("[VIEW-REFRESH] tick: %d/%d views refreshed (%d failed) in %s",
+				succeeded, len(backgroundRefreshedViews), failed, time.Since(start))
 		}
 	}
 }
