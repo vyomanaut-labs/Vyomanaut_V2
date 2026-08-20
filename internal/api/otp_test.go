@@ -112,13 +112,22 @@ func TestOtpSendRejectsInvalidPhoneNumber(t *testing.T) {
 	}
 }
 
+// [M11 audit remediation, Finding 3] Loop bound changed from
+// otpRateLimitMax (tautological — passes regardless of what that constant
+// is set to, since the loop and the limit are the same variable) to the
+// literal 3, per build.md Session 11.4.1 and OAS otp/send's 429
+// description ("3 attempts per phone per 10 minutes"). Also now asserts
+// the actual Retry-After header value and the body's retry_after field,
+// neither of which was checked before — both would have silently stayed
+// wrong (3600 instead of 600) even after fixing just the loop bound.
 func TestOtpSendRateLimited(t *testing.T) {
 	db := openTestDB(t)
 	handler := NewOtpHandler(db, &capturingOtpSender{})
 	phone := randPhoneForOtp()
 
+	const wantMax = 3
 	var lastCode int
-	for i := 0; i < otpRateLimitMax; i++ {
+	for i := 0; i < wantMax; i++ {
 		reqBody, _ := json.Marshal(otpSendRequestBody{PhoneNumber: phone, Purpose: "LOGIN"})
 		req := httptest.NewRequest("POST", "/api/v1/auth/otp/send", bytes.NewReader(reqBody))
 		rec := httptest.NewRecorder()
@@ -126,7 +135,7 @@ func TestOtpSendRateLimited(t *testing.T) {
 		lastCode = rec.Code
 	}
 	if lastCode != 200 {
-		t.Fatalf("expected the first %d requests to succeed, last status = %d", otpRateLimitMax, lastCode)
+		t.Fatalf("expected the first %d requests to succeed, last status = %d", wantMax, lastCode)
 	}
 
 	// One more, over the limit.
@@ -135,7 +144,19 @@ func TestOtpSendRateLimited(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.HandleSend(rec, req)
 	if rec.Code != 429 {
-		t.Errorf("status after exceeding rate limit = %d, want 429", rec.Code)
+		t.Fatalf("status after exceeding rate limit = %d, want 429", rec.Code)
+	}
+
+	const wantRetryAfter = "600" // OAS otp/send 429: "Retry-After: Seconds until the rate limit resets", example 600
+	if got := rec.Header().Get("Retry-After"); got != wantRetryAfter {
+		t.Errorf("Retry-After header = %q, want %q", got, wantRetryAfter)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal error body: %v", err)
+	}
+	if got := body["retry_after"]; got != float64(600) {
+		t.Errorf("body retry_after = %v, want 600", got)
 	}
 }
 
@@ -285,12 +306,18 @@ func TestOtpVerifyNewEntityGetsRegistrationToken(t *testing.T) {
 
 	// The pending_registrations bridge row must exist so a subsequent
 	// register call can recover this phone number from claims.Subject alone.
-	recoveredPhone, err := RecoverPendingRegistration(context.Background(), db, claims.Subject)
+	recoveredPhone, recoveredPurpose, err := RecoverPendingRegistration(context.Background(), db, claims.Subject)
 	if err != nil {
 		t.Fatalf("RecoverPendingRegistration: %v", err)
 	}
 	if recoveredPhone != phone {
-		t.Errorf("RecoverPendingRegistration = %q, want %q", recoveredPhone, phone)
+		t.Errorf("RecoverPendingRegistration phone = %q, want %q", recoveredPhone, phone)
+	}
+	// [M11 audit remediation, Finding 4] purpose must round-trip through
+	// pending_registrations too — this is what owner.go's/provider.go's
+	// register handlers gate on.
+	if recoveredPurpose != "OWNER_REGISTER" {
+		t.Errorf("RecoverPendingRegistration purpose = %q, want %q", recoveredPurpose, "OWNER_REGISTER")
 	}
 }
 

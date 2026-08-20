@@ -41,10 +41,21 @@ import (
 )
 
 const (
-	otpCodeLength      = 6
-	otpTTL             = 10 * time.Minute
-	otpRateLimitWindow = 1 * time.Hour
-	otpRateLimitMax    = 5 // max OTP sends per phone_number+purpose per window
+	otpCodeLength = 6
+	otpTTL        = 10 * time.Minute
+
+	// [M11 audit remediation, Finding 3] Was 1*time.Hour / 5 — build.md
+	// Session 11.4.1 (and OAS otp/send's 429 response, which documents
+	// Retry-After: 600 with "3 attempts per phone per 10 minutes" in its
+	// description) both require 3 attempts per 10 minutes. The previous
+	// values sent Retry-After: 3600 to a client the spec told to wait 600
+	// seconds, and let a 4th send through in the same 10-minute window that
+	// should have been rejected. See otp_test.go's TestOtpSendRateLimited
+	// for why the old test didn't catch this: it looped
+	// otpRateLimitMax times, so it passed unchanged regardless of what
+	// that constant was set to.
+	otpRateLimitWindow = 10 * time.Minute
+	otpRateLimitMax    = 3 // max OTP sends per phone_number+purpose per window
 )
 
 // otpMaxCodeValue is the exclusive upper bound for a 6-digit code (000000-999999).
@@ -293,13 +304,14 @@ func (h *OtpVerifyHandler) HandleVerify(w http.ResponseWriter, r *http.Request) 
 	codeHash := sha256.Sum256([]byte(req.OtpCode))
 
 	var otpID uuid.UUID
+	var otpPurpose string
 	err := h.db.QueryRowContext(ctx, `
-		SELECT id FROM otp_codes
+		SELECT id, purpose FROM otp_codes
 		WHERE phone_number = $1 AND code_hash = $2 AND consumed_at IS NULL AND expires_at > NOW()
 		ORDER BY created_at DESC
 		LIMIT 1`,
 		req.PhoneNumber, codeHash[:],
-	).Scan(&otpID)
+	).Scan(&otpID, &otpPurpose)
 	if errors.Is(err, sql.ErrNoRows) {
 		WriteError(w, http.StatusUnauthorized, ErrInvalidOTP, "invalid or expired OTP", nil, "", nil)
 		return
@@ -326,7 +338,20 @@ func (h *OtpVerifyHandler) HandleVerify(w http.ResponseWriter, r *http.Request) 
 
 	if isNew {
 		subject := RegistrationSubjectForPhone(req.PhoneNumber)
-		if err := h.recordPendingRegistration(ctx, subject, req.PhoneNumber); err != nil {
+		// [M11 audit remediation, Finding 4] otpPurpose threaded through from
+		// the otp_codes row consumed above into pending_registrations, so the
+		// register endpoint that redeems this row can enforce OAS's
+		// OtpSendRequest.purpose contract ("The microservice validates that
+		// the subsequent register call matches this declared purpose") —
+		// previously dropped on the floor here, so nothing downstream could
+		// enforce it at all. A LOGIN-purpose OTP reaching this branch is
+		// itself odd (LOGIN implies an existing entity, i.e. isNew == false)
+		// but not impossible if the entity was deleted between send and
+		// verify; recorded as-is rather than special-cased, since owner.go's
+		// and provider.go's purpose checks reject anything that isn't their
+		// own OWNER_REGISTER/PROVIDER_REGISTER regardless of which
+		// unexpected value it is.
+		if err := h.recordPendingRegistration(ctx, subject, req.PhoneNumber, otpPurpose); err != nil {
 			WriteError(w, http.StatusInternalServerError, ErrInternal, "failed to record pending registration", nil, "", nil)
 			return
 		}
@@ -364,13 +389,13 @@ func (h *OtpVerifyHandler) HandleVerify(w http.ResponseWriter, r *http.Request) 
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-func (h *OtpVerifyHandler) recordPendingRegistration(ctx context.Context, subject uuid.UUID, phoneNumber string) error {
+func (h *OtpVerifyHandler) recordPendingRegistration(ctx context.Context, subject uuid.UUID, phoneNumber, purpose string) error {
 	expiresAt := time.Now().UTC().Add(RegistrationTokenTTL)
 	_, err := h.db.ExecContext(ctx, `
-		INSERT INTO pending_registrations (subject, phone_number, expires_at)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (subject) DO UPDATE SET phone_number = EXCLUDED.phone_number, expires_at = EXCLUDED.expires_at, created_at = NOW()`,
-		subject, phoneNumber, expiresAt,
+		INSERT INTO pending_registrations (subject, phone_number, purpose, expires_at)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (subject) DO UPDATE SET phone_number = EXCLUDED.phone_number, purpose = EXCLUDED.purpose, expires_at = EXCLUDED.expires_at, created_at = NOW()`,
+		subject, phoneNumber, purpose, expiresAt,
 	)
 	if err != nil {
 		return fmt.Errorf("recordPendingRegistration: %w", err)
@@ -378,21 +403,28 @@ func (h *OtpVerifyHandler) recordPendingRegistration(ctx context.Context, subjec
 	return nil
 }
 
-// RecoverPendingRegistration looks up the phone number a registration
-// token's subject was issued for (see this file's header note on why this
-// bridge table exists). Returns sql.ErrNoRows if no unexpired pending
-// registration exists for subject — the caller (Phase 11.5/11.6's register
-// handlers) should treat that as an invalid/expired registration token.
-func RecoverPendingRegistration(ctx context.Context, db *sql.DB, subject uuid.UUID) (phoneNumber string, err error) {
+// RecoverPendingRegistration looks up the phone number and OTP purpose a
+// registration token's subject was issued for (see this file's header note
+// on why this bridge table exists). Returns sql.ErrNoRows if no unexpired
+// pending registration exists for subject — the caller (Phase 11.5/11.6's
+// register handlers) should treat that as an invalid/expired registration
+// token.
+//
+// [M11 audit remediation, Finding 4] Now also returns purpose so the caller
+// can reject a token issued under the wrong OTP purpose (e.g. a LOGIN or
+// PROVIDER_REGISTER token redeemed against POST /api/v1/owner/register) —
+// previously the phone_number was recovered but purpose was neither stored
+// nor checked anywhere, so this gate didn't exist.
+func RecoverPendingRegistration(ctx context.Context, db *sql.DB, subject uuid.UUID) (phoneNumber, purpose string, err error) {
 	err = db.QueryRowContext(ctx, `
-		SELECT phone_number FROM pending_registrations
+		SELECT phone_number, purpose FROM pending_registrations
 		WHERE subject = $1 AND expires_at > NOW()`,
 		subject,
-	).Scan(&phoneNumber)
+	).Scan(&phoneNumber, &purpose)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return phoneNumber, nil
+	return phoneNumber, purpose, nil
 }
 
 // DeletePendingRegistration removes a pending registration row once its
