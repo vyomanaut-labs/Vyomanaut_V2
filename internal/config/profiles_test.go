@@ -100,6 +100,14 @@ func TestProfileBothFullySpecified(t *testing.T) {
 				// the two-word mnemonic confirmation step.
 				// Zero (false) is correct per MVP §5.2, MVP §3.5.
 				"SkipMnemonicConfirm": "zero is correct: production always requires mnemonic confirmation (MVP §3.5)",
+
+				// [M11 audit remediation, Finding 7] IsDemoMode = false is
+				// production's correct, explicitly-set value (see
+				// profiles.go's ProductionProfile literal) — it's simply
+				// also Go's zero value for bool, which this reflection
+				// check can't distinguish from "never set". Zero is
+				// correct per network_profile.go's IsDemoMode doc comment.
+				"IsDemoMode": "zero (false) is correct: ProductionProfile is not demo mode (see IsDemoMode's own doc comment, M11 Finding 7)",
 			},
 		},
 		{

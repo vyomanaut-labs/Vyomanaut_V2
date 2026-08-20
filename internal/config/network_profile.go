@@ -113,6 +113,17 @@ type NetworkProfile struct {
 	SkipMnemonicConfirm   bool   // if true, client skips two-word mnemonic confirmation step
 	RazorpayCoolingPeriod time.Duration
 
+	// [M11 audit remediation, Finding 7 (CR-01)] IsDemoMode is the typed
+	// field Mode's own doc comment below says to use instead of runtime
+	// string branching. Mirrors RequireQuorum/AllowLivePayments exactly:
+	// true only in DemoProfile, false only in ProductionProfile, both
+	// explicit per OR-03's invariant that every field appear in both struct
+	// literals. Four call sites in provider.go and readiness.go previously
+	// branched on `profile.Mode != "demo"` directly — there was no
+	// purpose-built bool field for "is this demo mode" in general before
+	// this one, which is presumably why they reached for Mode.
+	IsDemoMode bool
+
 	// ── Release computation cycle ─────────────────────────────────────────────
 	// 0 means calendar-driven (production: computed on the 23rd of each month).
 	// Non-zero means ticker-driven (demo: computed every ReleaseComputationInterval).

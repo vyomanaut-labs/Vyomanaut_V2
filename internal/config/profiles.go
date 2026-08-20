@@ -18,6 +18,11 @@ import "time"
 var ProductionProfile = NetworkProfile{
 	Mode: "prod",
 
+	// [M11 audit remediation, Finding 7] See network_profile.go's IsDemoMode
+	// doc comment — this is the typed field business logic should branch
+	// on, never Mode's string value.
+	IsDemoMode: false,
+
 	// ── Storage pricing (build.md Milestone 11) ───────────────────────────────
 	// Identical to DemoProfile — pricing is profile-invariant (see
 	// network_profile.go's own note on this field).
@@ -117,6 +122,11 @@ var ProductionProfile = NetworkProfile{
 // [REF: MVP §5.2]
 var DemoProfile = NetworkProfile{
 	Mode: "demo",
+
+	// [M11 audit remediation, Finding 7] See network_profile.go's IsDemoMode
+	// doc comment — this is the typed field business logic should branch
+	// on, never Mode's string value.
+	IsDemoMode: true,
 
 	// ── Storage pricing (build.md Milestone 11) ───────────────────────────────
 	// Identical to ProductionProfile — pricing is profile-invariant (see
