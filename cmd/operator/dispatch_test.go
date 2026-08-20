@@ -32,13 +32,15 @@ func TestNoArgsPrintsUsage(t *testing.T) {
 	}
 }
 
-// TestNotYetBuiltSubcommandsReturnHonestPlaceholder confirms watch/audit/
-// payout — named in ADR-084 §D-1 but not built until Sessions 17.6.2/
-// 17.6.3 — are routed to a real, disclosed placeholder rather than falling
-// through to the unknown-subcommand branch (which would look identical to
-// a typo, not a not-yet-built feature).
+// TestNotYetBuiltSubcommandsReturnHonestPlaceholder confirms audit/payout
+// — named in ADR-084 §D-1 but not built until Session 17.6.3 — are routed
+// to a real, disclosed placeholder rather than falling through to the
+// unknown-subcommand branch (which would look identical to a typo, not a
+// not-yet-built feature). "watch" was in this list prior to Session
+// 17.6.2; it is real now (watch.go) and gets its own tests in
+// dispatch_test.go's neighbours instead.
 func TestNotYetBuiltSubcommandsReturnHonestPlaceholder(t *testing.T) {
-	for _, sub := range []string{"watch", "audit", "payout"} {
+	for _, sub := range []string{"audit", "payout"} {
 		t.Run(sub, func(t *testing.T) {
 			var out, errOut bytes.Buffer
 			code := run([]string{sub}, &out, &errOut)

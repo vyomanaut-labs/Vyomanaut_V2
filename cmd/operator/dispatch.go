@@ -114,7 +114,13 @@ func run(args []string, out, errOut io.Writer) int {
 	case "otp":
 		return dispatchOtp(rest, out, errOut)
 	case "watch":
-		return notYetImplemented(errOut, "watch", "17.6.2")
+		// M17-E Session 17.6.2: watch.go now implements this for real —
+		// see that file's own header. Necessary one-line edit to this
+		// file's own switch statement: it is not in Session 17.6.2's
+		// FILES list, but leaving this arm pointed at the placeholder
+		// would make that whole session's deliverable unreachable from
+		// the CLI (flagged in that session's own report).
+		return dispatchWatch(rest, out, errOut)
 	case "audit":
 		return notYetImplemented(errOut, "audit", "17.6.3")
 	case "payout":
