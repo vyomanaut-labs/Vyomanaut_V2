@@ -20,4 +20,13 @@ var (
 	// ErrDHTKeyInvalid is returned by PutProviderRecord or FindProviders when
 	// the key does not satisfy the custom HMAC validator (IC §5.4, IC §12).
 	ErrDHTKeyInvalid = errors.New("p2p: DHT key does not pass HMAC validator")
+
+	// ErrPeerNotInRoutingTable is returned by FindPeer when id is not
+	// currently present in the local k-bucket routing table (M12 audit
+	// corrections, Finding 2). This is an ordinary, expected outcome — not
+	// a failure — whenever this node has not yet observed any DHT traffic
+	// from that peer; callers should treat it as "the DHT fallback has
+	// nothing newer to offer right now," not as an error condition to
+	// surface to an operator.
+	ErrPeerNotInRoutingTable = errors.New("p2p: peer not present in local routing table")
 )

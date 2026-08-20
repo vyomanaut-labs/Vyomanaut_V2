@@ -402,7 +402,8 @@ func (f *fakeChunkDHTKeySource) AllChunkDHTKeys() (map[[32]byte][32]byte, error)
 }
 
 // fakeDHT is a minimal in-memory DHT test double that just records
-// PutProviderRecord calls (doRepublish does not need FindProviders/Bootstrap).
+// PutProviderRecord calls (doRepublish does not need FindProviders/FindPeer/
+// Bootstrap).
 type fakeDHT struct {
 	mu   sync.Mutex
 	puts [][]byte
@@ -423,6 +424,10 @@ func (f *fakeDHT) PutProviderRecord(ctx context.Context, key []byte) error {
 
 func (f *fakeDHT) FindProviders(ctx context.Context, key []byte, maxCount int) ([]AddrInfo, error) {
 	return nil, fmt.Errorf("not implemented in fakeDHT")
+}
+
+func (f *fakeDHT) FindPeer(ctx context.Context, id PeerID) (AddrInfo, error) {
+	return AddrInfo{}, fmt.Errorf("not implemented in fakeDHT")
 }
 
 func (f *fakeDHT) Bootstrap(ctx context.Context) error { return nil }

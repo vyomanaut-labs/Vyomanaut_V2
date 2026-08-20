@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -319,6 +320,152 @@ func TestTwoNodeBootstrapPutFind(t *testing.T) {
 	}
 	if foundOnA[0].ID != hostB.PeerID() {
 		t.Errorf("node A's record is for %q, want %q", foundOnA[0].ID, hostB.PeerID())
+	}
+}
+
+// ── FindPeer semantics (M12 audit corrections, Finding 2) ─────────────────
+
+// TestFindPeerUnknownReturnsErrPeerNotInRoutingTable verifies a peer this
+// node has never observed any DHT traffic from returns the documented
+// sentinel, not a zero-value success.
+func TestFindPeerUnknownReturnsErrPeerNotInRoutingTable(t *testing.T) {
+	ctx := context.Background()
+	testHost := buildTestHost(t)
+	dht := buildTestDHT(t, testHost)
+
+	unknownPub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	unknownPeerID, err := PeerIDFromEd25519PublicKey(unknownPub)
+	if err != nil {
+		t.Fatalf("PeerIDFromEd25519PublicKey: %v", err)
+	}
+
+	_, err = dht.FindPeer(ctx, unknownPeerID)
+	if !errors.Is(err, ErrPeerNotInRoutingTable) {
+		t.Fatalf("FindPeer(unknown) error = %v, want ErrPeerNotInRoutingTable", err)
+	}
+}
+
+// TestFindPeerAfterBootstrapReturnsSeedAddr verifies FindPeer can serve a
+// peer added to the routing table via Bootstrap's own addToRoutingTable
+// call — the simplest case, with no PUT_PROVIDER traffic involved.
+func TestFindPeerAfterBootstrapReturnsSeedAddr(t *testing.T) {
+	hostA := buildTestHost(t)
+	_ = buildTestDHT(t, hostA)
+
+	hostB := buildTestHost(t)
+	addrA, err := ParseMultiaddr("/ip4/127.0.0.1/tcp/" + testHostPort(t, hostA))
+	if err != nil {
+		t.Fatalf("ParseMultiaddr: %v", err)
+	}
+	addrB, err := ParseMultiaddr("/ip4/127.0.0.1/tcp/" + testHostPort(t, hostB))
+	if err != nil {
+		t.Fatalf("ParseMultiaddr: %v", err)
+	}
+	dhtB, err := NewDHT(hostB, DHTConfig{
+		SelfAddrs: []Multiaddr{addrB},
+		Seeds:     []AddrInfo{{ID: hostA.PeerID(), Addrs: []Multiaddr{addrA}}},
+	})
+	if err != nil {
+		t.Fatalf("NewDHT (B): %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := dhtB.Bootstrap(ctx); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+
+	got, err := dhtB.FindPeer(ctx, hostA.PeerID())
+	if err != nil {
+		t.Fatalf("FindPeer(seed A) after Bootstrap: %v", err)
+	}
+	if got.ID != hostA.PeerID() {
+		t.Errorf("FindPeer returned ID %q, want %q", got.ID, hostA.PeerID())
+	}
+	if len(got.Addrs) != 1 || got.Addrs[0].String() != addrA.String() {
+		t.Errorf("FindPeer returned addrs %v, want [%s]", got.Addrs, addrA)
+	}
+}
+
+// TestFindPeerAfterInboundPutProviderRecord is the scenario
+// cmd/microservice/adapters.go's resolveProviderPeer fallback actually
+// depends on in production: node A learns node B's CURRENT, connect-
+// verified address purely as a side effect of B announcing an unrelated
+// content record — no seed relationship between A and B is configured
+// ahead of time, mirroring how the microservice (never a bootstrap seed for
+// any provider) would passively learn a provider's refreshed address from
+// ordinary heartbeat-driven DHT republication traffic.
+func TestFindPeerAfterInboundPutProviderRecord(t *testing.T) {
+	hostA := buildTestHost(t)
+	dhtA := buildTestDHT(t, hostA)
+
+	hostB := buildTestHost(t)
+	addrA, err := ParseMultiaddr("/ip4/127.0.0.1/tcp/" + testHostPort(t, hostA))
+	if err != nil {
+		t.Fatalf("ParseMultiaddr: %v", err)
+	}
+	addrB, err := ParseMultiaddr("/ip4/127.0.0.1/tcp/" + testHostPort(t, hostB))
+	if err != nil {
+		t.Fatalf("ParseMultiaddr: %v", err)
+	}
+	dhtB, err := NewDHT(hostB, DHTConfig{
+		SelfAddrs: []Multiaddr{addrB},
+		Seeds:     []AddrInfo{{ID: hostA.PeerID(), Addrs: []Multiaddr{addrA}}},
+	})
+	if err != nil {
+		t.Fatalf("NewDHT (B): %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := dhtB.Bootstrap(ctx); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+
+	// A does not know B yet at this point — Bootstrap only populated B's
+	// own routing table with A, not the reverse. B announcing any record
+	// is what should teach A about B's address (handlePut's fix, M6 review
+	// §5.4), exactly like FindProviders' own TestTwoNodeBootstrapPutFind
+	// above verifies for the content-record side of the same mechanism.
+	if _, err := dhtA.FindPeer(ctx, hostB.PeerID()); !errors.Is(err, ErrPeerNotInRoutingTable) {
+		t.Fatalf("FindPeer(B) on A before any B traffic: err = %v, want ErrPeerNotInRoutingTable", err)
+	}
+
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i * 7)
+	}
+	if err := dhtB.PutProviderRecord(ctx, key); err != nil {
+		t.Fatalf("PutProviderRecord (B): %v", err)
+	}
+
+	// handlePut's routing-table-growth fix runs Connect + addToRoutingTable
+	// in its own goroutine after the ack (see dht.go's handlePut) — poll
+	// rather than assume synchronous completion, same pattern as
+	// TestTwoNodeBootstrapPutFind above.
+	deadline := time.Now().Add(3 * time.Second)
+	var (
+		got     AddrInfo
+		findErr error
+	)
+	for time.Now().Before(deadline) {
+		got, findErr = dhtA.FindPeer(ctx, hostB.PeerID())
+		if findErr == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if findErr != nil {
+		t.Fatalf("FindPeer(B) on A after B's PUT_PROVIDER: %v", findErr)
+	}
+	if got.ID != hostB.PeerID() {
+		t.Errorf("FindPeer returned ID %q, want %q", got.ID, hostB.PeerID())
+	}
+	if len(got.Addrs) != 1 || got.Addrs[0].String() != addrB.String() {
+		t.Errorf("FindPeer returned addrs %v, want [%s] (B's real, connect-verified address)", got.Addrs, addrB)
 	}
 }
 

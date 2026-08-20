@@ -131,6 +131,50 @@ type DHT interface {
 	//   - ErrDHTKeyInvalid: key fails the HMAC-shape validator (IC §12).
 	FindProviders(ctx context.Context, key []byte, maxCount int) ([]AddrInfo, error)
 
+	// FindPeer returns the current, connect-verified address(es) this node
+	// has locally observed for id — a direct k-bucket routing-table lookup
+	// by the peer's OWN identity, not a network round trip and not keyed by
+	// any content-address key.
+	//
+	// [Added — M12 audit corrections, Finding 2] This is deliberately a
+	// DIFFERENT primitive from FindProviders. FindProviders answers "who
+	// holds this content", keyed by a dht_key that is only ever computable
+	// from an owner's file_owner_key (HKDF(master_secret, ...), IC §12.2) —
+	// material the coordination microservice never has access to by design
+	// (see internal/crypto/hkdf.go's DeriveDHTKey, internal/storage/
+	// index.go's dht-keys cache comment). FindPeer instead answers "what is
+	// THIS peer's current address", keyed by nothing but the peer's own,
+	// never-stale PeerID — exactly what cmd/microservice/adapters.go's
+	// resolveProviderPeer already independently derives from
+	// providers.ed25519_public_key via PeerIDFromEd25519PublicKey. A stale
+	// providers.last_known_multiaddrs row is a stale ADDRESS for an
+	// already-known peer identity, not an unknown content lookup — FindPeer
+	// is the primitive that actually matches that need; FindProviders
+	// cannot serve it without material the microservice structurally does
+	// not have.
+	//
+	// The routing table FindPeer reads is populated purely as a side effect
+	// of ordinary inbound DHT traffic: handlePut Connect-verifies and adds
+	// every PUT_PROVIDER sender to the local k-buckets (see addToRoutingTable
+	// and its call site in handlePut, M6 review §5.4) — no additional wire
+	// protocol is required for this method to have real data to return,
+	// once this node is bootstrapped and receiving that traffic from
+	// providers' periodic heartbeat republication (internal/p2p/heartbeat.go).
+	//
+	// SCOPE: a local-only lookup (this node's own k-buckets), matching the
+	// same single-hop scope decision FindProviders' own doc comment
+	// documents for M6 review §5.5 — not an iterative FIND_NODE query that
+	// recurses into peers this node doesn't already know. Revisit as a
+	// dedicated iterative-lookup session if a concrete scenario requires
+	// this fallback to succeed for a peer this node has never heard from at
+	// all.
+	//
+	// Error semantics:
+	//   - ErrPeerNotInRoutingTable: id is not currently present in the
+	//     local routing table (an ordinary, expected outcome — see that
+	//     sentinel's own doc comment).
+	FindPeer(ctx context.Context, id PeerID) (AddrInfo, error)
+
 	// Bootstrap connects to the configured seed nodes and fills the k-buckets.
 	// Must be called once at daemon startup, after the Host is created
 	// (ARCH §13). A DHT with no configured seeds bootstraps as a no-op.
@@ -323,6 +367,36 @@ func (d *kademliaDHT) FindProviders(ctx context.Context, key []byte, maxCount in
 		}
 	}
 	return out, nil
+}
+
+// ── FindPeer ──────────────────────────────────────────────────────────────
+
+// FindPeer implements the DHT interface — see that method's own doc comment
+// for why this is a routing-table lookup keyed by peer identity, not a
+// FindProviders-style content-key lookup.
+//
+// ctx is accepted for interface-signature consistency with FindProviders
+// and to leave room for a future iterative version to make real network
+// calls; the current single-hop, local-routing-table-only implementation
+// never blocks on it.
+func (d *kademliaDHT) FindPeer(_ context.Context, id PeerID) (AddrInfo, error) {
+	// addToRoutingTable always places a peer at exactly this bucket index —
+	// commonPrefixLen(selfKad, kadID(peer)) — so a target lookup only ever
+	// needs to scan that one bucket, never all 256.
+	target := kadID(id)
+	idx := commonPrefixLen(d.selfKad, target)
+	if idx >= len(d.buckets) {
+		idx = len(d.buckets) - 1
+	}
+
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	for _, entry := range d.buckets[idx] {
+		if entry.info.ID == id {
+			return entry.info, nil
+		}
+	}
+	return AddrInfo{}, fmt.Errorf("p2p.FindPeer: %w", ErrPeerNotInRoutingTable)
 }
 
 // lookupLocal returns the local provider record for key, or nil if absent or
