@@ -39,12 +39,33 @@ import (
 // left cannot spin forever.
 const maxReplacementSelectionAttempts = 5
 
+// DBTX is satisfied by both *sql.DB and *sql.Tx. SelectReplacementProvider
+// and its helpers below are read-only against `providers`,
+// `mv_provider_scores`, and `chunk_assignments`, and are called both
+// standalone (repair executor, a bare *sql.DB) and now from inside a
+// caller's transaction (internal/api's upload/assign, Session 11.7.1 — see
+// that package's upload.go header for why: the segment/chunk_assignments
+// writes surrounding this candidate selection must all commit or roll back
+// together, so the selection reads need to run against the same *sql.Tx).
+//
+// [M11 audit remediation, Finding 2] Added to accept *sql.Tx without
+// widening these functions to accept a full transaction-management
+// interface they have no business calling BeginTx/Commit/Rollback on.
+type DBTX interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
 // SelectReplacementProvider chooses a new provider to receive the
 // reconstructed shard for segmentID, excluding excludeProviderIDs (the
 // departed/failed holder(s) and every other current holder of this
 // segment's shards, so the same provider is never assigned two shards of one
 // segment). Uses Power of Two Choices (ADR-005): draw two ACTIVE candidates
-// at random from the vetted pool, pick the higher-scored one.
+// at random from the vetted pool, pick the higher-scored one. Per DM
+// §8.2/§8.3 (ADR-024, FR-025), "ACTIVE" here also requires a confirmed
+// Razorpay Linked Account and an elapsed cooling period — see
+// drawTwoActiveCandidates.
 //
 // The chosen candidate must not push any single ASN's share of this
 // segment's TotalShards above floor(TotalShards * profile.ASNCapFraction)
@@ -64,7 +85,7 @@ const maxReplacementSelectionAttempts = 5
 // Goroutine-safe: yes.
 func SelectReplacementProvider(
 	ctx context.Context,
-	db *sql.DB,
+	db DBTX,
 	profile config.NetworkProfile,
 	segmentID uuid.UUID,
 	excludeProviderIDs []uuid.UUID,
@@ -114,16 +135,36 @@ type replacementCandidate struct {
 // drawTwoActiveCandidates draws up to two random ACTIVE providers not in
 // excluded. May return fewer than two (or zero) if the eligible pool is
 // smaller than that.
-func drawTwoActiveCandidates(ctx context.Context, db *sql.DB, excluded map[uuid.UUID]bool) ([]replacementCandidate, error) {
+func drawTwoActiveCandidates(ctx context.Context, db DBTX, excluded map[uuid.UUID]bool) ([]replacementCandidate, error) {
 	excludeStrs := make([]string, 0, len(excluded))
 	for id := range excluded {
 		excludeStrs = append(excludeStrs, id.String())
 	}
 
+	// [M11 audit remediation, Finding 5] razorpay_linked_account_id IS NOT
+	// NULL AND razorpay_cooling_until < NOW() added per DM §8.2/§8.3
+	// ("Chunk assignments are blocked until [razorpay_linked_account_id] is
+	// non-null and the cooling period has elapsed", ADR-024, FR-025).
+	// Previously this query filtered on status = 'ACTIVE' alone, so a
+	// provider that reached ACTIVE via scoring.IncrementConsecutivePasses
+	// (audit-pass and vetting-duration criteria only) became eligible for
+	// real shard assignment even with no confirmed Razorpay Linked Account
+	// or still inside its cooling window — exactly the condition this DM
+	// invariant exists to prevent. Deliberately NOT duplicated into
+	// scoring.IncrementConsecutivePasses's VETTING->ACTIVE transition: DM
+	// scopes this invariant to "chunk assignments" specifically, not to the
+	// ACTIVE status transition itself, and conflating the two would freeze
+	// a well-vetted provider's consecutive_audit_passes tracking on an
+	// unrelated payment-readiness concern. Gating here, the actual point of
+	// consequence, closes the gap regardless of how a provider reached
+	// ACTIVE.
 	rows, err := db.QueryContext(ctx, `
 		SELECT provider_id, asn
 		FROM providers
-		WHERE status = 'ACTIVE' AND NOT (provider_id = ANY($1::uuid[]))
+		WHERE status = 'ACTIVE'
+		  AND razorpay_linked_account_id IS NOT NULL
+		  AND razorpay_cooling_until < NOW()
+		  AND NOT (provider_id = ANY($1::uuid[]))
 		ORDER BY random()
 		LIMIT 2`,
 		pq.Array(excludeStrs),
@@ -147,7 +188,7 @@ func drawTwoActiveCandidates(ctx context.Context, db *sql.DB, excluded map[uuid.
 // orderCandidatesByScoreDesc returns candidates sorted by
 // mv_provider_scores.score_composite, highest first. A candidate absent from
 // the view (no audit history yet) is treated as score 0.
-func orderCandidatesByScoreDesc(ctx context.Context, db *sql.DB, candidates []replacementCandidate) ([]replacementCandidate, error) {
+func orderCandidatesByScoreDesc(ctx context.Context, db DBTX, candidates []replacementCandidate) ([]replacementCandidate, error) {
 	ids := make([]string, len(candidates))
 	for i, c := range candidates {
 		ids[i] = c.providerID.String()
@@ -187,7 +228,7 @@ func orderCandidatesByScoreDesc(ctx context.Context, db *sql.DB, candidates []re
 // provider on the given asn would stay at or below maxPerASN, counting only
 // currently live assignments (ACTIVE or REPAIRING — a shard mid-repair still
 // occupies its ASN's share until the replacement is confirmed).
-func asnWithinCap(ctx context.Context, db *sql.DB, segmentID uuid.UUID, asn string, maxPerASN int) (bool, error) {
+func asnWithinCap(ctx context.Context, db DBTX, segmentID uuid.UUID, asn string, maxPerASN int) (bool, error) {
 	var currentCount int
 	err := db.QueryRowContext(ctx, `
 		SELECT COUNT(*)

@@ -224,3 +224,72 @@ func TestSelectReplacementProviderReturnsErrAfterBoundedRetries(t *testing.T) {
 		t.Errorf("SelectReplacementProvider: got %v, want ErrNoEligibleReplacement", err)
 	}
 }
+
+// TestSelectReplacementProviderExcludesUnlinkedRazorpayProvider is the
+// audit's Finding 5 regression test: an ACTIVE provider with
+// razorpay_linked_account_id = NULL must be excluded from candidate
+// selection (DM §8.2/§8.3, ADR-024, FR-025). Before this fix,
+// drawTwoActiveCandidates filtered on status = 'ACTIVE' alone, so a
+// provider that reached ACTIVE via scoring.IncrementConsecutivePasses
+// (audit-pass and vetting-duration criteria only, no Razorpay check) was
+// just as eligible as a fully payment-ready one.
+func TestSelectReplacementProviderExcludesUnlinkedRazorpayProvider(t *testing.T) {
+	db := openTestDB(t)
+	verify := openVerifyDB(t)
+	exclude := allActiveProviderIDs(t, verify)
+
+	segmentID := insertTestSegmentChain(t, db)
+	unlinked := insertTestProvider(t, db, testProviderSpec{razorpayNotLinked: true})
+	linked := insertTestProvider(t, db, testProviderSpec{})
+	// Give the unlinked (ineligible) candidate the higher score, so if it
+	// were still eligible Power of Two Choices would prefer it over
+	// `linked` — isolating this test from Finding 5's fix rather than
+	// happening to pass because the eligible candidate also won on score.
+	seedProviderScore(t, verify, unlinked, true)
+	seedProviderScore(t, verify, linked, false)
+	refreshProviderScoresForAssignment(t, verify)
+
+	got, err := SelectReplacementProvider(context.Background(), db, config.ProductionProfile, segmentID, exclude)
+	if err != nil {
+		t.Fatalf("SelectReplacementProvider: %v", err)
+	}
+	if got == unlinked {
+		t.Errorf("SelectReplacementProvider returned %v, an ACTIVE provider with no Razorpay linked account", got)
+	}
+	if got != linked {
+		t.Errorf("SelectReplacementProvider = %v, want the only Razorpay-eligible candidate %v", got, linked)
+	}
+}
+
+// TestSelectReplacementProviderExcludesStillCoolingRazorpayProvider mirrors
+// the test above for the other half of DM §8.2/§8.3's condition: a linked
+// account still inside its cooling window is equally ineligible.
+func TestSelectReplacementProviderExcludesStillCoolingRazorpayProvider(t *testing.T) {
+	db := openTestDB(t)
+	verify := openVerifyDB(t)
+	exclude := allActiveProviderIDs(t, verify)
+
+	segmentID := insertTestSegmentChain(t, db)
+	stillCooling := insertTestProvider(t, db, testProviderSpec{razorpayNotLinked: true})
+	acc := "acc_test_still_cooling"
+	coolingUntil := time.Now().Add(24 * time.Hour) // not yet elapsed
+	if _, err := db.Exec(`UPDATE providers SET razorpay_linked_account_id = $1, razorpay_cooling_until = $2 WHERE provider_id = $3`,
+		acc, coolingUntil, stillCooling); err != nil {
+		t.Fatalf("set still-cooling provider: %v", err)
+	}
+	linked := insertTestProvider(t, db, testProviderSpec{})
+	seedProviderScore(t, verify, stillCooling, true)
+	seedProviderScore(t, verify, linked, false)
+	refreshProviderScoresForAssignment(t, verify)
+
+	got, err := SelectReplacementProvider(context.Background(), db, config.ProductionProfile, segmentID, exclude)
+	if err != nil {
+		t.Fatalf("SelectReplacementProvider: %v", err)
+	}
+	if got == stillCooling {
+		t.Errorf("SelectReplacementProvider returned %v, a provider still inside its Razorpay cooling window", got)
+	}
+	if got != linked {
+		t.Errorf("SelectReplacementProvider = %v, want the only cooled-and-eligible candidate %v", got, linked)
+	}
+}

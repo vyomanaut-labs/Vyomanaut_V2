@@ -57,6 +57,16 @@ func insertTestOwnerWithEscrow(t *testing.T, db *sql.DB, depositPaise int64) uui
 	return id
 }
 
+// [M11 audit remediation, Finding 5 — extended] razorpay_linked_account_id
+// must be set (not just razorpay_cooling_until in the past) for this
+// provider to clear the DM §8.2/§8.3 (ADR-024, FR-025) gate that
+// repair.SelectReplacementProvider now applies — and, since ADR-072/073,
+// that function is also what upload.assignSegment calls for the *initial*
+// shard assignment this whole test file exercises. Before this gate
+// existed, razorpay_cooling_until in the past was already sufficient for
+// "eligible"; now both columns are checked, and every caller of this helper
+// was silently failing with INSUFFICIENT_ASN_DIVERSITY (all candidates
+// filtered out) until this fix.
 func insertActiveProviderWithASN(t *testing.T, db *sql.DB, asn string) uuid.UUID {
 	t.Helper()
 	pub, _, err := ed25519.GenerateKey(nil)
@@ -66,8 +76,8 @@ func insertActiveProviderWithASN(t *testing.T, db *sql.DB, asn string) uuid.UUID
 	var id uuid.UUID
 	err = db.QueryRow(`
 		INSERT INTO providers (phone_number, ed25519_public_key, declared_storage_gb, city, region, asn,
-		                        status, razorpay_cooling_until, last_known_multiaddrs)
-		VALUES ($1, $2, 100, 'Mumbai', 'Mumbai', $3, 'ACTIVE', NOW() - interval '1 day',
+		                        status, razorpay_linked_account_id, razorpay_cooling_until, last_known_multiaddrs)
+		VALUES ($1, $2, 100, 'Mumbai', 'Mumbai', $3, 'ACTIVE', 'acc_test0000000000', NOW() - interval '1 day',
 		        '["/ip4/198.51.100.1/udp/4001/quic-v1/p2p/testupload"]'::jsonb)
 		RETURNING provider_id`,
 		randPhoneForOwner(), []byte(pub), asn,
@@ -658,5 +668,135 @@ func TestUploadAssignRejectsASNDiversityProd(t *testing.T) {
 	got := int(math.Floor(float64(config.ProductionProfile.TotalShards) * config.ProductionProfile.ASNCapFraction))
 	if got != wantCap {
 		t.Fatalf("floor(TotalShards * ASNCapFraction) = %d, want %d (3 ASNs at this cap would allow at most 33 of the 56 required shards)", got, wantCap)
+	}
+}
+
+// ── M11 audit remediation, Finding 2 (redesigned against ADR-072/073) ──────
+
+// TestAssignSegmentRollsBackOnPartialFailure exercises assignSegment
+// directly (not through HandleAssign) so it can force ErrNoEligibleReplacement
+// partway through the shard loop — 2 distinct ASNs at cap-per-ASN=1 can place
+// only 2 of DemoProfile's 5 shards — and then check, via a separate
+// connection, that the segment left behind by the failed call has ZERO
+// chunk_assignments rows, not the 2 that placed before the pool ran out.
+// Before assignSegment wrapped its writes in a transaction, those 2 would
+// have stayed committed individually, leaving a permanently under-replicated
+// segment that HandleAssign's idempotency check (now segment-complete-aware,
+// see its own comment) would otherwise be able to observe and never retry.
+func TestAssignSegmentRollsBackOnPartialFailure(t *testing.T) {
+	db := openTestDB(t)
+	verify := openVerifyDB(t)
+	exclude := otherActiveProviderIDs(t, db, "AS100", "AS200")
+	insertActiveProviderWithASN(t, db, "AS100")
+	insertActiveProviderWithASN(t, db, "AS200")
+
+	ownerID := insertTestOwnerWithEscrow(t, db, 0)
+	fileID := uuid.New()
+	insertPlaceholderFile(t, db, fileID, ownerID, 1024)
+
+	_, msPriv, _ := ed25519.GenerateKey(nil)
+	h := NewUploadAssignHandler(db, config.DemoProfile, msPriv, nil)
+	chunkIDs := make([][32]byte, config.DemoProfile.TotalShards)
+	for i := range chunkIDs {
+		chunkIDs[i] = randChunkID(t)
+	}
+
+	_, err := h.assignSegment(context.Background(), fileID, 0, chunkIDs, exclude)
+	if !errors.Is(err, repair.ErrNoEligibleReplacement) {
+		t.Fatalf("assignSegment err = %v, want repair.ErrNoEligibleReplacement (2 ASNs x cap 1 = 2 max, needed %d)", err, config.DemoProfile.TotalShards)
+	}
+
+	var segmentCount, shardCount int
+	if err := verify.QueryRow(`SELECT COUNT(*) FROM segments WHERE file_id = $1`, fileID).Scan(&segmentCount); err != nil {
+		t.Fatalf("count segments: %v", err)
+	}
+	if err := verify.QueryRow(`
+		SELECT COUNT(*) FROM chunk_assignments ca JOIN segments s ON s.segment_id = ca.segment_id
+		WHERE s.file_id = $1`, fileID).Scan(&shardCount); err != nil {
+		t.Fatalf("count chunk_assignments: %v", err)
+	}
+	if segmentCount != 0 || shardCount != 0 {
+		t.Fatalf("after rollback: segments = %d, chunk_assignments = %d, want 0 and 0 (partial write leaked past the failed transaction)", segmentCount, shardCount)
+	}
+}
+
+// TestUploadAssignCreatePlaceholderFileSurvivesRetry confirms
+// createPlaceholderFile's ON CONFLICT DO NOTHING lets a second call with the
+// same (file_id, owner_id) succeed instead of hitting files_pkey — the
+// retry path a client takes after an earlier call got past this insert but
+// failed a later check in the same request (e.g. Check 2.5, provider
+// capacity) before any segment was written.
+func TestUploadAssignCreatePlaceholderFileSurvivesRetry(t *testing.T) {
+	db := openTestDB(t)
+	ownerID := insertTestOwnerWithEscrow(t, db, 0)
+	fileID := uuid.New()
+
+	_, msPriv, _ := ed25519.GenerateKey(nil)
+	h := NewUploadAssignHandler(db, config.DemoProfile, msPriv, nil)
+
+	if err := h.createPlaceholderFile(context.Background(), fileID, ownerID, 1024); err != nil {
+		t.Fatalf("first createPlaceholderFile: %v", err)
+	}
+	if err := h.createPlaceholderFile(context.Background(), fileID, ownerID, 1024); err != nil {
+		t.Fatalf("retry createPlaceholderFile (same file_id) should be a no-op, not an error: %v", err)
+	}
+
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM files WHERE file_id = $1`, fileID).Scan(&count); err != nil {
+		t.Fatalf("count files: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("files rows for file_id = %d, want exactly 1", count)
+	}
+}
+
+// TestUploadAssignRejectsMismatchedOwnerOnExistingFile is the regression
+// test for the cross-owner authorization gap found while fixing Finding 2:
+// req.FileID is entirely client-chosen (ADR-073), and before HandleAssign's
+// new ownership check, a second owner submitting the SAME file_id as an
+// existing one — whether that file already has assigned segments or is
+// still an empty placeholder from a first owner's failed attempt — would
+// fall through the idempotency path onto the FIRST owner's file, either
+// reading back their live capability tokens or writing new segments onto a
+// files row it does not own.
+func TestUploadAssignRejectsMismatchedOwnerOnExistingFile(t *testing.T) {
+	db := openTestDB(t)
+	seedReadyDemoProviderPool(t, db)
+	ownerA := insertTestOwnerWithEscrow(t, db, 100_000_00)
+	ownerB := insertTestOwnerWithEscrow(t, db, 100_000_00)
+	evaluator := newReadyEvaluator(t, db, config.DemoProfile)
+
+	_, msPriv, _ := ed25519.GenerateKey(nil)
+	h := NewUploadAssignHandler(db, config.DemoProfile, msPriv, evaluator)
+	fileID := uuid.New()
+	reqBody := uploadAssignRequestBody{
+		FileID: fileID, NumSegments: 1, OriginalSizeBytes: 1024,
+		Segments: []segmentChunkIDsRequestBody{fakeSegmentChunkIDs(t, 0, config.DemoProfile.TotalShards)},
+	}
+	body, _ := json.Marshal(reqBody)
+
+	// Owner A creates and fully assigns fileID.
+	rA := withClaims(httptest.NewRequest(http.MethodPost, "/api/v1/upload/assign", bytes.NewReader(body)),
+		VerifiedClaims{Subject: ownerA, Role: "owner"})
+	wA := httptest.NewRecorder()
+	h.HandleAssign(wA, rA)
+	if wA.Code != http.StatusOK {
+		t.Fatalf("owner A call: status = %d, body = %s", wA.Code, wA.Body.String())
+	}
+
+	// Owner B submits the identical file_id.
+	rB := withClaims(httptest.NewRequest(http.MethodPost, "/api/v1/upload/assign", bytes.NewReader(body)),
+		VerifiedClaims{Subject: ownerB, Role: "owner"})
+	wB := httptest.NewRecorder()
+	h.HandleAssign(wB, rB)
+	if wB.Code != http.StatusForbidden {
+		t.Fatalf("owner B call: status = %d, body = %s, want 403 RESOURCE_OWNER_MISMATCH", wB.Code, wB.Body.String())
+	}
+	var errBody errorBody
+	if err := json.Unmarshal(wB.Body.Bytes(), &errBody); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if errBody.ErrorCode != ErrResourceOwnerMismatch {
+		t.Fatalf("error_code = %q, want %q", errBody.ErrorCode, ErrResourceOwnerMismatch)
 	}
 }

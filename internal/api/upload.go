@@ -261,6 +261,28 @@ func (h *UploadAssignHandler) HandleAssign(w http.ResponseWriter, r *http.Reques
 
 	monthlyCost := fileMonthlyCostPaiseForBytes(req.OriginalSizeBytes, h.profile)
 
+	// [Found during M11 Finding 2 remediation — not one of the original 9
+	// findings] req.FileID is entirely client-chosen (ADR-073) and, until
+	// now, HandleAssign never checked it against any owner. If a files row
+	// for this file_id already exists (whether or not it has any segments
+	// yet) and belongs to a different owner, the idempotency path below
+	// would treat this call as a legitimate continuation of THAT owner's
+	// upload: with existing segments present, it would fall straight
+	// through to respondWithFreshTokens and hand the caller a live
+	// capability_token for someone else's shards; with zero segments
+	// present (the placeholder-only case createPlaceholderFile's new ON
+	// CONFLICT DO NOTHING makes survivable, see that function's header),
+	// it would silently skip creating a row for the caller and instead
+	// let the caller assign additional segments onto the other owner's
+	// files row. Must run before loadExistingAssignments, which is not
+	// owner-scoped.
+	if existingOwnerID, exists, err := h.fileOwnerID(ctx, req.FileID); err != nil {
+		WriteError(w, http.StatusInternalServerError, ErrInternal, "failed to check file ownership", nil, "", nil)
+		return
+	} else if exists && !requireSubjectMatch(w, claims, existingOwnerID, "file_id") {
+		return
+	}
+
 	// Idempotency (ADR-073): a prior call may already have persisted some
 	// (not necessarily all) of this file_id's segments — skip the three
 	// gates and placeholder-file creation entirely once ANY segment exists
@@ -271,9 +293,28 @@ func (h *UploadAssignHandler) HandleAssign(w http.ResponseWriter, r *http.Reques
 		WriteError(w, http.StatusInternalServerError, ErrInternal, "failed to check existing assignment", nil, "", nil)
 		return
 	}
-	existingSegIdx := make(map[int]bool, len(existing))
+	// [M11 audit remediation, Finding 2] A segment index counts as "existing"
+	// (skip re-assigning it) only once every one of its TotalShards rows is
+	// present — not merely once any row for it exists. Before this fix, a
+	// segment left under-replicated by a prior call that failed partway
+	// through assignSegment's shard loop (e.g. ErrNoEligibleReplacement on
+	// shard 30 of 56) was indistinguishable here from a fully-assigned one:
+	// the retry this idempotency check exists to support would see "some
+	// rows" and silently skip completing it forever, and
+	// respondWithFreshTokens below would hand the client a segment with
+	// fewer than TotalShards providers with a 200 OK. assignSegment is now
+	// internally transactional (see its own header), so in steady state a
+	// segment is never actually left partial — this count is defense in
+	// depth against that invariant ever slipping, not the primary fix.
+	shardCounts := make(map[int]int, len(existing))
 	for _, row := range existing {
-		existingSegIdx[row.segmentIndex] = true
+		shardCounts[row.segmentIndex]++
+	}
+	existingSegIdx := make(map[int]bool, len(shardCounts))
+	for idx, count := range shardCounts {
+		if count >= h.profile.TotalShards {
+			existingSegIdx[idx] = true
+		}
 	}
 	var newSegIdx []int
 	for idx := range segChunkIDs {
@@ -387,18 +428,45 @@ func parseSegmentChunkIDs(segments []segmentChunkIDsRequestBody, numSegments, to
 	return out, nil
 }
 
+// fileOwnerID looks up the owner of an already-existing files row for
+// fileID. Returns exists=false (not an error) when no such row exists yet
+// — the ordinary first-call case. See the ownership check in HandleAssign
+// that calls this for why it must run before any idempotency logic.
+func (h *UploadAssignHandler) fileOwnerID(ctx context.Context, fileID uuid.UUID) (ownerID uuid.UUID, exists bool, err error) {
+	err = h.db.QueryRowContext(ctx, `SELECT owner_id FROM files WHERE file_id = $1`, fileID).Scan(&ownerID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return uuid.UUID{}, false, nil
+	}
+	if err != nil {
+		return uuid.UUID{}, false, fmt.Errorf("api: fileOwnerID: %w", err)
+	}
+	return ownerID, true, nil
+}
+
 // createPlaceholderFile inserts the files row that segments.file_id's FK
 // requires, with real original_size_bytes (known from the request, needed
 // for cost math regardless of registration state) but placeholder
 // pointer_ciphertext/nonce/tag — file.go's register handler fills in the
 // real values and uses pointer_ciphertext's emptiness as the "not yet
 // registered" signal (see that file's header for the full reasoning).
+//
+// [M11 audit remediation, Finding 2] ON CONFLICT DO NOTHING makes this
+// idempotent on retry. Without it: this call sits between Check 2 (escrow)
+// and Check 2.5 (provider capacity) in HandleAssign, both plain reads with
+// no shared transaction — so a request that creates this row and then fails
+// Check 2.5 (or crashes before any segment is written) leaves a files row
+// with zero segments. loadExistingAssignments sees no rows and reports
+// len(existing)==0, so the client's retry re-enters this same branch and
+// re-runs this exact INSERT — which, without ON CONFLICT, hits files_pkey
+// and returns a bare 500, permanently wedging that file_id (the client has
+// no way to produce a different file_id for a retry of the same upload).
 func (h *UploadAssignHandler) createPlaceholderFile(ctx context.Context, fileID, ownerID uuid.UUID, originalSizeBytes int64) error {
 	placeholderNonce := make([]byte, aesGCMNonceSize)
 	placeholderTag := make([]byte, aesGCMTagSize)
 	_, err := h.db.ExecContext(ctx, `
 		INSERT INTO files (file_id, owner_id, pointer_ciphertext, pointer_nonce, pointer_tag, original_size_bytes)
-		VALUES ($1, $2, ''::bytea, $3, $4, $5)`,
+		VALUES ($1, $2, ''::bytea, $3, $4, $5)
+		ON CONFLICT (file_id) DO NOTHING`,
 		fileID, ownerID, placeholderNonce, placeholderTag, originalSizeBytes)
 	return err
 }
@@ -420,9 +488,47 @@ func (h *UploadAssignHandler) createPlaceholderFile(ctx context.Context, fileID,
 // regenerates fresh tokens for the full accumulated assignment set via
 // respondWithFreshTokens after this function returns, so minting only
 // ever happens in that one place rather than being duplicated here too.
+//
+// [M11 audit remediation, Finding 2] The segment row and all TotalShards of
+// its chunk_assignments rows are written inside one *sql.Tx: either every
+// shard is placed or none of them are. Before this fix, a failure partway
+// through the loop below (most plausibly ErrNoEligibleReplacement — ASN
+// pool exhaustion on, say, shard 30 of 56) left the segment row and shards
+// 0-29 committed individually as each statement ran, with no shard 30-55.
+// HandleAssign's idempotency check now requires a full TotalShards count to
+// treat a segment as "existing" (see its own comment), so that under-
+// replicated segment would never be retried — respondWithFreshTokens would
+// eventually hand the client a segment with fewer providers than
+// TotalShards and a 200 OK, and the client would have no signal that
+// anything was wrong until repair/retrieval later failed against the
+// missing shards. Wrapping in a transaction here is what actually makes
+// that stronger idempotency check true rather than just aspirational: a
+// segment other callers can see now either doesn't exist yet, or exists
+// complete — there is no third state.
+//
+// This transaction's scope is deliberately just this one segment, not the
+// whole HandleAssign request: ADR-073 allows one call to carry several new
+// segments (newSegIdx in HandleAssign), and a later segment in that batch
+// running out of ASN diversity should not roll back an earlier segment in
+// the same batch that already placed cleanly — the client can still finish
+// the failed segment on a later call without redoing the ones that already
+// succeeded.
 func (h *UploadAssignHandler) assignSegment(ctx context.Context, fileID uuid.UUID, segIdx int, chunkIDs [][32]byte, excludeForCeiling []uuid.UUID) (availableASNs int, err error) {
+	tx, err := h.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("api: assignSegment: begin tx: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+				slog.Error("assignSegment: rollback failed", "error", rbErr, "file_id", fileID, "segment_index", segIdx)
+			}
+		}
+	}()
+
 	var segmentID uuid.UUID
-	if err := h.db.QueryRowContext(ctx, `INSERT INTO segments (file_id, segment_index) VALUES ($1, $2) RETURNING segment_id`,
+	if err := tx.QueryRowContext(ctx, `INSERT INTO segments (file_id, segment_index) VALUES ($1, $2) RETURNING segment_id`,
 		fileID, segIdx).Scan(&segmentID); err != nil {
 		return 0, fmt.Errorf("api: assignSegment: insert segment: %w", err)
 	}
@@ -430,9 +536,16 @@ func (h *UploadAssignHandler) assignSegment(ctx context.Context, fileID uuid.UUI
 	excludeIDs := append([]uuid.UUID{}, excludeForCeiling...)
 
 	for shardIdx := 0; shardIdx < h.profile.TotalShards; shardIdx++ {
-		providerID, err := repair.SelectReplacementProvider(ctx, h.db, h.profile, segmentID, excludeIDs)
+		providerID, err := repair.SelectReplacementProvider(ctx, tx, h.profile, segmentID, excludeIDs)
 		if err != nil {
 			if errors.Is(err, repair.ErrNoEligibleReplacement) {
+				// Diagnostic-only read for the 503 body below — deliberately
+				// against h.db, not tx: this transaction is about to be
+				// rolled back (nothing it wrote should be visible), but the
+				// ASN count it reports should reflect real, already-committed
+				// state, not this doomed transaction's own uncommitted rows
+				// (which would self-report a lower count than reality since
+				// this segment's own shards-so-far are about to vanish).
 				availableASNs, countErr := h.countDistinctActiveASNs(ctx)
 				if countErr != nil {
 					availableASNs = 0
@@ -444,7 +557,7 @@ func (h *UploadAssignHandler) assignSegment(ctx context.Context, fileID uuid.UUI
 		excludeIDs = append(excludeIDs, providerID)
 
 		chunkID := chunkIDs[shardIdx]
-		if _, err := h.db.ExecContext(ctx, `
+		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO chunk_assignments (chunk_id, is_vetting_chunk, segment_id, shard_index, provider_id)
 			VALUES ($1, FALSE, $2, $3, $4)`,
 			chunkID[:], segmentID, shardIdx, providerID,
@@ -452,6 +565,11 @@ func (h *UploadAssignHandler) assignSegment(ctx context.Context, fileID uuid.UUI
 			return 0, fmt.Errorf("api: assignSegment: insert chunk_assignment: %w", err)
 		}
 	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("api: assignSegment: commit: %w", err)
+	}
+	committed = true
 
 	return 0, nil
 }
