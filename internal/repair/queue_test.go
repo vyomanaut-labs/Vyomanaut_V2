@@ -161,6 +161,19 @@ type testProviderSpec struct {
 	status          string     // "" defaults to "ACTIVE"
 	asn             string     // "" defaults to "SIM-AS1"
 	lastHeartbeatTs *time.Time // nil -> SQL NULL
+
+	// razorpayNotLinked, when true, leaves razorpay_linked_account_id and
+	// razorpay_cooling_until at their SQL NULL defaults instead of this
+	// helper's usual pre-linked, already-cooled values.
+	//
+	// [M11 audit remediation, Finding 5] Every existing caller of this
+	// helper wants a real, assignable candidate (that's what "ACTIVE" meant
+	// before this finding), so the default (false) keeps every existing
+	// call site producing an eligible provider without changes. Set this
+	// true only to exercise the DM §8.2/§8.3 (ADR-024, FR-025) gate itself
+	// — see TestSelectReplacementProviderExcludesUnlinkedRazorpayProvider
+	// in assignment_test.go.
+	razorpayNotLinked bool
 }
 
 func insertTestProvider(t *testing.T, db *sql.DB, spec testProviderSpec) uuid.UUID {
@@ -173,13 +186,22 @@ func insertTestProvider(t *testing.T, db *sql.DB, spec testProviderSpec) uuid.UU
 	if asn == "" {
 		asn = "SIM-AS1"
 	}
+	var linkedAccountID *string
+	var coolingUntil *time.Time
+	if !spec.razorpayNotLinked {
+		acc := "acc_test0000000000"
+		cooled := time.Now().Add(-24 * time.Hour)
+		linkedAccountID = &acc
+		coolingUntil = &cooled
+	}
 	id := uuid.New()
 	_, err := db.Exec(`
 		INSERT INTO providers (
 			provider_id, phone_number, ed25519_public_key, status,
-			declared_storage_gb, city, region, asn, last_heartbeat_ts
-		) VALUES ($1,$2,$3,$4,50,'TestCity','TestRegion',$5,$6)`,
-		id, randPhone(), randPubKey(), status, asn, spec.lastHeartbeatTs,
+			declared_storage_gb, city, region, asn, last_heartbeat_ts,
+			razorpay_linked_account_id, razorpay_cooling_until
+		) VALUES ($1,$2,$3,$4,50,'TestCity','TestRegion',$5,$6,$7,$8)`,
+		id, randPhone(), randPubKey(), status, asn, spec.lastHeartbeatTs, linkedAccountID, coolingUntil,
 	)
 	if err != nil {
 		t.Fatalf("insertTestProvider: %v", err)
