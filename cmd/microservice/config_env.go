@@ -55,6 +55,15 @@ type startupConfig struct {
 	// a file-backed OTP gateway is a legitimate demo convenience and a
 	// genuine incident waiting to happen in production.
 	OtpDeliveryLogPath string
+
+	// LoadBalancerAddr is the address cluster.NewRouter's ResponsibleReplica
+	// stub reports as "the load balancer" (ARCH §18, Milestone 17 Phase
+	// 17.2.1's eventual real target). VYOMANAUT_LOAD_BALANCER_ADDR;
+	// defaults to HTTPListenAddr — see main.go step 9's own header note
+	// (M12 audit corrections, Finding 11) on why that default is still
+	// only a same-behaviour-as-before placeholder, not a real fix, until
+	// this env var is actually set against a real load balancer.
+	LoadBalancerAddr string
 }
 
 // envOr returns the value of the named environment variable, or def if unset
@@ -95,16 +104,32 @@ func loadStartupConfigFromEnv() startupConfig {
 	primaryDSN := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
 		primaryHost, primaryPort, pgUser, pgPassword, pgDatabase, pgSSLMode)
 
-	// migratorDSN: same host/database, but the vyomanaut_migrator role
+	// migratorDSN: same database, but the vyomanaut_migrator role
 	// (BYPASSRLS/superuser) — see MigratorDBDSN's own doc comment. Defaults
 	// to the migration's own dev-docker-compose convention (vyomanaut_migrator);
 	// PGMIGRATORUSER/PGMIGRATORPASSWORD let an operator override for prod,
 	// where this credential should be scoped far more narrowly than a
 	// blanket superuser.
+	//
+	// [Corrected — M12 audit corrections, Finding 6] Host/port previously
+	// came from pgHost/pgPort (the general, possibly-replica-routed
+	// values) rather than primaryHost/primaryPort the way PrimaryDBDSN
+	// above already is. regenerateProviderScoresView's DROP/CREATE
+	// MATERIALIZED VIEW is write-only DDL — categorically cannot run
+	// against a replica, exactly like PrimaryDBDSN's own consumer
+	// (payment.RunReleaseComputationLoop). Inert today only because
+	// primaryHost == pgHost by default in this codebase's current
+	// single-instance topology (see primaryDSN's own comment above); this
+	// would otherwise silently break the fail-closed startup sequence the
+	// moment a real primary/replica split is stood up (ARCH §18), unless
+	// whoever wires that up happens to also remember to override
+	// MigratorDBDSN's host explicitly.
 	migratorUser := envOr("PGMIGRATORUSER", "vyomanaut_migrator")
 	migratorPassword := envOr("PGMIGRATORPASSWORD", pgPassword)
 	migratorDSN := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
-		pgHost, pgPort, migratorUser, migratorPassword, pgDatabase, pgSSLMode)
+		primaryHost, primaryPort, migratorUser, migratorPassword, pgDatabase, pgSSLMode)
+
+	httpListenAddr := envOr("VYOMANAUT_HTTP_LISTEN_ADDR", ":8080")
 
 	return startupConfig{
 		ModeFlag: envOr("VYOMANAUT_MODE_FLAG", ""), // set from the --mode CLI flag in main(), not read directly here
@@ -120,9 +145,15 @@ func loadStartupConfigFromEnv() startupConfig {
 		MicroserviceSigningSeedHex: os.Getenv("VYOMANAUT_MICROSERVICE_SIGNING_SEED"),
 		JWTKeyID:                   os.Getenv("VYOMANAUT_JWT_KEY_ID"),
 
-		HTTPListenAddr: envOr("VYOMANAUT_HTTP_LISTEN_ADDR", ":8080"),
+		HTTPListenAddr: httpListenAddr,
 		P2PListenAddr:  os.Getenv("VYOMANAUT_P2P_LISTEN_ADDR"), // empty = outbound-only (HostConfig doc comment)
 
 		OtpDeliveryLogPath: os.Getenv("VYOMANAUT_OTP_DELIVERY_LOG"), // empty = NoopOtpSender (unchanged default)
+
+		// LoadBalancerAddr: see this field's own doc comment (M12 audit
+		// corrections, Finding 11) — defaults to this replica's own
+		// HTTPListenAddr, preserving today's exact behaviour, until an
+		// operator sets this against a real load balancer.
+		LoadBalancerAddr: envOr("VYOMANAUT_LOAD_BALANCER_ADDR", httpListenAddr),
 	}
 }
