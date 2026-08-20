@@ -41,6 +41,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/audit"
@@ -126,17 +127,43 @@ type ReadinessResponse struct {
 }
 
 // ReadinessEvaluator evaluates all seven readiness conditions (ADR-029,
-// FR-053, FR-054). All seven are evaluated on every call — the 60-second
-// caching cadence IC §3.4/FR-054 describes is a background-goroutine
-// concern (Milestone 12, Session 12.1.1), not this evaluator's own; the
-// HTTP handler here reads whatever the caller (Milestone 12) has it call
-// on that cadence.
+// FR-053, FR-054).
+//
+// [Corrected — M12 audit corrections, Finding 3] Evaluate itself still
+// computes all seven conditions fresh on every call — that part of this
+// struct's original design was always correct. What changed: this file's
+// ORIGINAL comment here said the 60-second caching cadence IC §3.4/FR-054
+// requires was "a background-goroutine concern (Milestone 12, Session
+// 12.1.1)... the HTTP handler here reads whatever the caller (Milestone 12)
+// has it call on that cadence" — but that cache was never actually built.
+// Both this file's own HandleReadiness and internal/api/upload.go's
+// UploadAssignHandler called Evaluate live, synchronously, on every single
+// request instead — including the busiest write path in the system
+// (upload/assign), running 5+ DB queries, a gossip-membership call, and a
+// secrets-cache check on every one, every time, instead of once a minute.
+//
+// RefreshCache/Cached below (an atomic-pointer-backed cache) are the
+// missing piece: HandleReadiness and UploadAssignHandler now read from
+// Cached() instead of calling Evaluate directly. See RefreshCache's own doc
+// comment for the refresh-loop wiring
+// (cmd/microservice/background_loops.go's startReadinessMonitorLoop) and
+// Cached's own doc comment for the cold-start fallback that keeps
+// correctness intact before the very first refresh ever runs.
 type ReadinessEvaluator struct {
 	db                 *sql.DB
 	profile            config.NetworkProfile
 	clusterSecretCache *audit.ClusterSecretCache
 	clusterMembership  ClusterMembership
 	relayNodeCounter   RelayNodeCounter
+
+	// cached holds the last RefreshCache result. nil until the first
+	// refresh ever completes (see Cached's own doc comment for how callers
+	// must handle that window). A pointer, not a value, so Store/Load are
+	// single, atomic pointer-swap operations — no partial-struct read is
+	// ever possible, and no mutex is needed for what is otherwise a
+	// single-writer (the refresh loop), many-reader (every HTTP request)
+	// access pattern.
+	cached atomic.Pointer[ReadinessResponse]
 }
 
 // NewReadinessEvaluator constructs a ReadinessEvaluator. clusterMembership
@@ -226,6 +253,53 @@ func (e *ReadinessEvaluator) Evaluate(ctx context.Context) (ReadinessResponse, e
 		Conditions:                conditions,
 		ProvidersNearCeilingCount: nearCeilingCount,
 	}, nil
+}
+
+// RefreshCache runs a full Evaluate and atomically stores the result for
+// Cached to serve, then returns it. This is the "background goroutine on a
+// 60-second cadence" IC §3.4 requires — see cmd/microservice/
+// background_loops.go's startReadinessMonitorLoop, the only intended
+// caller. Every field is recomputed fresh on every call, including
+// evaluateRazorpayAccountsReady's own live query (ADR-029: "MUST NOT cache
+// this value between evaluations — it must re-query each 60-second
+// cycle") — RefreshCache satisfies that requirement exactly, since it is
+// the thing that runs once per 60-second cycle; nothing about caching the
+// overall RESPONSE between refreshes touches that sub-condition's own
+// re-query-every-cycle rule.
+//
+// Returns Evaluate's error unchanged, WITHOUT updating cached — a failed
+// refresh leaves the previous (still-valid-ish) cached value in place
+// rather than clobbering it with nothing, so a single transient DB hiccup
+// during one 60-second tick doesn't turn into total readiness-check
+// unavailability for every request until the next successful tick.
+func (e *ReadinessEvaluator) RefreshCache(ctx context.Context) (ReadinessResponse, error) {
+	resp, err := e.Evaluate(ctx)
+	if err != nil {
+		return ReadinessResponse{}, err
+	}
+	e.cached.Store(&resp)
+	return resp, nil
+}
+
+// Cached returns the most recent RefreshCache result. ok is false only
+// during the brief startup window before the very first refresh has ever
+// completed (cmd/microservice/background_loops.go's
+// startReadinessMonitorLoop runs one immediately, before entering its
+// ticker loop, specifically to keep this window as short as possible — see
+// that function's own doc comment).
+//
+// Callers (HandleReadiness, UploadAssignHandler) MUST treat ok == false as
+// "fall back to a live Evaluate call for this one request" rather than
+// either failing the request outright or — worse — silently proceeding as
+// if the system were ready with no evaluation having ever actually run.
+// This is a startup-only fallback, not a routine code path: once the first
+// refresh completes, ok is true for the remaining lifetime of the process.
+func (e *ReadinessEvaluator) Cached() (ReadinessResponse, bool) {
+	p := e.cached.Load()
+	if p == nil {
+		return ReadinessResponse{}, false
+	}
+	return *p, true
 }
 
 func (e *ReadinessEvaluator) evaluateActiveVettedProviders(ctx context.Context) (ReadinessCondition, error) {
@@ -360,11 +434,25 @@ func (e *ReadinessEvaluator) evaluateClusterAuditSecretLoaded() ReadinessConditi
 }
 
 // HandleReadiness serves GET /api/v1/admin/readiness.
+//
+// [Corrected — M12 audit corrections, Finding 3] Now reads Cached() —
+// IC §3.4's 60-second re-evaluation cadence — instead of calling Evaluate
+// live on every request. See Cached's own doc comment for the cold-start
+// fallback below.
 func (e *ReadinessEvaluator) HandleReadiness(w http.ResponseWriter, r *http.Request) {
-	resp, err := e.Evaluate(r.Context())
-	if err != nil {
-		WriteError(w, http.StatusInternalServerError, ErrInternal, "readiness evaluation failed", nil, "", nil)
-		return
+	resp, ok := e.Cached()
+	if !ok {
+		// Cold start only (see Cached's doc comment) — no refresh has
+		// completed yet. A live Evaluate here, rather than either failing
+		// the request or serving an empty/zero-value response, is the only
+		// choice that stays correct without waiting on the very first
+		// background refresh.
+		var err error
+		resp, err = e.Evaluate(r.Context())
+		if err != nil {
+			WriteError(w, http.StatusInternalServerError, ErrInternal, "readiness evaluation failed", nil, "", nil)
+			return
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
