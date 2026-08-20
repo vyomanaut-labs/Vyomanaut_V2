@@ -358,3 +358,36 @@ func TestReadinessMatchesOASDemoReadyExample(t *testing.T) {
 func intPtrForTest(v int) *int {
 	return &v
 }
+
+// TestReadinessDemoValueIgnoresModeString is the audit's Finding 7 (CR-01)
+// regression test for readiness.go's side of the fix, mirroring
+// provider_test.go's TestProviderRegisterIgnoresModeStringForASNRules and
+// internal/config/guards_test.go's TestGuardRailsIgnoreModeString: proves
+// demoValue keys off profile.IsDemoMode, not the profile.Mode string.
+func TestReadinessDemoValueIgnoresModeString(t *testing.T) {
+	db := openTestDB(t)
+
+	t.Run("IsDemoMode=true returns a value even when Mode != \"demo\"", func(t *testing.T) {
+		profile := config.DemoProfile
+		profile.Mode = "staging" // synthetic: neither "demo" nor "prod"
+		profile.IsDemoMode = true
+		e := NewReadinessEvaluator(db, profile, nil, MockClusterMembership{}, StubRelayNodeCounter{})
+
+		got := e.demoValue(5)
+		if got == nil || *got != 5 {
+			t.Errorf("demoValue(5) = %v, want a pointer to 5 (IsDemoMode=true, Mode=%q)", got, profile.Mode)
+		}
+	})
+
+	t.Run("IsDemoMode=false returns nil even when Mode != \"prod\"", func(t *testing.T) {
+		profile := config.ProductionProfile
+		profile.Mode = "staging" // synthetic: neither "demo" nor "prod"
+		profile.IsDemoMode = false
+		e := NewReadinessEvaluator(db, profile, nil, MockClusterMembership{}, StubRelayNodeCounter{})
+
+		got := e.demoValue(5)
+		if got != nil {
+			t.Errorf("demoValue(5) = %v, want nil (IsDemoMode=false, Mode=%q)", got, profile.Mode)
+		}
+	})
+}

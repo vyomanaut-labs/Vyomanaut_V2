@@ -158,11 +158,14 @@ func NewReadinessEvaluator(
 	}
 }
 
-// demoValue returns a pointer to requiredValue when profile.Mode == "demo",
-// and nil otherwise (OAS ReadinessCondition.demo_value: "Null when the
+// demoValue returns a pointer to requiredValue when profile.IsDemoMode is
+// true, and nil otherwise (OAS ReadinessCondition.demo_value: "Null when the
 // system is running in production mode").
+//
+// [M11 audit remediation, Finding 7 (CR-01)] Was profile.Mode != "demo" —
+// see config.NetworkProfile.IsDemoMode's doc comment for why.
 func (e *ReadinessEvaluator) demoValue(requiredValue int) *int {
-	if e.profile.Mode != "demo" {
+	if !e.profile.IsDemoMode {
 		return nil
 	}
 	v := requiredValue
