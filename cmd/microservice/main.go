@@ -21,6 +21,7 @@ import (
 	"database/sql"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -60,6 +61,14 @@ type app struct {
 	httpServer    *http.Server
 	p2pHost       p2p.Host
 	cancel        context.CancelFunc
+
+	// otpSenderCloser is non-nil only when cfg.OtpDeliveryLogPath is set
+	// (M17-E Session 17.4.2, ADR-084 D-3) — api.NoopOtpSender needs no
+	// cleanup. io.Closer, not *api.FileOtpSender directly: this file
+	// already imports internal/api for other reasons, but keeping the
+	// field typed as the minimal interface it actually calls means
+	// shutdown() below doesn't need to know FileOtpSender's own shape.
+	otpSenderCloser io.Closer
 }
 
 // shutdown tears down every resource runMicroservice started, in reverse
@@ -73,6 +82,11 @@ func (a *app) shutdown() {
 		defer cancel()
 		if err := a.httpServer.Shutdown(shutdownCtx); err != nil {
 			log.Printf("[SHUTDOWN] http server: %v", err)
+		}
+	}
+	if a.otpSenderCloser != nil {
+		if err := a.otpSenderCloser.Close(); err != nil {
+			log.Printf("[SHUTDOWN] otp delivery log: %v", err)
 		}
 	}
 	if a.p2pHost != nil {
@@ -99,6 +113,7 @@ func (a *app) shutdown() {
 
 func main() {
 	modeFlag := flag.String("mode", "", "network profile: demo or prod (overrides VYOMANAUT_MODE)")
+	otpDeliveryLogFlag := flag.String("otp-delivery-log", "", "Path to a demo-mode OTP delivery log (overrides VYOMANAUT_OTP_DELIVERY_LOG). Empty = NoopOtpSender, no file. Demo mode only — ADR-084 D-3; fatal to set outside demo mode.")
 	flag.Parse()
 
 	cfg := loadStartupConfigFromEnv()
@@ -106,6 +121,9 @@ func main() {
 		cfg.ModeFlag = *modeFlag
 	} else {
 		cfg.ModeFlag = os.Getenv("VYOMANAUT_MODE")
+	}
+	if *otpDeliveryLogFlag != "" {
+		cfg.OtpDeliveryLogPath = *otpDeliveryLogFlag
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -213,6 +231,19 @@ func runMicroservice(ctx context.Context, cfg startupConfig) (*app, error) {
 		return nil, fmt.Errorf("runMicroservice: startup guards: %w", err)
 	}
 
+	// ── OTP delivery log guard (added post-hoc, M17-E Session 17.4.2,
+	// ADR-084 D-3 — same "added post-hoc" convention Steps 19-22 below
+	// already use for additions outside the original 18-step sequence).
+	// A file-backed OTP gateway is a legitimate demo-mode convenience (see
+	// api.FileOtpSender's own doc comment) and a genuine incident waiting
+	// to happen in production — refuse to start rather than let it
+	// through silently, the same fail-closed posture Step 3 already holds
+	// the cluster secret to (IC §8).
+	if cfg.OtpDeliveryLogPath != "" && profile.Mode != "demo" {
+		cancel()
+		return nil, fmt.Errorf("runMicroservice: --otp-delivery-log / VYOMANAUT_OTP_DELIVERY_LOG is demo-mode only (profile.Mode = %q, ADR-084 D-3)", profile.Mode)
+	}
+
 	// ── Step 3 ────────────────────────────────────────────────────────────
 	secretsClient, err := newSecretsClientForProfile(profile.RequireSecretsManager)
 	if err != nil {
@@ -304,6 +335,26 @@ func runMicroservice(ctx context.Context, cfg startupConfig) (*app, error) {
 
 	paymentProviderForRouter := buildPaymentProvider(db, profile)
 
+	// ── OTP sender (added post-hoc, M17-E Session 17.4.2, ADR-084 D-3) ──
+	// FileOtpSender is a REAL OtpSender implementation — not a mock — that
+	// gives a person volunteering as a provider (requirement 2,
+	// cmd/provider's `onboard` subcommand) something the network operator
+	// can actually read a code from, without the microservice ever
+	// exposing an OTP-bypass endpoint and without otp_codes.code_hash
+	// becoming anything but a hash. Empty path preserves this daemon's
+	// exact original behavior: NoopOtpSender, no file, no SMS integration.
+	var otpSender api.OtpSender = api.NoopOtpSender{}
+	if cfg.OtpDeliveryLogPath != "" {
+		fileSender, err := api.NewFileOtpSender(cfg.OtpDeliveryLogPath)
+		if err != nil {
+			a.shutdown()
+			return nil, fmt.Errorf("runMicroservice: open OTP delivery log: %w", err)
+		}
+		a.otpSenderCloser = fileSender
+		otpSender = fileSender
+		log.Printf("[STARTUP] OTP delivery log: %s (demo mode only — ADR-084 D-3)", cfg.OtpDeliveryLogPath)
+	}
+
 	// ── Step 8 ────────────────────────────────────────────────────────────
 	router := api.NewRouter(api.RouterConfig{
 		AdminAPIKey:        adminAPIKey,
@@ -311,7 +362,7 @@ func runMicroservice(ctx context.Context, cfg startupConfig) (*app, error) {
 		JWTPublicKey:       jwtPub,
 		JWTPrivateKey:      jwtPriv,
 		JWTKeyID:           jwtKeyID,
-		OtpSender:          api.NoopOtpSender{}, // real SMS delivery is not in scope for this session
+		OtpSender:          otpSender,
 		Readiness:          readinessEvaluator,
 		Profile:            profile,
 		PaymentProvider:    paymentProviderForRouter,
