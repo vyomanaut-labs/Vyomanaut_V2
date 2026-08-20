@@ -28,21 +28,52 @@ import (
 
 func seedPendingProviderRegistration(t *testing.T, db *sql.DB, subject uuid.UUID, phone string) {
 	t.Helper()
-	_, err := db.Exec(`INSERT INTO pending_registrations (subject, phone_number, expires_at) VALUES ($1, $2, NOW() + interval '1 hour')`,
-		subject, phone)
+	seedPendingRegistrationWithPurpose(t, db, subject, phone, "PROVIDER_REGISTER")
+}
+
+// seedPendingRegistrationWithPurpose lets a test control the stored purpose
+// directly, for M11 audit remediation Finding 4's purpose-gate regression
+// tests (see TestProviderRegisterRejectsWrongPurposeToken below).
+func seedPendingRegistrationWithPurpose(t *testing.T, db *sql.DB, subject uuid.UUID, phone, purpose string) {
+	t.Helper()
+	_, err := db.Exec(`INSERT INTO pending_registrations (subject, phone_number, purpose, expires_at) VALUES ($1, $2, $3, NOW() + interval '1 hour')`,
+		subject, phone, purpose)
 	if err != nil {
 		t.Fatalf("seed pending_registrations: %v", err)
 	}
 }
 
+// insertTestProviderDirect seeds a provider with a linked, already-cooled
+// Razorpay account by default, so it is a valid candidate everywhere
+// repair.SelectReplacementProvider is consulted — including, since
+// ADR-072/073, internal/api's own upload.assignSegment (initial assignment
+// now shares the same candidate-selection code path as repair replacement).
+//
+// [M11 audit remediation, Finding 5 — extended] The original remediation
+// only updated internal/repair's own test fixture helper
+// (insertTestProvider in queue_test.go) for this. At that time,
+// assignSegment did not yet call repair.SelectReplacementProvider — that
+// call site was introduced later, by the ADR-072/073 rewrite of upload.go's
+// assignment flow. Once Finding 5's DM §8.2/§8.3 (ADR-024, FR-025) gate
+// went into SelectReplacementProvider, every internal/api test that assigns
+// real shards through a provider created by this helper started failing
+// with INSUFFICIENT_ASN_DIVERSITY, because none of them had a linked
+// account. Mirrors the linked/cooled defaults in
+// internal/repair/queue_test.go's insertTestProvider so both packages'
+// fixtures satisfy the same gate the same way.
 func insertTestProviderDirect(t *testing.T, db *sql.DB, pub ed25519.PublicKey, status string) uuid.UUID {
 	t.Helper()
 	var id uuid.UUID
+	linkedAccountID := "acc_test0000000000"
+	coolingUntil := time.Now().Add(-24 * time.Hour)
 	err := db.QueryRow(`
-		INSERT INTO providers (phone_number, ed25519_public_key, declared_storage_gb, city, region, asn, status)
-		VALUES ($1, $2, 100, 'Mumbai', 'Mumbai', 'AS12345', $3)
+		INSERT INTO providers (
+			phone_number, ed25519_public_key, declared_storage_gb, city, region, asn, status,
+			razorpay_linked_account_id, razorpay_cooling_until
+		)
+		VALUES ($1, $2, 100, 'Mumbai', 'Mumbai', 'AS12345', $3, $4, $5)
 		RETURNING provider_id`,
-		randPhoneForOwner(), []byte(pub), status,
+		randPhoneForOwner(), []byte(pub), status, linkedAccountID, coolingUntil,
 	).Scan(&id)
 	if err != nil {
 		t.Fatalf("insert test provider: %v", err)
@@ -263,6 +294,61 @@ func TestProviderRegisterReturnsPendingOnboarding(t *testing.T) {
 	}
 	if resp.Token == "" {
 		t.Fatal("expected a non-empty token")
+	}
+}
+
+// TestProviderRegisterRejectsWrongPurposeToken is provider.go's side of the
+// audit's Finding 4 regression test — see owner_test.go's
+// TestOwnerRegisterRejectsWrongPurposeToken for the full end-to-end (real
+// OTP send/verify) version of this same gate. This one seeds the
+// pending_registrations row directly with an OWNER_REGISTER purpose (wrong
+// role entirely, not just the wrong OTP purpose) and confirms
+// provider.go's register handler rejects it just as owner.go's does.
+func TestProviderRegisterRejectsWrongPurposeToken(t *testing.T) {
+	db := openTestDB(t)
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	phone := randPhoneForOwner()
+	subject := RegistrationSubjectForPhone(phone)
+	seedPendingRegistrationWithPurpose(t, db, subject, phone, "OWNER_REGISTER")
+
+	asn := "AS12345"
+	req := providerRegisterRequestBody{
+		Ed25519PublicKey:  hex.EncodeToString(pub),
+		DeclaredStorageGB: 100,
+		City:              "Mumbai",
+		Region:            "Mumbai",
+		ASN:               &asn,
+		InitialMultiaddrs: []string{"/ip4/203.0.113.1/udp/4001/quic-v1/p2p/12D3KooWtest2"},
+	}
+	req = signRegisterRequest(t, priv, req)
+	body, _ := json.Marshal(req)
+
+	r := withClaims(httptest.NewRequest(http.MethodPost, "/api/v1/provider/register", bytes.NewReader(body)),
+		VerifiedClaims{Subject: subject, Role: ""})
+	w := httptest.NewRecorder()
+
+	_, msPriv, _ := ed25519.GenerateKey(nil)
+	h := NewProviderRegisterHandler(db, msPriv, config.ProductionProfile)
+	h.HandleRegister(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, body = %s, want 403 (OWNER_REGISTER-purpose token must not redeem for provider registration)",
+			w.Code, w.Body.String())
+	}
+	errBody := decodeJSON[map[string]any](t, w.Body.Bytes())
+	if errBody["error_code"] != string(ErrWrongRole) {
+		t.Errorf("error_code = %v, want %q", errBody["error_code"], ErrWrongRole)
+	}
+
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM providers WHERE phone_number = $1`, phone).Scan(&count); err != nil {
+		t.Fatalf("count providers: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("providers row count = %d, want 0 (registration must have been rejected before insert)", count)
 	}
 }
 
@@ -716,6 +802,13 @@ func TestProviderStatusNetworkModeReflectsProfile(t *testing.T) {
 	}
 }
 
+// TestProviderStatusRejectsMismatchedProvider also serves as the audit's
+// Finding 9 regression test for provider.go's side of the fix — see
+// owner_test.go's TestOwnerBalanceRejectsSubjectMismatchWithResourceOwnerMismatch
+// for the full reasoning. Previously asserted only the 403 status; now also
+// asserts error_code, since that's the actual thing Finding 9 was about —
+// a client can't distinguish "wrong resource" from "bad JWT" on status
+// code alone.
 func TestProviderStatusRejectsMismatchedProvider(t *testing.T) {
 	db := openTestDB(t)
 	pub, _, _ := ed25519.GenerateKey(nil)
@@ -731,6 +824,11 @@ func TestProviderStatusRejectsMismatchedProvider(t *testing.T) {
 	h.HandleStatus(w, r)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403, body = %s", w.Code, w.Body.String())
+	}
+	body := decodeJSON[map[string]any](t, w.Body.Bytes())
+	if body["error_code"] != string(ErrResourceOwnerMismatch) {
+		t.Errorf("error_code = %v, want %q (not %q — a same-identity re-auth would never fix a resource-ownership mismatch)",
+			body["error_code"], ErrResourceOwnerMismatch, ErrUnauthorized)
 	}
 }
 
@@ -1018,6 +1116,104 @@ func TestProviderDepartQueuesRepairForAllRealChunks(t *testing.T) {
 	}
 }
 
+// TestComputeProratedRelease is the audit's Finding 6 regression test:
+// computeProratedRelease must use pure integer basis-point arithmetic, with
+// no precision loss or overflow that float64(elapsed)/float64(total) (the
+// original bug) or a naive nanosecond-scale port of
+// internal/payment/release.go's basis-point idiom (the overflow this fix
+// specifically avoids — see computeProratedRelease's own doc comment) would
+// both get wrong. Tested directly against hand-picked durations rather than
+// through the full HandleDepart HTTP path specifically so these can be
+// exact assertions instead of a tolerance band: a real departure's elapsed
+// time is wall-clock-derived and can only ever be asserted approximately
+// (see TestProviderDepartReleasesProratedEscrow's ±10% band below), but
+// computeProratedRelease's arithmetic itself has no such excuse.
+func TestComputeProratedRelease(t *testing.T) {
+	const day = 24 * time.Hour
+
+	tests := []struct {
+		name    string
+		balance int64
+		elapsed time.Duration
+		total   time.Duration
+		want    int64
+	}{
+		{
+			name: "fully elapsed at a huge balance — the overflow case",
+			// ~₹10,000 crore in paise. The audit's own suggested fix
+			// (elapsed.Nanoseconds()*10000 computed directly) silently
+			// wraps int64 for a fully-elapsed 30-day period regardless of
+			// balance — this specific balance additionally confirms the
+			// final balance*elapsedBP multiplication has headroom too.
+			balance: 1_000_000_000_000_00,
+			elapsed: 30 * day,
+			total:   30 * day,
+			want:    1_000_000_000_000_00,
+		},
+		{
+			name:    "half elapsed",
+			balance: 100_000,
+			elapsed: 15 * day,
+			total:   30 * day,
+			want:    50_000,
+		},
+		{
+			name:    "zero elapsed",
+			balance: 100_000,
+			elapsed: 0,
+			total:   30 * day,
+			want:    0,
+		},
+		{
+			name:    "elapsed clamped to total when it overruns",
+			balance: 100_000,
+			elapsed: 45 * day,
+			total:   30 * day,
+			want:    100_000,
+		},
+		{
+			name:    "negative elapsed clamped to zero",
+			balance: 100_000,
+			elapsed: -1 * day,
+			total:   30 * day,
+			want:    0,
+		},
+		{
+			name:    "non-positive total returns zero, not a panic",
+			balance: 100_000,
+			elapsed: 15 * day,
+			total:   0,
+			want:    0,
+		},
+		{
+			// 1/3 isn't exactly representable in basis points: floor
+			// division gives elapsedBP = 3333 (not 3333.33...), so the
+			// release truncates by up to 1 basis point (~0.01%) from the
+			// mathematically exact value. This is an inherent, accepted
+			// property of integer basis-point arithmetic (the same
+			// truncation internal/payment/release.go's own established
+			// multiplierBP idiom has) — not a bug this fix introduces, and
+			// exactly why float division must not be used to sidestep it
+			// (an inexact float result would be equally "wrong" by a
+			// different, less predictable amount).
+			name:    "one third elapsed, exercises basis-point rounding",
+			balance: 300_000,
+			elapsed: 10 * day,
+			total:   30 * day,
+			want:    99_990,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := computeProratedRelease(tc.balance, tc.elapsed, tc.total)
+			if got != tc.want {
+				t.Errorf("computeProratedRelease(%d, %v, %v) = %d, want %d", tc.balance, tc.elapsed, tc.total, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestProviderDepartReleasesProratedEscrow(t *testing.T) {
 	db := openTestDB(t)
 	pub, priv, _ := ed25519.GenerateKey(nil)
@@ -1216,4 +1412,54 @@ func TestProviderDepartRejectsAlreadyDeparted(t *testing.T) {
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403, body = %s", w.Code, w.Body.String())
 	}
+}
+
+// TestProviderRegisterIgnoresModeStringForASNRules is the audit's Finding 7
+// (CR-01) regression test, mirroring internal/config/guards_test.go's
+// TestGuardRailsIgnoreModeString: proves validateRegisterRequest and
+// resolveASN key off profile.IsDemoMode, not the profile.Mode string, by
+// setting Mode to a synthetic non-"demo"/"prod" value while controlling
+// IsDemoMode explicitly and confirming behavior tracks IsDemoMode.
+func TestProviderRegisterIgnoresModeStringForASNRules(t *testing.T) {
+	t.Run("IsDemoMode=true relaxes ASN validation even when Mode != \"demo\"", func(t *testing.T) {
+		profile := config.DemoProfile
+		profile.Mode = "staging" // synthetic: neither "demo" nor "prod"
+		profile.IsDemoMode = true
+
+		req := providerRegisterRequestBody{
+			Ed25519PublicKey:  "deadbeef",
+			DeclaredStorageGB: 100,
+			City:              "Mumbai",
+			Region:            "Mumbai",
+			InitialMultiaddrs: []string{"/ip4/203.0.113.1/udp/4001/quic-v1/p2p/12D3KooWtest2"},
+			// No ASN at all — validateRegisterRequest must not require one
+			// when IsDemoMode is true, regardless of what Mode says.
+		}
+		if _, _, ok := validateRegisterRequest(req, profile); !ok {
+			t.Errorf("validateRegisterRequest rejected a demo-mode request with no ASN even though IsDemoMode=true (Mode=%q)", profile.Mode)
+		}
+	})
+
+	t.Run("IsDemoMode=false enforces ASN validation even when Mode != \"prod\"", func(t *testing.T) {
+		profile := config.ProductionProfile
+		profile.Mode = "staging" // synthetic: neither "demo" nor "prod"
+		profile.IsDemoMode = false
+
+		req := providerRegisterRequestBody{
+			Ed25519PublicKey:  "deadbeef",
+			DeclaredStorageGB: 100,
+			City:              "Mumbai",
+			Region:            "Mumbai",
+			InitialMultiaddrs: []string{"/ip4/203.0.113.1/udp/4001/quic-v1/p2p/12D3KooWtest2"},
+			// No ASN — validateRegisterRequest must still require one when
+			// IsDemoMode is false, regardless of what Mode says.
+		}
+		field, _, ok := validateRegisterRequest(req, profile)
+		if ok {
+			t.Fatalf("validateRegisterRequest accepted a no-ASN request even though IsDemoMode=false (Mode=%q)", profile.Mode)
+		}
+		if field != "asn" {
+			t.Errorf("rejected field = %q, want \"asn\"", field)
+		}
+	})
 }

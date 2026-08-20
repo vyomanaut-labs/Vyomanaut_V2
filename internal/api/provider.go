@@ -85,15 +85,31 @@ type signingField struct {
 	value string // pre-encoded JSON value, e.g. `"Mumbai"` or `42` or `["a","b"]`
 }
 
-// canonicalSigningObject builds `{"key1":value1,"key2":value2,...}` from an
-// explicit, caller-ordered field list. See the file header's "signing input
+// canonicalSigningObject builds `{"key1":value1,"key2":value2,...}` from a
+// caller-supplied field list, always in alphabetical key order regardless of
+// the order fields were passed in. See the file header's "signing input
 // construction" note: this is the fixed-layout replacement for
 // encoding/json.Marshal(map[string]any{...}), which this package (per
 // internal/crypto's SIGNING_INPUT_RULE) must not use for signing inputs.
+//
+// [M11 audit remediation, Finding 1 — structural fix] Sorting was
+// previously left entirely to the caller ("Order is dictated entirely by
+// the caller's slice order"), which let two call sites silently violate
+// IC §3.1's sorted-key rule (canonicalMicroserviceSigningInput,
+// canonicalFileRegisterSigningInput's display-name branch). Sorting here
+// instead closes the whole bug class: a caller that already passes sorted
+// fields is unaffected, and a caller that gets the order wrong is now
+// automatically correct. Confirmed byte-identical, before and after this
+// change, for every call site that was already correct — see
+// canonical_signing_order_test.go.
 func canonicalSigningObject(fields ...signingField) []byte {
+	sorted := make([]signingField, len(fields))
+	copy(sorted, fields)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].key < sorted[j].key })
+
 	var buf bytes.Buffer
 	buf.WriteByte('{')
-	for i, f := range fields {
+	for i, f := range sorted {
 		if i > 0 {
 			buf.WriteByte(',')
 		}
@@ -270,9 +286,15 @@ func (h *ProviderRegisterHandler) HandleRegister(w http.ResponseWriter, r *http.
 		return
 	}
 
-	phoneNumber, err := RecoverPendingRegistration(ctx, h.db, claims.Subject)
+	phoneNumber, purpose, err := RecoverPendingRegistration(ctx, h.db, claims.Subject)
 	if err != nil {
 		WriteError(w, http.StatusUnauthorized, ErrUnauthorized, "registration token expired or unknown", nil, "", nil)
+		return
+	}
+	// [M11 audit remediation, Finding 4] purpose gate mirroring owner.go's
+	// register handler exactly — see that file for the full reasoning.
+	if purpose != "PROVIDER_REGISTER" {
+		WriteError(w, http.StatusForbidden, ErrWrongRole, "registration token was not issued for provider registration", nil, "", nil)
 		return
 	}
 
@@ -365,7 +387,7 @@ func validateRegisterRequest(req providerRegisterRequestBody, profile config.Net
 			return "initial_multiaddrs", fmt.Sprintf("each multiaddr must be between %d and %d characters", minMultiaddrLen, maxMultiaddrLen), false
 		}
 	}
-	if req.ASN != nil && profile.Mode != "demo" && !prodASNPattern.MatchString(*req.ASN) {
+	if req.ASN != nil && !profile.IsDemoMode && !prodASNPattern.MatchString(*req.ASN) { // [M11 audit remediation, Finding 7]
 		return "asn", `must match ^(AS\d+|SIM-AS\d+)$`, false
 	}
 	if req.DemoASN != nil && !demoASNPattern.MatchString(*req.DemoASN) {
@@ -375,7 +397,7 @@ func validateRegisterRequest(req providerRegisterRequestBody, profile config.Net
 	// NOT NULL and there is no production fallback mechanism to derive it.
 	// Treated as effectively required in production mode (demo mode always
 	// resolves an ASN via resolveASN below, regardless of this field).
-	if profile.Mode != "demo" && (req.ASN == nil || strings.TrimSpace(*req.ASN) == "") {
+	if !profile.IsDemoMode && (req.ASN == nil || strings.TrimSpace(*req.ASN) == "") { // [M11 audit remediation, Finding 7]
 		return "asn", "required in production mode", false
 	}
 	return "", "", true
@@ -389,7 +411,7 @@ func validateRegisterRequest(req providerRegisterRequestBody, profile config.Net
 // on SIM-AS1. Production mode passes req.ASN through unchanged (already
 // validated by validateRegisterRequest).
 func (h *ProviderRegisterHandler) resolveASN(ctx context.Context, req providerRegisterRequestBody) (asn, field, msg string, ok bool) {
-	if h.profile.Mode != "demo" {
+	if !h.profile.IsDemoMode { // [M11 audit remediation, Finding 7]
 		if req.ASN != nil {
 			return *req.ASN, "", "", true
 		}
@@ -488,17 +510,25 @@ func canonicalHeartbeatSigningInputAPI(multiaddrs []string, timestamp string) []
 }
 
 // canonicalMicroserviceSigningInput builds the signing input for
-// microservice_sig: {"received_at":...,"provider_id":...}. This literal
-// field order (received_at before provider_id) is written identically in
-// both the OAS description and this session's build.md task text, despite
-// both also saying "sorted keys" — true alphabetical order would put
-// provider_id first. Since this is a brand-new signature with no existing
-// counterpart implementation to match, the explicit, twice-repeated literal
-// order is followed rather than a stricter reading of "sorted."
+// microservice_sig: {"provider_id":...,"received_at":...} — alphabetical
+// key order per IC §3.1's sorted-key rule.
+//
+// [M11 audit remediation, Finding 1 — corrected] Previously built as
+// {"received_at":...,"provider_id":...}, citing the OAS HeartbeatResponse
+// description's illustrative example as justification. That example is
+// itself internally inconsistent — it shows received_at first while its own
+// adjoining text says "(sorted keys)" two words later — and, contrary to
+// this function's original comment, build.md's Session 11.6.2 entry has no
+// field-order text to corroborate it either: grepped directly, nothing in
+// build.md mentions this field pair at all. With no genuine second source
+// and IC §3.1's general rule left unrebutted, alphabetical order is
+// followed here as it is everywhere else in this file. Also now backstopped
+// by canonicalSigningObject's own internal sort (see that function's
+// comment), so a caller-order mistake like this one can't silently recur.
 func canonicalMicroserviceSigningInput(receivedAt time.Time, providerID uuid.UUID) []byte {
 	return canonicalSigningObject(
-		signingField{"received_at", jstr(receivedAt.UTC().Format(time.RFC3339))},
 		signingField{"provider_id", jstr(providerID.String())},
+		signingField{"received_at", jstr(receivedAt.UTC().Format(time.RFC3339))},
 	)
 }
 
@@ -525,8 +555,9 @@ func (h *ProviderHeartbeatHandler) HandleHeartbeat(w http.ResponseWriter, r *htt
 		WriteError(w, http.StatusBadRequest, ErrInvalidRequest, "invalid JSON body", nil, "", nil)
 		return
 	}
-	if req.ProviderID != claims.Subject {
-		WriteError(w, http.StatusForbidden, ErrUnauthorized, "provider_id does not match the JWT sub claim", nil, "", nil)
+	// [M11 audit remediation, Finding 9] Was 403 + ErrUnauthorized — see
+	// requireSubjectMatch's own doc comment (errors.go) for why.
+	if !requireSubjectMatch(w, claims, req.ProviderID, "provider_id") {
 		return
 	}
 
@@ -671,10 +702,13 @@ func (h *ProviderStatusHandler) HandleStatus(w http.ResponseWriter, r *http.Requ
 		WriteError(w, http.StatusBadRequest, ErrInvalidRequest, "provider_id must be a UUID", nil, "provider_id", nil)
 		return
 	}
-	// A provider may only view its own status — mirrors
-	// ownerBalanceHandler's identical path-vs-claims.Subject check exactly.
-	if providerID != claims.Subject {
-		WriteError(w, http.StatusForbidden, ErrUnauthorized, "provider_id does not match the JWT sub claim", nil, "", nil)
+	// A provider may only view its own status — mirrors owner.go's
+	// identical path-vs-claims.Subject check exactly (both now go through
+	// requireSubjectMatch; see errors.go).
+	//
+	// [M11 audit remediation, Finding 9] Was 403 + ErrUnauthorized — see
+	// requireSubjectMatch's own doc comment (errors.go) for why.
+	if !requireSubjectMatch(w, claims, providerID, "provider_id") {
 		return
 	}
 
@@ -1446,18 +1480,67 @@ func (h *ProviderDepartHandler) computeAnnouncedDepartureRelease(ctx context.Con
 	if err != nil {
 		return 0, nil, fmt.Errorf("api: computeAnnouncedDepartureRelease: get balance: %w", err)
 	}
-	total := periodEnd.Sub(periodStart)
+	release := computeProratedRelease(balance, time.Since(periodStart), periodEnd.Sub(periodStart))
+	return release, &auditPeriodID, nil
+}
+
+// computeProratedRelease computes the basis-point-prorated escrow release
+// for a departure: balance * (elapsed/total), clamping elapsed to [0, total]
+// first so a departure requested before a period technically starts, or
+// checked slightly after it ends, still prorates sanely. Split out from
+// computeAnnouncedDepartureRelease as a pure function so its arithmetic can
+// be tested directly against hand-picked durations and balances, without a
+// live DB or wall-clock races — see TestComputeProratedRelease for cases
+// (a fully-elapsed 30-day period at a ₹10,000-crore balance) that can only
+// be asserted exactly, not within a tolerance band, and that specifically
+// guard against the overflow this finding's fix could otherwise reintroduce
+// (see the comment below).
+//
+// [M11 audit remediation, Finding 6] Was float64(elapsed)/float64(total)
+// then float64(balance)*fraction — float arithmetic in a real ledger
+// mutation, violating the documented hard invariant ("no float arithmetic
+// in payment code"). NO_FLOAT_PAYMENT's grep scope only covers
+// internal/payment, so this went uncaught: this computation lives in
+// internal/api because Session 11.6.6 requires the caller to reach both
+// internal/repair and internal/payment, which only internal/api is
+// permitted to do (IC §9).
+//
+// internal/payment/release.go's basis-point integer idiom
+// (balancePaise * multiplierBP / basisPointsDivisor) is the established
+// safe pattern, but a naive port of it computing elapsedBP directly from
+// elapsed.Nanoseconds()*departureFractionBP overflows int64: for a
+// fully-elapsed 30-day period, elapsed.Nanoseconds() is ~2.6e15, and
+// ~2.6e15 * 10000 ~= 2.6e19 exceeds int64's ~9.22e18 ceiling and wraps
+// silently — verified this numerically before writing the fix below, since
+// it's exactly the kind of silent-corruption bug this finding is about
+// closing, not reintroducing. Using Microseconds() instead of Nanoseconds()
+// for this specific ratio keeps the same worst case
+// (elapsedMicros*departureFractionBP ~= 2.6e16) three orders of magnitude
+// below the overflow ceiling, with microsecond precision that is far finer
+// than a 30-day proration needs (the existing
+// TestProviderDepartReleasesProratedEscrow already uses a ±10% tolerance
+// band through the full HTTP handler for exactly this reason — wall-clock
+// proration can't be asserted more precisely than that regardless).
+func computeProratedRelease(balance int64, elapsed, total time.Duration) int64 {
+	const departureFractionBP = 10000
 	if total <= 0 {
-		return 0, &auditPeriodID, nil
+		return 0
 	}
-	elapsed := time.Since(periodStart)
 	if elapsed < 0 {
 		elapsed = 0
 	}
 	if elapsed > total {
 		elapsed = total
 	}
-	fraction := float64(elapsed) / float64(total)
-	release := int64(float64(balance) * fraction)
-	return release, &auditPeriodID, nil
+	totalMicros := total.Microseconds()
+	if totalMicros <= 0 {
+		// total > 0 was already confirmed above; this additionally guards
+		// a sub-microsecond (but still positive) period from a
+		// divide-by-zero below. Not a real scenario for a 30-day audit
+		// period, but this is a payment-critical path and must never panic
+		// regardless of how implausible the input.
+		return 0
+	}
+	elapsedBP := elapsed.Microseconds() * departureFractionBP / totalMicros
+	return balance * elapsedBP / departureFractionBP
 }
