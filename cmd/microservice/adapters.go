@@ -25,8 +25,27 @@
 // p2p.PeerID + dialable Multiaddrs via the providers table, Connects, and
 // only then opens the stream.
 //
-// [REF: IC §4.4.1, IC §4.1, ARCH §13, build.md Milestone 9 Session 9.2.1,
-// Milestone 12 Phase 12.1 Session 12.1.1]
+// [Corrected — M12 audit corrections, Finding 2 — DHT fallback for stale
+// provider addresses] Session 12.1.2 step 1 ("Determine provider
+// multiaddrs: providers.last_known_multiaddrs (primary); DHT fallback if
+// multiaddr_stale = true") was previously unimplemented: resolveProviderPeer
+// unconditionally read only the (possibly stale) Postgres row. It now
+// consults a DHT's FindPeer for a fresher, connect-verified address when
+// multiaddr_stale is true — see internal/p2p/dht.go's FindPeer doc comment
+// for why FindPeer (not FindProviders) is the correct primitive here: this
+// service already independently derives the target's stable PeerID from
+// providers.ed25519_public_key, so what's actually needed is "what is this
+// KNOWN peer's current address", not a content-key lookup keyed by
+// material (an owner's dht_key) this service structurally never has.
+//
+// dht may be nil (e.g. in tests, or if a future session needs to disable
+// DHT participation entirely) — resolveProviderPeer treats that exactly
+// like "the DHT fallback found nothing," falling through to the stored
+// Postgres address.
+//
+// [REF: IC §4.4.1, IC §4.1, IC §5.4, ARCH §13, build.md Milestone 9 Session
+// 9.2.1, Milestone 12 Phase 12.1 Session 12.1.1, Session 12.1.2 step 1,
+// Milestone 12 audit corrections Finding 2]
 package main
 
 import (
@@ -42,21 +61,33 @@ import (
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/repair"
 )
 
-// resolveProviderPeer looks up providerID's Ed25519 public key and last
-// known multiaddrs (providers.ed25519_public_key, providers.
-// last_known_multiaddrs) and derives the real p2p.PeerID plus parsed dial
-// addresses. Shared by repairTransportAdapter and the audit dispatch loop
-// (Session 12.1.2), which both need to turn a provider_id into a real,
-// dialable p2p identity.
-func resolveProviderPeer(ctx context.Context, db *sql.DB, providerID uuid.UUID) (p2p.PeerID, []p2p.Multiaddr, error) {
+// resolveProviderPeer looks up providerID's Ed25519 public key, last known
+// multiaddrs, and staleness flag (providers.ed25519_public_key, providers.
+// last_known_multiaddrs, providers.multiaddr_stale) and derives the real
+// p2p.PeerID plus dial addresses. Shared by repairTransportAdapter and the
+// audit dispatch loop (Session 12.1.2), which both need to turn a
+// provider_id into a real, dialable p2p identity.
+//
+// When multiaddr_stale is true, dht.FindPeer(peerID) — a routing-table
+// lookup keyed by the peer's own (never-stale) identity, not the stale
+// Postgres row — is tried FIRST, on the theory that a known-unreliable
+// stored address is worth less than a connect-verified one the DHT has
+// observed more recently, if it has one; the stored address remains the
+// fallback when the DHT has nothing yet (better a possibly-stale dial
+// attempt than none at all). See this file's header note and
+// internal/p2p/dht.go's FindPeer doc comment for why FindPeer, not
+// FindProviders, is correct here. dht == nil is treated exactly like "DHT
+// found nothing" (no fallback attempted).
+func resolveProviderPeer(ctx context.Context, db *sql.DB, dht p2p.DHT, providerID uuid.UUID) (p2p.PeerID, []p2p.Multiaddr, error) {
 	var (
-		pubKey        []byte
-		multiaddrsRaw []byte
+		pubKey         []byte
+		multiaddrsRaw  []byte
+		multiaddrStale bool
 	)
 	err := db.QueryRowContext(ctx,
-		`SELECT ed25519_public_key, last_known_multiaddrs FROM providers WHERE provider_id = $1`,
+		`SELECT ed25519_public_key, last_known_multiaddrs, multiaddr_stale FROM providers WHERE provider_id = $1`,
 		providerID,
-	).Scan(&pubKey, &multiaddrsRaw)
+	).Scan(&pubKey, &multiaddrsRaw, &multiaddrStale)
 	if err != nil {
 		return "", nil, fmt.Errorf("resolveProviderPeer: look up provider %s: %w", providerID, err)
 	}
@@ -66,6 +97,15 @@ func resolveProviderPeer(ctx context.Context, db *sql.DB, providerID uuid.UUID) 
 	peerID, err := p2p.PeerIDFromEd25519PublicKey(pubKey)
 	if err != nil {
 		return "", nil, fmt.Errorf("resolveProviderPeer: provider %s: derive Peer ID: %w", providerID, err)
+	}
+
+	if multiaddrStale && dht != nil {
+		if info, dhtErr := dht.FindPeer(ctx, peerID); dhtErr == nil && len(info.Addrs) > 0 {
+			return peerID, info.Addrs, nil
+		}
+		// DHT has nothing newer (ErrPeerNotInRoutingTable, or some other
+		// lookup failure) — fall through to the stored, possibly-stale
+		// address below rather than failing outright.
 	}
 
 	var addrStrings []string
@@ -92,10 +132,14 @@ func resolveProviderPeer(ctx context.Context, db *sql.DB, providerID uuid.UUID) 
 
 // repairTransportAdapter wraps p2p.Host to satisfy repair.RepairTransport —
 // see this file's header note for why this adapter is genuinely necessary,
-// not a trivial pass-through.
+// not a trivial pass-through. dht may be nil (see resolveProviderPeer's own
+// doc comment) — repair jobs against a provider with a stale address get
+// the same DHT-fallback benefit audit dispatch does (Finding 2), since both
+// call sites go through the same resolveProviderPeer.
 type repairTransportAdapter struct {
 	db   *sql.DB
 	host p2p.Host
+	dht  p2p.DHT
 }
 
 // NewStream implements repair.RepairTransport. peerID is interpreted as a
@@ -106,7 +150,7 @@ func (a *repairTransportAdapter) NewStream(ctx context.Context, peerID string, p
 	if err != nil {
 		return nil, fmt.Errorf("repairTransportAdapter.NewStream: peerID %q is not a provider UUID: %w", peerID, err)
 	}
-	realPeerID, addrs, err := resolveProviderPeer(ctx, a.db, providerID)
+	realPeerID, addrs, err := resolveProviderPeer(ctx, a.db, a.dht, providerID)
 	if err != nil {
 		return nil, fmt.Errorf("repairTransportAdapter.NewStream: %w", err)
 	}
