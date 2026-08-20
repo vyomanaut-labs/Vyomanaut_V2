@@ -3,13 +3,33 @@
   REPO_ROOT="$(git rev-parse --show-toplevel)"
   FAIL=0
 
+  # [M11 audit remediation, Finding 8 — found while fixing it, broader than
+  # the audit's own report] check() previously piped its detection grep
+  # straight into `grep -q .` for the pass/fail test:
+  #   if grep -rn ... "$pattern" ... | grep -q .; then FAIL; else PASS; fi
+  # Under `set -o pipefail` (line 2), this silently false-PASSES whenever
+  # the upstream grep has enough matching output that `grep -q .` exits
+  # (after its first match) before the upstream grep finishes writing:
+  # the upstream process gets SIGPIPE, exits 141, and pipefail reports the
+  # *pipeline's* status as that 141 — a non-zero status — so the `if`
+  # branches to the else (PASS) branch even though a match was genuinely
+  # found. Reproduced concretely: running the unpatched ADR_REFERENCE
+  # check's exact grep command stand-alone found real matches and exited 0,
+  # but running it through this piped `if` construct printed PASS. This
+  # affected every check using this helper (not just ADR_REFERENCE),
+  # non-deterministically (it depends on pipe-buffer timing, i.e. how much
+  # matching output exists) — a forbidden-pattern gate that can silently
+  # not-fire is worse than not having it, since it looks green. Fixed by
+  # capturing the grep's output into a variable first and testing that
+  # directly, with no second process to race against.
   check() {
     local name="$1"; local pattern="$2"; local scope="$3"
-    if grep -rn --include="*.go" --include="*.sql" --exclude="doc.go" --exclude="payment_test.go" \
-         -E "$pattern" "$REPO_ROOT/$scope" 2>/dev/null | grep -q .; then
+    local matches
+    matches="$(grep -rn --include="*.go" --include="*.sql" --exclude="doc.go" --exclude="payment_test.go" \
+         -E "$pattern" "$REPO_ROOT/$scope" 2>/dev/null || true)"
+    if [[ -n "$matches" ]]; then
       echo "FAIL [$name]: pattern '$pattern' found in '$scope':"
-      grep -rn --include="*.go" --include="*.sql" --exclude="doc.go" --exclude="payment_test.go" \
-           -E "$pattern" "$REPO_ROOT/$scope"
+      echo "$matches"
       FAIL=1
     else
       echo "PASS [$name]"
@@ -26,11 +46,57 @@
     "(float64|float32|FLOAT|DECIMAL|NUMERIC)" \
     "internal/payment"
 
-  # Check 10: references to ADRs 001 through 100
-  # Pattern matches 001-099 and 100
-  check "ADR_REFERENCE" \
-    "ADR-(0[0-9][1-9]|0[1-9]0|100)" \
-    "."
+  # Check 10: no references to ADRs beyond the current known ceiling.
+  #
+  # [M11 audit remediation, Finding 8] The version this replaces —
+  # `ADR-(0[0-9][1-9]|0[1-9]0|100)` — matched ADR-001 through ADR-100
+  # inclusive, the *opposite* of a ceiling: it should have been flagging
+  # references *above* a limit, not every reference *below* one. Given the
+  # SIGPIPE bug above, this had been silently never firing regardless.
+  #
+  # build.md's own Session 0.2.2 (see that section's "Flagged" note)
+  # prescribes deriving the ceiling dynamically via
+  # `ls "$REPO_ROOT"/docs/decisions/ADR-*.md` instead of hand-maintaining a
+  # number. That doesn't apply verbatim in *this* repository: ADR documents
+  # live in the separate Vyomanaut_Research repo, which CI never checks out
+  # here (confirmed against .github/workflows/ci.yml — a single
+  # actions/checkout@v7 of this repo only, no submodule, no second
+  # checkout) — `ls "$REPO_ROOT"/docs/decisions/ADR-*.md` finds nothing in
+  # this repo, so $MAX_ADR would be empty, and awk's numeric comparison
+  # against an empty string treats it as 0 — every single ADR citation in
+  # the codebase would then compare as "above the ceiling" and fail CI
+  # outright. Verified this empirically before writing the fix below,
+  # rather than copying build.md's script as-is.
+  #
+  # What's kept from build.md's version: the robust numeric-comparison
+  # logic (extract every cited ADR-NNN, compare arithmetically against the
+  # ceiling) instead of a hand-rolled regex range, which is what actually
+  # made the old ceiling brittle — every previous bump required re-deriving
+  # a new regex range by hand. What's changed: the ceiling itself is a
+  # single named constant local to this repo, since the authoritative ADR
+  # list isn't available here. Bump MAX_KNOWN_ADR the same day a PR first
+  # cites a newly-adopted ADR; nothing else in this check needs to change
+  # when that happens.
+  #
+  # [M11 audit remediation, Finding 8 — corrected at application time] The
+  # original remediation set this to 61, correct against the repo state it
+  # was written against. By the time this fix actually landed, the codebase
+  # already cited ADR-064 and ADR-070 through ADR-075 (M12-M16 work) — so
+  # applying 61 here verbatim would have fixed the SIGPIPE bug above and
+  # then immediately broken CI on every one of those legitimate citations,
+  # the same day this fix shipped. Verified via `grep -rhoE "ADR-0*[0-9]+"
+  # --include="*.go" --include="*.sql" ... | sort -nu | tail` against this
+  # repo before setting the value below — re-run that same command before
+  # ever lowering this constant.
+  MAX_KNOWN_ADR=77
+  bad_adrs="$(grep -rhoE "ADR-0*[0-9]+" --include="*.go" --include="*.sql" --exclude="doc.go" --exclude="payment_test.go" \
+      "$REPO_ROOT" 2>/dev/null | sed -E 's/ADR-0*([0-9]+)/\1/' | sort -nu | awk -v max="$MAX_KNOWN_ADR" '$1 > max' || true)"
+  if [[ -n "$bad_adrs" ]]; then
+    echo "FAIL [ADR_REFERENCE]: reference(s) above current known ceiling ADR-$MAX_KNOWN_ADR found: $bad_adrs"
+    FAIL=1
+  else
+    echo "PASS [ADR_REFERENCE] (ceiling: ADR-$MAX_KNOWN_ADR)"
+  fi
 
   # Check 11: no UPI Collect API endpoint calls
   check "NO_UPI_COLLECT" \
