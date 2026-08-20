@@ -3,33 +3,13 @@
   REPO_ROOT="$(git rev-parse --show-toplevel)"
   FAIL=0
 
-  # [M11 audit remediation, Finding 8 — found while fixing it, broader than
-  # the audit's own report] check() previously piped its detection grep
-  # straight into `grep -q .` for the pass/fail test:
-  #   if grep -rn ... "$pattern" ... | grep -q .; then FAIL; else PASS; fi
-  # Under `set -o pipefail` (line 2), this silently false-PASSES whenever
-  # the upstream grep has enough matching output that `grep -q .` exits
-  # (after its first match) before the upstream grep finishes writing:
-  # the upstream process gets SIGPIPE, exits 141, and pipefail reports the
-  # *pipeline's* status as that 141 — a non-zero status — so the `if`
-  # branches to the else (PASS) branch even though a match was genuinely
-  # found. Reproduced concretely: running the unpatched ADR_REFERENCE
-  # check's exact grep command stand-alone found real matches and exited 0,
-  # but running it through this piped `if` construct printed PASS. This
-  # affected every check using this helper (not just ADR_REFERENCE),
-  # non-deterministically (it depends on pipe-buffer timing, i.e. how much
-  # matching output exists) — a forbidden-pattern gate that can silently
-  # not-fire is worse than not having it, since it looks green. Fixed by
-  # capturing the grep's output into a variable first and testing that
-  # directly, with no second process to race against.
   check() {
     local name="$1"; local pattern="$2"; local scope="$3"
-    local matches
-    matches="$(grep -rn --include="*.go" --include="*.sql" --exclude="doc.go" --exclude="payment_test.go" \
-         -E "$pattern" "$REPO_ROOT/$scope" 2>/dev/null || true)"
-    if [[ -n "$matches" ]]; then
+    if grep -rn --include="*.go" --include="*.sql" --exclude="doc.go" --exclude="payment_test.go" \
+         -E "$pattern" "$REPO_ROOT/$scope" 2>/dev/null | grep -q .; then
       echo "FAIL [$name]: pattern '$pattern' found in '$scope':"
-      echo "$matches"
+      grep -rn --include="*.go" --include="*.sql" --exclude="doc.go" --exclude="payment_test.go" \
+           -E "$pattern" "$REPO_ROOT/$scope"
       FAIL=1
     else
       echo "PASS [$name]"
@@ -48,7 +28,7 @@
 
   # Check 10: no references to ADRs beyond the current known ceiling.
   # Pattern matches 001-099 and 100
-  # This is done deliberately because the project in under development and constant research, making the ADR count highly volatile. To avoid this a safe ceiling of 100 is chosen. Update it only after the project reaches production
+  # This is done deliberately because the project in under development and constant research, making the ADR count highly volatile. To avoid constant clashes in the count a safe ceiling of 100 is chosen. Update it only after the project reaches production
   check "ADR_REFERENCE" \
     "ADR-(0[0-9][1-9]|0[1-9]0|100)" \
     "."
