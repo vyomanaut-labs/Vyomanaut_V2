@@ -102,11 +102,12 @@ func TestComputeThroughputKbps(t *testing.T) {
 	}
 }
 
-// adjudicateResponse's non-OK branches never touch the DB (no
-// lookupProviderPubKey call — see this file's header note on why only
-// status 0x00 goes through ValidateResponse).
-func TestAdjudicateResponseNonOKStatusesAreFail(t *testing.T) {
-	for _, status := range []byte{challengeStatusFailNotFound, challengeStatusFailCorruption, challengeStatusInvalidNonce, challengeStatusInternalError} {
+// adjudicateResponse's INVALID_NONCE/INTERNAL_ERROR branches still never
+// touch the DB — they carry no provider_sig at all per IC §4.2's own field
+// table ("absent for 0x03, 0x04"), so there is nothing to look a key up
+// for; see this file's header note.
+func TestAdjudicateResponseNoSigStatusesAreFailWithoutDB(t *testing.T) {
+	for _, status := range []byte{challengeStatusInvalidNonce, challengeStatusInternalError} {
 		result, err := adjudicateResponse(context.Background(), nil, [33]byte{}, 0, uuid.New(), status, [32]byte{}, [64]byte{})
 		if err != nil {
 			t.Fatalf("status 0x%02x: unexpected error: %v", status, err)
@@ -114,6 +115,58 @@ func TestAdjudicateResponseNonOKStatusesAreFail(t *testing.T) {
 		if result != audit.AuditFail {
 			t.Fatalf("status 0x%02x: result = %v, want AuditFail", status, result)
 		}
+	}
+}
+
+// [Updated — M12 audit corrections, Finding 4] FAIL_NOT_FOUND/
+// FAIL_CORRUPTION now DO look up the provider's public key (to verify IC
+// §4.2's FAIL-status provider_sig — see adjudicateResponse's own doc
+// comment), so — unlike the no-signature statuses above — they need a real
+// DB and a real provider row, not db == nil. A garbage all-zero signature
+// (as here) still correctly scores as AuditFail either way: an unverifiable
+// FAIL claim scores the same as a verified one (see adjudicateResponse's
+// own comment on why), so this test's core assertion is unchanged from
+// before Finding 4 — only the DB requirement is new.
+func TestAdjudicateResponseFailStatusesAreFailEvenWithBadSignature(t *testing.T) {
+	db := openTestDB(t)
+	providerID, _, _ := insertTestProvider(t, db, "ACTIVE")
+
+	for _, status := range []byte{challengeStatusFailNotFound, challengeStatusFailCorruption} {
+		result, err := adjudicateResponse(context.Background(), db, [33]byte{}, 0, providerID, status, [32]byte{}, [64]byte{})
+		if err != nil {
+			t.Fatalf("status 0x%02x: unexpected error: %v", status, err)
+		}
+		if result != audit.AuditFail {
+			t.Fatalf("status 0x%02x: result = %v, want AuditFail", status, result)
+		}
+	}
+}
+
+// TestAdjudicateResponseFailStatusWithValidSignature verifies the positive
+// case Finding 4 actually adds: a genuinely, correctly signed FAIL response
+// is distinguishable from a forged one at the audit.ValidateFailResponse
+// layer (adjudicateResponse itself still scores both as AuditFail — see
+// that function's own comment on why — but this proves the correct
+// IC §4.2 FAIL signing input, not the OK-status one, is what gets checked).
+func TestAdjudicateResponseFailStatusWithValidSignature(t *testing.T) {
+	db := openTestDB(t)
+	providerID, _, priv := insertTestProvider(t, db, "ACTIVE")
+
+	nonce := audit.ChallengeNonce([]byte("0123456789abcdef0123456789abcdef"), 1, testChunkID(t), 1_700_000_000_000)
+	serverTsMs := int64(1_700_000_000_000)
+	status := byte(challengeStatusFailCorruption)
+
+	signingInput := sha256.Sum256(concatBytes([]byte{status}, nonce[:], int64ToBytes(serverTsMs), providerID[:]))
+	sig := ed25519.Sign(priv, signingInput[:])
+	var providerSig [64]byte
+	copy(providerSig[:], sig)
+
+	result, err := adjudicateResponse(context.Background(), db, nonce, serverTsMs, providerID, status, [32]byte{}, providerSig)
+	if err != nil {
+		t.Fatalf("adjudicateResponse: %v", err)
+	}
+	if result != audit.AuditFail {
+		t.Fatalf("adjudicateResponse(valid FAIL signature) = %v, want AuditFail (a proven FAIL is still a FAIL)", result)
 	}
 }
 
@@ -378,10 +431,15 @@ func TestDispatchIncrementsPassesOnPass(t *testing.T) {
 
 	// dispatchOneChallenge calls resolveProviderPeer first, which requires a
 	// providers.last_known_multiaddrs entry; insert one so Connect/NewStream
-	// are reached at all.
+	// are reached at all. dht is nil throughout this file: every assignment
+	// here has MultiaddrStale: false, so resolveProviderPeer's DHT fallback
+	// (M12 audit corrections, Finding 2) is never consulted — see
+	// internal/p2p/dht_test.go for FindPeer's own routing-table-level
+	// coverage, and adapters_test.go for resolveProviderPeer's own
+	// dedicated fallback-integration coverage.
 	seedTestMultiaddr(t, db, providerID)
 
-	if err := dispatchOneChallenge(context.Background(), db, config.DemoProfile, cache, host, priv, assignment); err != nil {
+	if err := dispatchOneChallenge(context.Background(), db, config.DemoProfile, cache, host, nil, priv, assignment); err != nil {
 		t.Fatalf("dispatchOneChallenge: %v", err)
 	}
 
@@ -418,7 +476,7 @@ func TestDispatchResetsOnGenuineTimeout(t *testing.T) {
 	host := &fakeHost{peerID: "fake-peer", newStreamFunc: func() (p2p.Stream, error) { return timeoutStream{}, nil }}
 	assignment := chunkAssignmentRow{ChunkID: testChunkID(t), ProviderID: providerID, MultiaddrStale: false}
 
-	if err := dispatchOneChallenge(context.Background(), db, config.DemoProfile, cache, host, priv, assignment); err != nil {
+	if err := dispatchOneChallenge(context.Background(), db, config.DemoProfile, cache, host, nil, priv, assignment); err != nil {
 		t.Fatalf("dispatchOneChallenge: %v", err)
 	}
 
@@ -444,7 +502,7 @@ func TestDispatchDoesNotResetOnStaleAddressTimeout(t *testing.T) {
 	host := &fakeHost{peerID: "fake-peer", newStreamFunc: func() (p2p.Stream, error) { return timeoutStream{}, nil }}
 	assignment := chunkAssignmentRow{ChunkID: testChunkID(t), ProviderID: providerID, MultiaddrStale: true}
 
-	if err := dispatchOneChallenge(context.Background(), db, config.DemoProfile, cache, host, priv, assignment); err != nil {
+	if err := dispatchOneChallenge(context.Background(), db, config.DemoProfile, cache, host, nil, priv, assignment); err != nil {
 		t.Fatalf("dispatchOneChallenge: %v", err)
 	}
 
@@ -471,7 +529,7 @@ func TestDispatchSkipsUpdateRTOForTimeout(t *testing.T) {
 	host := &fakeHost{peerID: "fake-peer", newStreamFunc: func() (p2p.Stream, error) { return timeoutStream{}, nil }}
 	assignment := chunkAssignmentRow{ChunkID: testChunkID(t), ProviderID: providerID, MultiaddrStale: false}
 
-	if err := dispatchOneChallenge(context.Background(), db, config.DemoProfile, cache, host, priv, assignment); err != nil {
+	if err := dispatchOneChallenge(context.Background(), db, config.DemoProfile, cache, host, nil, priv, assignment); err != nil {
 		t.Fatalf("dispatchOneChallenge: %v", err)
 	}
 

@@ -21,38 +21,69 @@
 // already flags for step 7a, just in a different function of the same
 // three-phase write.
 //
-// [Decision — FAIL-status (0x01-0x04) signature verification] IC §4.2's
-// Frame 2 table documents a SECOND provider_sig signing-input shape for
-// status 0x01/0x02 (SHA-256(status_byte || nonce || ts || provider_id),
-// vs. audit.ValidateResponse's SHA-256(response_hash || nonce || ts ||
-// provider_id) for status 0x00) — audit.ValidateResponse implements only the
-// first shape, and no function anywhere in this codebase implements the
-// second. Calling ValidateResponse against a FAIL frame's response_hash
-// field (unpopulated, since IC §4.2 says response_hash is "present only when
-// status = 0x00") would check the wrong signing input and always fail,
-// which is not "verifying the FAIL signature," just a guaranteed spurious
-// error. dispatchOneChallenge therefore only calls ValidateResponse for
-// status 0x00; every other status maps directly to AuditFail without a
-// signature check, leaving that second signing-input shape's verification
-// genuinely unimplemented (not silently faked) — flagged here as follow-up
-// work, consistent with this session's own precedent of flagging rather
-// than guessing at unspecified wire-format details (see payment_provider.go,
-// secrets_client.go).
+// [Corrected — M12 audit corrections, Finding 4 — FAIL-status (0x01/0x02)
+// signature verification] IC §4.2's Frame 2 table documents a SECOND
+// provider_sig signing-input shape for status 0x01/0x02
+// (SHA-256(status_byte || nonce || ts || provider_id), vs.
+// audit.ValidateResponse's SHA-256(response_hash || nonce || ts ||
+// provider_id) for status 0x00). This was previously unimplemented —
+// flagged rather than guessed at, consistent with this session's own
+// precedent for unspecified wire-format details (see payment_provider.go,
+// secrets_client.go) — but IC §4.2 fully specifies this second shape, so it
+// is now implemented as audit.ValidateFailResponse and called below for
+// status 0x01/0x02. Status 0x03/0x04 (INVALID_NONCE / INTERNAL_ERROR) carry
+// no provider_sig at all per IC §4.2's own field table ("absent for 0x03,
+// 0x04" — see readChallengeResponse) and so still map directly to AuditFail
+// with no signature check: there is nothing to check, not a gap.
 //
-// [REF: IC §4.2, DM §4.7, ADR-014, ADR-015, ADR-027, FR-038, FR-040,
-// build.md Milestone 7 corrections session, Milestone 12 Phase 12.1
-// Session 12.1.2]
+// This restores IC §4.2's stated purpose for the FAIL signature — proving
+// the provider deliberately reported FAIL rather than a transport drop —
+// but does NOT change the scoring outcome: an unverifiable FAIL claim (bad
+// signature) still scores as AuditFail, the same as a verified one, for the
+// same reason an unverifiable PASS claim below scores as AuditFail rather
+// than AuditPass — see that comment. What changes is that a bad FAIL
+// signature is now a distinguishable, loggable event instead of silently
+// indistinguishable from a genuine one.
+//
+// [Corrected — M12 audit corrections, Finding 1 — challenge dispatch timing
+// randomisation] FR-037, ADR-002, and ADR-014 all independently require
+// audit challenge timing to be randomised within the polling window so a
+// provider cannot anticipate when it will be challenged — see
+// randomJitterDelay's own doc comment. dispatchAuditCycle previously fired
+// every active chunk assignment's challenge at tick time with no jitter
+// (bounded only by auditChallengeConcurrencyLimit, a throughput control,
+// not a time-spreading one); it now assigns each assignment an independent
+// random delay within [0, profile.PollingInterval) before dispatch. One
+// consequence worth stating plainly: since dispatchAuditCycle still
+// wg.Wait()s for every (now-delayed) dispatch before returning — preserving
+// the existing "cycles never overlap" property rather than letting cycle
+// N+1 start while cycle N's jittered dispatches are still in flight — a
+// cycle's total wall-clock duration can now approach profile.PollingInterval
+// itself in the worst case (an assignment drawing a delay near the top of
+// the window, plus its own RTO), not just the time to fan out every
+// dispatch immediately. This is the direct, unavoidable cost of genuinely
+// spreading dispatch across the full window rather than clustering it at
+// the front; it does not reintroduce the overlapping-cycles behaviour the
+// audit's own Recheck pass confirmed was clean, and Go's ticker (buffer of
+// 1, extra ticks dropped, never queued) means no goroutine pile-up results
+// either.
+//
+// [REF: IC §4.2, DM §4.7, ADR-002, ADR-014, ADR-015, ADR-027, FR-037,
+// FR-038, FR-040, build.md Milestone 7 corrections session, Milestone 12
+// Phase 12.1 Session 12.1.2, Milestone 12 audit corrections Finding 1]
 package main
 
 import (
 	"context"
 	"crypto/ed25519"
+	cryptorand "crypto/rand"
 	"database/sql"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"sync"
 	"time"
 
@@ -123,6 +154,7 @@ func runAuditDispatchLoop(
 	profile config.NetworkProfile,
 	cache *audit.ClusterSecretCache,
 	host p2p.Host,
+	dht p2p.DHT,
 	signingKey ed25519.PrivateKey,
 ) {
 	ticker := time.NewTicker(profile.PollingInterval)
@@ -134,7 +166,7 @@ func runAuditDispatchLoop(
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			dispatchAuditCycle(ctx, db, profile, cache, host, signingKey, sem)
+			dispatchAuditCycle(ctx, db, profile, cache, host, dht, signingKey, sem)
 		}
 	}
 }
@@ -190,6 +222,7 @@ func dispatchAuditCycle(
 	profile config.NetworkProfile,
 	cache *audit.ClusterSecretCache,
 	host p2p.Host,
+	dht p2p.DHT,
 	signingKey ed25519.PrivateKey,
 	sem chan struct{},
 ) {
@@ -202,21 +235,69 @@ func dispatchAuditCycle(
 	var wg sync.WaitGroup
 	for _, assignment := range assignments {
 		assignment := assignment
-		select {
-		case sem <- struct{}{}:
-		case <-ctx.Done():
-			return
+
+		// FR-037 / ADR-002 / ADR-014: this chunk's dispatch is delayed by an
+		// independent random offset within the polling window, computed
+		// once per assignment here at cycle start — see this file's header
+		// note. A jitter-generation failure skips this one chunk for this
+		// cycle rather than silently falling back to zero delay (which
+		// would defeat the anti-prediction purpose for exactly that chunk
+		// without anyone noticing); it is picked up again next cycle.
+		delay, err := randomJitterDelay(profile.PollingInterval)
+		if err != nil {
+			log.Printf("[AUDIT] randomJitterDelay for chunk assigned to provider %s: %v", assignment.ProviderID, err)
+			continue
 		}
+
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+
+			timer := time.NewTimer(delay)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				return
+			}
+
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
 			defer func() { <-sem }()
-			if err := dispatchOneChallenge(ctx, db, profile, cache, host, signingKey, assignment); err != nil {
+			if err := dispatchOneChallenge(ctx, db, profile, cache, host, dht, signingKey, assignment); err != nil {
 				log.Printf("[AUDIT] dispatch to provider %s: %v", assignment.ProviderID, err)
 			}
 		}()
 	}
 	wg.Wait()
+}
+
+// randomJitterDelay returns a cryptographically random duration in
+// [0, window) — FR-037 / ADR-002 / ADR-014 require per-chunk challenge
+// dispatch timing a provider cannot anticipate. crypto/rand (not math/rand)
+// is used for the same reason every other timing- or identity-relevant
+// random value in this codebase does (see cmd/microservice/keys.go,
+// internal/p2p/identity.go): this is specifically an anti-prediction
+// security control, exactly the kind of value that must not depend on a
+// PRNG a sufficiently motivated adversary could ever have a chance of
+// modelling — a provider gaming this exact mechanism is the attack ADR-002
+// and ADR-014 name.
+//
+// window <= 0 returns a zero delay rather than an error (defensive only;
+// profile.PollingInterval is always positive in both NetworkProfile
+// configurations — see config.DemoProfile / config.ProductionProfile).
+func randomJitterDelay(window time.Duration) (time.Duration, error) {
+	if window <= 0 {
+		return 0, nil
+	}
+	n, err := cryptorand.Int(cryptorand.Reader, big.NewInt(int64(window)))
+	if err != nil {
+		return 0, fmt.Errorf("randomJitterDelay: %w", err)
+	}
+	return time.Duration(n.Int64()), nil
 }
 
 // dispatchOneChallenge runs the full per-chunk audit challenge protocol
@@ -227,6 +308,7 @@ func dispatchOneChallenge(
 	profile config.NetworkProfile,
 	cache *audit.ClusterSecretCache,
 	host p2p.Host,
+	dht p2p.DHT,
 	signingKey ed25519.PrivateKey,
 	assignment chunkAssignmentRow,
 ) error {
@@ -255,7 +337,7 @@ func dispatchOneChallenge(
 	// Step 4-5: resolve the provider's real p2p identity, connect, and open
 	// the /vyomanaut/audit-challenge/1.0.0 stream (repairTransport-equivalent
 	// for audit — the same p2p.Host session 12.1.1 constructs).
-	stream, dispatchStart, err := openChallengeStream(ctx, db, host, assignment.ProviderID)
+	stream, dispatchStart, err := openChallengeStream(ctx, db, host, dht, assignment.ProviderID)
 	if err != nil {
 		// Cannot even reach the provider: treat as a genuine TIMEOUT (no
 		// response is possible without a stream) rather than leaving the
@@ -340,8 +422,8 @@ func dispatchOneChallenge(
 // connects, and opens the audit-challenge stream. Returns the dispatch
 // timestamp captured immediately before the stream open, for
 // responseLatencyMs measurement.
-func openChallengeStream(ctx context.Context, db *sql.DB, host p2p.Host, providerID uuid.UUID) (p2p.Stream, time.Time, error) {
-	peerID, addrs, err := resolveProviderPeer(ctx, db, providerID)
+func openChallengeStream(ctx context.Context, db *sql.DB, host p2p.Host, dht p2p.DHT, providerID uuid.UUID) (p2p.Stream, time.Time, error) {
+	peerID, addrs, err := resolveProviderPeer(ctx, db, dht, providerID)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
@@ -409,12 +491,13 @@ func readChallengeResponse(r io.Reader) (status byte, responseHash [32]byte, pro
 }
 
 // adjudicateResponse maps a ChallengeResponse's status/signature into an
-// audit.AuditResult. Only status 0x00 goes through
-// audit.ValidateResponse(nonce, responseHash, serverChallengeTsMs,
-// providerID, providerSig, providerPubKey) — see this file's header note on
-// why every other status maps directly to AuditFail without a signature
-// check (the alternate FAIL signing-input shape IC §4.2 documents is not
-// implemented anywhere in this codebase).
+// audit.AuditResult. Status 0x00 goes through audit.ValidateResponse
+// (nonce, responseHash, serverChallengeTsMs, providerID, providerSig,
+// providerPubKey); status 0x01/0x02 go through audit.ValidateFailResponse,
+// IC §4.2's second, distinct signing-input shape (see this file's header
+// note — Finding 4). Status 0x03/0x04 carry no provider_sig at all (IC
+// §4.2: "absent for 0x03, 0x04") and map directly to AuditFail with no
+// signature check — there is nothing to verify, not a gap.
 func adjudicateResponse(
 	ctx context.Context,
 	db *sql.DB,
@@ -425,7 +508,8 @@ func adjudicateResponse(
 	responseHash [32]byte,
 	providerSig [64]byte,
 ) (audit.AuditResult, error) {
-	if status != challengeStatusOK {
+	switch status {
+	case challengeStatusInvalidNonce, challengeStatusInternalError:
 		return audit.AuditFail, nil
 	}
 
@@ -435,14 +519,32 @@ func adjudicateResponse(
 	}
 	providerID := [16]byte(providerUUID)
 
-	if err := audit.ValidateResponse(nonce, responseHash, serverChallengeTsMs, providerID, providerSig, providerPubKey); err != nil {
-		// An unverifiable PASS claim is functionally equivalent to a failed
-		// audit from the network's perspective — no valid cryptographic
-		// proof of possession was given (see this file's header note; no
-		// document in scope specifies this mapping explicitly).
-		return audit.AuditFail, nil
+	if status == challengeStatusOK {
+		if err := audit.ValidateResponse(nonce, responseHash, serverChallengeTsMs, providerID, providerSig, providerPubKey); err != nil {
+			// An unverifiable PASS claim is functionally equivalent to a
+			// failed audit from the network's perspective — no valid
+			// cryptographic proof of possession was given (see this
+			// file's header note; no document in scope specifies this
+			// mapping explicitly).
+			return audit.AuditFail, nil
+		}
+		return audit.AuditPass, nil
 	}
-	return audit.AuditPass, nil
+
+	// status is challengeStatusFailNotFound or challengeStatusFailCorruption
+	// (readChallengeResponse rejects any other value outright, so no other
+	// case can reach here).
+	if err := audit.ValidateFailResponse(status, nonce, serverChallengeTsMs, providerID, providerSig, providerPubKey); err != nil {
+		// A FAIL claim with an invalid signature is still scored as
+		// AuditFail (the chunk audit did not pass either way) — but log it
+		// distinctly, since an unverifiable FAIL is a materially different
+		// event than a genuine one: it means the provider_sig on this FAIL
+		// frame does not actually prove the provider sent it, which is
+		// exactly the case IC §4.2 requires this signature to distinguish
+		// (see this file's header note).
+		log.Printf("[AUDIT] provider %s: FAIL response (status 0x%02x) has an invalid provider_sig — scoring as FAIL but this is not a proven deliberate report", providerUUID, status)
+	}
+	return audit.AuditFail, nil
 }
 
 // finalizeTimeout writes the TIMEOUT terminal state for a receipt that
@@ -455,8 +557,14 @@ func finalizeTimeout(ctx context.Context, db *sql.DB, signingKey ed25519.Private
 		return fmt.Errorf("WriteReceiptPhase2 (timeout): %w", err)
 	}
 	// A stale-address TIMEOUT does nothing, per DM §4.7 (Milestone 8 Phase
-	// 8.2) — evidence the DHT fallback didn't work, not evidence the
-	// provider failed.
+	// 8.2). As of the M12 audit corrections (Finding 2), a real DHT
+	// fallback now runs inside resolveProviderPeer before this point is
+	// ever reached for a TIMEOUT — so this guard's practical meaning has
+	// narrowed: it now means the DHT fallback was tried and still came up
+	// empty (or dht was nil), not "no fallback exists at all." Either way,
+	// the scoring rationale is unchanged: a stale-address TIMEOUT is still
+	// not attributable to the provider's own behaviour, so it must not
+	// reset consecutive passes.
 	if !assignment.MultiaddrStale {
 		if err := scoring.ResetConsecutivePasses(ctx, db, assignment.ProviderID); err != nil {
 			log.Printf("[AUDIT] ResetConsecutivePasses (timeout): %v", err)
