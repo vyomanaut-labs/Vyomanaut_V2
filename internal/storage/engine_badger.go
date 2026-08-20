@@ -258,5 +258,51 @@ func (bs *badgerStore) Close() error {
 	return nil
 }
 
+// ListChunks satisfies ChunkStore.ListChunks (store.go, M17-E Session
+// 17.5.1). A read-only view transaction, key-only iteration
+// (PrefetchValues: false — this call never needs the 256 KB chunk data,
+// only the 32-byte chunk_id, so Badger's own value-prefetch would be pure
+// waste here).
+//
+// item.KeyCopy, never item.Key: an Item's key is only valid for the
+// current iteration step (Item.Key's own doc comment, badger/v4) — this
+// method collects every key into a slice that outlives the loop, so each
+// one must be copied before Next() invalidates it.
+//
+// badgerStore has exactly one key namespace (chunk_id → chunk_data,
+// AppendChunk above) — unlike the RocksDB path's "default"/"dht-keys"
+// column-family split, nothing else is ever written to this DB, so every
+// key iterated here is a chunk_id by construction. The length check below
+// is a defensive assertion against that invariant, not a namespace filter.
+//
+// Goroutine-safe: yes — badger.DB.View, the same MVCC snapshot isolation
+// LookupChunk already relies on above.
+func (bs *badgerStore) ListChunks() ([][32]byte, error) {
+	ids := make([][32]byte, 0)
+
+	err := bs.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		for it.Rewind(); it.Valid(); it.Next() {
+			key := it.Item().KeyCopy(nil)
+			if len(key) != 32 {
+				return fmt.Errorf("storage: badgerStore.ListChunks: key length %d, want 32 (chunk_id)", len(key))
+			}
+			var id [32]byte
+			copy(id[:], key)
+			ids = append(ids, id)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
 // Compile-time assertion that badgerStore satisfies ChunkStore.
 var _ ChunkStore = (*badgerStore)(nil)
