@@ -31,10 +31,26 @@ import (
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/payment"
 )
 
-// adminAPIKeyMinHexLen is the minimum X-Admin-API-Key header length: OAS's
+// AdminAPIKeyMinHexLen is the minimum X-Admin-API-Key header length: OAS's
 // AdminApiKey security scheme requires "≥32 random bytes hex-encoded" — 32
 // bytes hex-encoded is 64 characters.
-const adminAPIKeyMinHexLen = 64
+//
+// [Corrected — M12 audit corrections, Finding 9] Exported (was
+// adminAPIKeyMinHexLen, unexported) so cmd/microservice/keys.go can import
+// and use this single definition instead of maintaining its own
+// independently-defined duplicate — see that file's own comment. Both
+// copies happened to already agree (64), but "same constant stated in two
+// places, kept in sync only by convention" is exactly the class of drift
+// bug this project has hit before (M11 review, M8 build.md/CI mismatch).
+// adminAPIKeyMinHexLen is kept as a local alias immediately below purely so
+// every OTHER reference in this file (which has no reason to spell out the
+// full package-qualified name for its own package's own constant) doesn't
+// need touching.
+const AdminAPIKeyMinHexLen = 64
+
+// adminAPIKeyMinHexLen is a same-package alias for AdminAPIKeyMinHexLen —
+// see that constant's own doc comment.
+const adminAPIKeyMinHexLen = AdminAPIKeyMinHexLen
 
 // stub501 is the placeholder handler for every not-yet-implemented
 // operation (Session 11.3.1). Later sessions in this milestone replace
