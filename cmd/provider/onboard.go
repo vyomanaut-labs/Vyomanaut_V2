@@ -142,7 +142,7 @@ func resolveStorageGB(flagValue int, prompt io.Writer, in io.Reader) (int, error
 	if flagValue > 0 {
 		return flagValue, nil
 	}
-	fmt.Fprint(prompt, "How much storage would you like to share, in GB? ")
+	fprint(prompt, "How much storage would you like to share, in GB? ")
 	scanner := bufio.NewScanner(in)
 	if !scanner.Scan() {
 		return 0, fmt.Errorf("--storage-gb is required (no input received)")
@@ -161,7 +161,7 @@ func resolveStorageGB(flagValue int, prompt io.Writer, in io.Reader) (int, error
 // reading cmd/microservice's delivery log) cooperate to admit a node, and
 // this daemon holds no more of that code than the single verify call needs.
 func promptOTPCode(out io.Writer, in io.Reader) (string, error) {
-	fmt.Fprint(out, "Enter the 6-digit code (ask the network operator): ")
+	fprint(out, "Enter the 6-digit code (ask the network operator): ")
 	scanner := bufio.NewScanner(in)
 	if !scanner.Scan() {
 		return "", fmt.Errorf("no OTP code entered")
@@ -289,12 +289,12 @@ func runOnboard(ctx context.Context, flags onboardFlags, out io.Writer, in io.Re
 	if err != nil {
 		return registrationRecord{}, fmt.Errorf("load/generate identity: %w", err)
 	}
-	fmt.Fprintf(out, "Peer ID: %s\n", peerID)
+	fprintf(out, "Peer ID: %s\n", peerID)
 
 	if err := sendOTP(ctx, flags.microserviceURL, flags.phone, onboardPurpose); err != nil {
 		return registrationRecord{}, fmt.Errorf("send OTP: %w", err)
 	}
-	fmt.Fprintln(out, "OTP sent — ask the network operator for your code.")
+	fprintln(out, "OTP sent — ask the network operator for your code.")
 
 	code, err := promptOTPCode(out, in)
 	if err != nil {
@@ -311,7 +311,7 @@ func runOnboard(ctx context.Context, flags onboardFlags, out io.Writer, in io.Re
 	// the same way a --sim-count instance's is, not hardcoded loopback.
 	advertiseHost, warning := resolveAdvertiseHost(flags.advertiseAddr)
 	if warning != "" {
-		fmt.Fprintf(out, "warning: %s\n", warning)
+		fprintf(out, "warning: %s\n", warning)
 	}
 	multiaddr := advertiseMultiaddr(advertiseHost, flags.listenPort, peerID)
 
@@ -334,11 +334,11 @@ func onboardCmd(args []string) int {
 
 	rec, err := runOnboard(context.Background(), flags, os.Stdout, os.Stdin)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "vyomanaut provider onboard: %v\n", err)
+		fprintf(os.Stderr, "vyomanaut provider onboard: %v\n", err)
 		return 1
 	}
 
-	fmt.Fprintf(os.Stdout, "Registered as provider %s (%d GB declared).\n", rec.ProviderID, rec.DeclaredStorageGB)
-	fmt.Fprintf(os.Stdout, "Run `provider run --microservice-url=%s --data-dir=%s` to start serving.\n", flags.microserviceURL, flags.dataDir)
+	fprintf(os.Stdout, "Registered as provider %s (%d GB declared).\n", rec.ProviderID, rec.DeclaredStorageGB)
+	fprintf(os.Stdout, "Run `provider run --microservice-url=%s --data-dir=%s` to start serving.\n", flags.microserviceURL, flags.dataDir)
 	return 0
 }

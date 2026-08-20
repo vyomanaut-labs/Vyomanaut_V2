@@ -117,10 +117,10 @@ func runEarnings(ctx context.Context, flags earningsFlags, out io.Writer) error 
 		return enc.Encode(status)
 	}
 
-	fmt.Fprintf(out, "Provider %s (%s)\n", status.ProviderID, status.Status)
-	fmt.Fprintf(out, "  pending earnings: %s\n", formatPaise(status.PendingEarningsPaise))
-	fmt.Fprintf(out, "  held earnings:    %s\n", formatPaise(status.HeldEarningsPaise))
-	fmt.Fprintf(out, "  stored chunks:    %d (declared %d GB, NFR-044 ceiling %d GB)\n",
+	fprintf(out, "Provider %s (%s)\n", status.ProviderID, status.Status)
+	fprintf(out, "  pending earnings: %s\n", formatPaise(status.PendingEarningsPaise))
+	fprintf(out, "  held earnings:    %s\n", formatPaise(status.HeldEarningsPaise))
+	fprintf(out, "  stored chunks:    %d (declared %d GB, NFR-044 ceiling %d GB)\n",
 		status.StoredChunks, rec.DeclaredStorageGB, status.StorageAdvisoryGB)
 	return nil
 }
@@ -129,12 +129,12 @@ func runEarnings(ctx context.Context, flags earningsFlags, out io.Writer) error 
 func earningsCmd(args []string) int {
 	flags := parseEarningsFlags(args)
 	if flags.microserviceURL == "" {
-		fmt.Fprintln(os.Stderr, "vyomanaut provider earnings: --microservice-url is required")
+		fprintln(os.Stderr, "vyomanaut provider earnings: --microservice-url is required")
 		return 1
 	}
 
 	if err := runEarnings(context.Background(), flags, os.Stdout); err != nil {
-		fmt.Fprintf(os.Stderr, "vyomanaut provider earnings: %v\n", err)
+		fprintf(os.Stderr, "vyomanaut provider earnings: %v\n", err)
 		return 1
 	}
 	return 0

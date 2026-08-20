@@ -122,28 +122,28 @@ func postDepart(ctx context.Context, microserviceURL, bearerToken string, reqBod
 func departCmd(args []string) int {
 	flags := parseDepartFlags(args)
 	if flags.microserviceURL == "" {
-		fmt.Fprintln(os.Stderr, "vyomanaut provider depart: --microservice-url is required")
+		fprintln(os.Stderr, "vyomanaut provider depart: --microservice-url is required")
 		return 1
 	}
 
 	rec, found, err := loadRegistrationRecord(flags.dataDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "vyomanaut provider depart: %v\n", err)
+		fprintf(os.Stderr, "vyomanaut provider depart: %v\n", err)
 		return 1
 	}
 	if !found {
-		fmt.Fprintf(os.Stderr, "vyomanaut provider depart: no registration found under %s — run `provider onboard` first\n", flags.dataDir)
+		fprintf(os.Stderr, "vyomanaut provider depart: no registration found under %s — run `provider onboard` first\n", flags.dataDir)
 		return 1
 	}
 
 	masterSecret, ownerID, err := loadOrGenerateOwnerSeed(flags.dataDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "vyomanaut provider depart: %v\n", err)
+		fprintf(os.Stderr, "vyomanaut provider depart: %v\n", err)
 		return 1
 	}
 	signingKey, _, err := p2p.LoadOrGenerateIdentity(flags.dataDir, masterSecret, ownerID[:])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "vyomanaut provider depart: load identity: %v\n", err)
+		fprintf(os.Stderr, "vyomanaut provider depart: load identity: %v\n", err)
 		return 1
 	}
 
@@ -158,11 +158,11 @@ func departCmd(args []string) int {
 		ProviderSig: hex.EncodeToString(sig),
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "vyomanaut provider depart: %v\n", err)
+		fprintf(os.Stderr, "vyomanaut provider depart: %v\n", err)
 		return 1
 	}
 
-	fmt.Fprintf(os.Stdout, "Departed. status=%s escrow_release=%s repair_jobs_queued=%d\n",
+	fprintf(os.Stdout, "Departed. status=%s escrow_release=%s repair_jobs_queued=%d\n",
 		resp.Status, formatPaise(resp.EscrowReleasePaise), resp.RepairJobsQueued)
 	return 0
 }

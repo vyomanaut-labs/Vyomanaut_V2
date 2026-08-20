@@ -24,6 +24,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 )
 
@@ -38,6 +39,17 @@ const (
 	subcommandInspect  = "inspect"
 	subcommandEarnings = "earnings"
 	subcommandDepart   = "depart"
+)
+
+// exitUsage is the conventional Unix CLI exit code for a usage error (bad
+// flags, missing subcommand)
+// This implementation was borrowed from cmd/client
+const exitUsage = 2
+
+const (
+	hexDumpWidth               = 16
+	paisePerRupee              = 100
+	otpLogFileMode fs.FileMode = 0600
 )
 
 func main() {
@@ -67,6 +79,20 @@ func resolveSubcommand(args []string) (cmd string, rest []string) {
 	return args[0], args[1:]
 }
 
+// fprint/fprintln/fprintf wrap the fmt.Fprint family for errOut/out
+// This implementation was borrowed from how cmd/client handled the similar errcheck issue
+func fprint(w io.Writer, a ...any) {
+	_, _ = fmt.Fprint(w, a...)
+}
+
+func fprintln(w io.Writer, a ...any) {
+	_, _ = fmt.Fprintln(w, a...)
+}
+
+func fprintf(w io.Writer, format string, a ...any) {
+	_, _ = fmt.Fprintf(w, format, a...)
+}
+
 // dispatch routes to the named subcommand's handler and returns the process
 // exit code main() should use. Kept separate from main() itself so routing
 // is directly testable without a subprocess
@@ -85,14 +111,14 @@ func dispatch(cmd string, args []string) int {
 	case subcommandEarnings:
 		return earningsCmd(args)
 	default:
-		fmt.Fprintf(os.Stderr, "vyomanaut provider: unknown subcommand %q\n\n", cmd)
+		fprintf(os.Stderr, "vyomanaut provider: unknown subcommand %q\n\n", cmd)
 		printUsage(os.Stderr)
-		return 2
+		return exitUsage
 	}
 }
 
 // printUsage writes the top-level usage line to w.
 func printUsage(w io.Writer) {
-	fmt.Fprintf(w, "usage: provider <%s|%s|%s|%s|%s> [flags]\n",
+	fprintf(w, "usage: provider <%s|%s|%s|%s|%s> [flags]\n",
 		subcommandOnboard, subcommandRun, subcommandInspect, subcommandEarnings, subcommandDepart)
 }

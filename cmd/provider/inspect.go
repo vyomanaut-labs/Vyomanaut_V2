@@ -212,21 +212,21 @@ func runInspect(flags inspectFlags) (inspectReport, error) {
 // reading it, not just to a statistic.
 func hexDump(data []byte) string {
 	var b strings.Builder
-	for offset := 0; offset < len(data); offset += 16 {
-		end := offset + 16
+	for offset := 0; offset < len(data); offset += hexDumpWidth {
+		end := offset + hexDumpWidth
 		if end > len(data) {
 			end = len(data)
 		}
 		line := data[offset:end]
 
-		fmt.Fprintf(&b, "  %04x  ", offset)
-		for i := 0; i < 16; i++ {
+		fprintf(&b, "  %04x  ", offset)
+		for i := 0; i < hexDumpWidth; i++ {
 			if i < len(line) {
-				fmt.Fprintf(&b, "%02x ", line[i])
+				fprintf(&b, "%02x ", line[i])
 			} else {
 				b.WriteString("   ")
 			}
-			if i == 7 {
+			if i == hexDumpWidth/2-1 {
 				b.WriteByte(' ')
 			}
 		}
@@ -244,16 +244,16 @@ func hexDump(data []byte) string {
 }
 
 func printInspectReport(out io.Writer, report inspectReport) {
-	fmt.Fprintf(out, "declared allocation: %d GB   used: %d B   NFR-044 chunk ceiling: %d chunks\n",
+	fprintf(out, "declared allocation: %d GB   used: %d B   NFR-044 chunk ceiling: %d chunks\n",
 		report.DeclaredStorageGB, report.BytesUsed, report.ChunkCeiling)
 	for _, c := range report.Chunks {
-		fmt.Fprintf(out, "chunk %s  %d B  entropy %.4f bits/byte\n", c.ChunkID, c.SizeBytes, c.Entropy)
+		fprintf(out, "chunk %s  %d B  entropy %.4f bits/byte\n", c.ChunkID, c.SizeBytes, c.Entropy)
 		if c.HexDump != "" {
-			fmt.Fprintln(out, c.HexDump)
+			fprintln(out, c.HexDump)
 		}
 	}
 	if report.Compare != nil {
-		fmt.Fprintf(out, "compare %s  %d B  entropy %.4f bits/byte\n",
+		fprintf(out, "compare %s  %d B  entropy %.4f bits/byte\n",
 			report.Compare.Path, report.Compare.SizeBytes, report.Compare.Entropy)
 	}
 }
@@ -264,7 +264,7 @@ func inspectCmd(args []string) int {
 
 	report, err := runInspect(flags)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "vyomanaut provider inspect: %v\n", err)
+		fprintf(os.Stderr, "vyomanaut provider inspect: %v\n", err)
 		return 1
 	}
 

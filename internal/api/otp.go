@@ -29,6 +29,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math/big"
 	"net/http"
 	"os"
@@ -111,12 +112,14 @@ type FileOtpSender struct {
 	file *os.File
 }
 
+const otpLogFileMode fs.FileMode = 0600
+
 // NewFileOtpSender opens (creating if absent) the delivery log at path,
 // mode 0600, for append-only writes. The file is opened ONCE, here, for
 // this sender's lifetime — not reopened per SendOTP call — matching how a
 // long-lived gateway client would actually behave.
 func NewFileOtpSender(path string) (*FileOtpSender, error) {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, otpLogFileMode)
 	if err != nil {
 		return nil, fmt.Errorf("api: NewFileOtpSender: open %s: %w", path, err)
 	}

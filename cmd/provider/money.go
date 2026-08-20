@@ -21,5 +21,5 @@ func formatPaise(paise int64) string {
 		sign = "-"
 		paise = -paise
 	}
-	return fmt.Sprintf("%s\u20b9%d.%02d", sign, paise/100, paise%100)
+	return fmt.Sprintf("%s\u20b9%d.%02d", sign, paise/paisePerRupee, paise%paisePerRupee)
 }
