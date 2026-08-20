@@ -1,5 +1,5 @@
 -- Generated for profile: prod
--- Generated at: 2026-08-07T05:54:50Z
+-- Generated at: 2026-08-11T10:09:14Z
 -- ShardSize: 262144 (compile-time constant; NOT profile-variable)
 -- DataShards: 16
 -- TotalShards: 56
@@ -336,6 +336,19 @@ CREATE TABLE pending_registrations (
 
     phone_number    VARCHAR(15)     NOT NULL,
 
+    purpose         otp_purpose     NOT NULL,
+    -- [M11 audit remediation, Finding 4] The OTP purpose this registration
+    -- token was issued under (OWNER_REGISTER or PROVIDER_REGISTER -- LOGIN
+    -- never reaches here, since HandleVerify only calls
+    -- recordPendingRegistration on the is_new_entity branch). Carried
+    -- through so the register endpoint that redeems this row can reject a
+    -- token issued for the other role or for LOGIN, per OAS's
+    -- OtpSendRequest.purpose description: "The microservice validates that
+    -- the subsequent register call matches this declared purpose."
+    -- Previously absent entirely -- purpose was checked and stored on
+    -- otp_codes at send time but never carried any further, so nothing
+    -- downstream of OTP verify could enforce it.
+
     expires_at      TIMESTAMPTZ     NOT NULL,
     -- Matches the registration token's own TTL (1 hour). A row past this
     -- point is stale; the register endpoint treats it as not found.
@@ -345,7 +358,8 @@ CREATE TABLE pending_registrations (
 
 COMMENT ON TABLE pending_registrations IS
     'Bridges a registration JWT''s opaque sub claim back to the phone number '
-    'it was issued for. One row per pending registration; deleted on redemption.';
+    'and OTP purpose it was issued for. One row per pending registration; '
+    'deleted on redemption.';
 
 -- ── files ──────────────────────────────────────────────────────────────────────
 -- [REF: DM §4.3, REQ §4.4 FR-019]

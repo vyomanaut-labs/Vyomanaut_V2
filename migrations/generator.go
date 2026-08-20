@@ -487,6 +487,19 @@ CREATE TYPE otp_purpose AS ENUM (
 		"\n" +
 		"    phone_number    VARCHAR(15)     NOT NULL,\n" +
 		"\n" +
+		"    purpose         otp_purpose     NOT NULL,\n" +
+		"    -- [M11 audit remediation, Finding 4] The OTP purpose this registration\n" +
+		"    -- token was issued under (OWNER_REGISTER or PROVIDER_REGISTER -- LOGIN\n" +
+		"    -- never reaches here, since HandleVerify only calls\n" +
+		"    -- recordPendingRegistration on the is_new_entity branch). Carried\n" +
+		"    -- through so the register endpoint that redeems this row can reject a\n" +
+		"    -- token issued for the other role or for LOGIN, per OAS's\n" +
+		"    -- OtpSendRequest.purpose description: \"The microservice validates that\n" +
+		"    -- the subsequent register call matches this declared purpose.\"\n" +
+		"    -- Previously absent entirely -- purpose was checked and stored on\n" +
+		"    -- otp_codes at send time but never carried any further, so nothing\n" +
+		"    -- downstream of OTP verify could enforce it.\n" +
+		"\n" +
 		"    expires_at      TIMESTAMPTZ     NOT NULL,\n" +
 		"    -- Matches the registration token's own TTL (1 hour). A row past this\n" +
 		"    -- point is stale; the register endpoint treats it as not found.\n" +
@@ -496,7 +509,8 @@ CREATE TYPE otp_purpose AS ENUM (
 		"\n" +
 		"COMMENT ON TABLE pending_registrations IS\n" +
 		"    'Bridges a registration JWT''s opaque sub claim back to the phone number '\n" +
-		"    'it was issued for. One row per pending registration; deleted on redemption.';\n" +
+		"    'and OTP purpose it was issued for. One row per pending registration; '\n" +
+		"    'deleted on redemption.';\n" +
 		"\n"
 
 	// ── files — profile-invariant ──────────────────────────────────────────────────
