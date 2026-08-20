@@ -17,6 +17,9 @@
 //   - TestVettingStatusIncludeGCPendingOnlyFilter
 //   - TestVettingGCRetryRejectsNonActiveProvider
 //   - TestVettingGCRetryReturns200WhenUnreachable
+//   - TestAdminShardsEndpointRequiresAdminKey
+//   - TestAdminFileShardsReturnsPlacementAndCiphertextAsHex
+//   - TestAdminFileShardsReturnsNotFoundForUnknownFile
 //
 // This package's tests exercise handlers directly rather than through
 // NewRouter/adminAuthMiddleware (see audit_test.go's identical convention);
@@ -683,5 +686,119 @@ func TestVettingGCRetryReturns200WhenUnreachable(t *testing.T) {
 	}
 	if resp.ChunksPendingGCAfter != 1 {
 		t.Errorf("chunks_pending_gc_after = %d, want 1 (no real delivery happened)", resp.ChunksPendingGCAfter)
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// M17-E Session 17.6.1 — getFileShards (ADR-084 §D-2a)
+// ═══════════════════════════════════════════════════════════════════════
+
+// insertTestFileWithDisplayNameDirect is insertTestFileDirect
+// (provider_test.go) plus a non-NULL display_name_ciphertext — needed here
+// specifically to prove that ciphertext survives the round trip as opaque
+// bytes rather than silently coming back empty/omitted.
+func insertTestFileWithDisplayNameDirect(t *testing.T, db *sql.DB, ownerID uuid.UUID, displayNameCiphertext []byte) uuid.UUID {
+	t.Helper()
+	var id uuid.UUID
+	err := db.QueryRow(`
+		INSERT INTO files (owner_id, pointer_ciphertext, pointer_nonce, pointer_tag, original_size_bytes,
+		                    display_name_ciphertext, display_name_nonce, display_name_tag)
+		VALUES ($1, $2, $3, $4, 1048576, $5, $6, $7)
+		RETURNING file_id`,
+		ownerID, []byte("ciphertext"), make([]byte, 12), make([]byte, 16),
+		displayNameCiphertext, make([]byte, 12), make([]byte, 16),
+	).Scan(&id)
+	if err != nil {
+		t.Fatalf("insert test file with display name: %v", err)
+	}
+	return id
+}
+
+func TestAdminShardsEndpointRequiresAdminKey(t *testing.T) {
+	cfg, _, _ := testRouterConfig(t)
+	mux := NewRouter(cfg)
+
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/admin/file/11111111-1111-1111-1111-111111111111/shards", nil) // no X-Admin-API-Key header
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+
+	if w.Code != http.StatusUnauthorized && w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 401 or 403 (missing admin key)", w.Code)
+	}
+}
+
+func TestAdminFileShardsReturnsPlacementAndCiphertextAsHex(t *testing.T) {
+	db := openTestDB(t)
+	ownerID := insertTestOwnerDirect(t, db)
+	displayName := []byte{0xde, 0xad, 0xbe, 0xef, 0x01, 0x02}
+	fileID := insertTestFileWithDisplayNameDirect(t, db, ownerID, displayName)
+	segmentID := insertTestSegmentDirect(t, db, fileID, 0)
+	pub, _, _ := ed25519.GenerateKey(nil)
+	providerID := insertTestProviderDirect(t, db, pub, "ACTIVE")
+	shardIdx := 0
+	realChunkID := insertChunkAssignmentDirect(t, db, providerID, &segmentID, &shardIdx, "ACTIVE")
+	// A synthetic vetting chunk on the same provider — segment_id/shard_index
+	// NULL, so it cannot join to this file's segments at all; included here
+	// to confirm the query's WHERE clause (not merely the join) is what
+	// keeps it out, matching DM §4.5's own is_vetting_chunk semantics.
+	insertChunkAssignmentDirect(t, db, providerID, nil, nil, "ACTIVE")
+
+	h := NewAdminFileShardsHandler(db, config.DemoProfile)
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/admin/file/"+fileID.String()+"/shards", nil)
+	r.SetPathValue("file_id", fileID.String())
+	w := httptest.NewRecorder()
+	h.HandleShards(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	var resp adminFileShardsResponseBody
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.OriginalSizeBytes != 1048576 {
+		t.Errorf("original_size_bytes = %d, want 1048576", resp.OriginalSizeBytes)
+	}
+	if resp.DisplayNameCiphertext == nil {
+		t.Fatal("display_name_ciphertext = nil, want the hex-encoded ciphertext")
+	}
+	if *resp.DisplayNameCiphertext != hex.EncodeToString(displayName) {
+		t.Errorf("display_name_ciphertext = %q, want %q", *resp.DisplayNameCiphertext, hex.EncodeToString(displayName))
+	}
+	if len(resp.Shards) != 1 {
+		t.Fatalf("len(shards) = %d, want 1 (the synthetic vetting chunk must not appear)", len(resp.Shards))
+	}
+	got := resp.Shards[0]
+	if got.ChunkID != hex.EncodeToString(realChunkID[:]) {
+		t.Errorf("chunk_id = %q, want %q", got.ChunkID, hex.EncodeToString(realChunkID[:]))
+	}
+	if got.SegmentID != segmentID {
+		t.Errorf("segment_id = %s, want %s", got.SegmentID, segmentID)
+	}
+	if got.ShardIndex != shardIdx {
+		t.Errorf("shard_index = %d, want %d", got.ShardIndex, shardIdx)
+	}
+	if got.ProviderID != providerID {
+		t.Errorf("provider_id = %s, want %s", got.ProviderID, providerID)
+	}
+	if got.ASN != "AS12345" {
+		t.Errorf("asn = %q, want %q (insertTestProviderDirect's fixed ASN)", got.ASN, "AS12345")
+	}
+	if got.SizeBytes != config.DemoProfile.ShardSize {
+		t.Errorf("size_bytes = %d, want profile.ShardSize = %d", got.SizeBytes, config.DemoProfile.ShardSize)
+	}
+}
+
+func TestAdminFileShardsReturnsNotFoundForUnknownFile(t *testing.T) {
+	db := openTestDB(t)
+	h := NewAdminFileShardsHandler(db, config.DemoProfile)
+	unknown := uuid.New()
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/admin/file/"+unknown.String()+"/shards", nil)
+	r.SetPathValue("file_id", unknown.String())
+	w := httptest.NewRecorder()
+	h.HandleShards(w, r)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404, body = %s", w.Code, w.Body.String())
 	}
 }

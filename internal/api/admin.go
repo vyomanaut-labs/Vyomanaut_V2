@@ -5,6 +5,15 @@
 // wrapped by router.go's adminAuthMiddleware — none of them read
 // ClaimsFromContext (the AdminApiKey scheme has no bearer claims to read).
 //
+// [M17-E Session 17.6.1, ADR-084 §D-2a] A seventh AdminApiKey endpoint was
+// added at the end of this file: getFileShards
+// (GET /api/v1/admin/file/{file_id}/shards). It is the one new server
+// endpoint ADR-084 authorises — deliberately narrower than giving
+// cmd/operator a database connection outright, per that section's own
+// reasoning. adminProviderItem also gained declared_storage_gb (requirement
+// 11) in this session; the underlying column was already selected by
+// Session 11.10.1's own query, just not previously exposed in the response.
+//
 // [Flagged and corrected — wrong NFR citation, build.md Phase 11.10] The
 // getRepairQueue task text as originally written attributes
 // "emergency_queued > 0 fires immediately" to NFR-027. NFR-027 lists four
@@ -153,6 +162,13 @@ type adminProviderItem struct {
 	VettingChunkCap        *int       `json:"vetting_chunk_cap"`
 	VettingGCPending       *bool      `json:"vetting_gc_pending"`
 	DepartedAt             *time.Time `json:"departed_at"`
+	// DeclaredStorageGB — M17-E Session 17.6.1, ADR-084 requirement 11: the
+	// operator fleet panel needs this to show each provider's declared
+	// allocation. The underlying column was already selected into
+	// rowExtras.declaredStorageGB below (Phase 11.10) for the vetting-cap
+	// arithmetic; this field just exposes it in the response too, rather
+	// than adding a second query for a column already in hand.
+	DeclaredStorageGB int `json:"declared_storage_gb"`
 }
 
 type adminProvidersResponseBody struct {
@@ -310,6 +326,7 @@ func (h *AdminProvidersHandler) HandleList(w http.ResponseWriter, r *http.Reques
 		if scoreComposite.Valid {
 			item.ScoreComposite = &scoreComposite.Float64
 		}
+		item.DeclaredStorageGB = ex.declaredStorageGB
 		// Vetting fields, gated exactly as providerStatusResponseBody gates
 		// them (provider.go HandleStatus) — chunks_assigned/cap on
 		// VETTING only, gc_pending on ACTIVE only.
@@ -1067,6 +1084,132 @@ func (h *VettingGCRetryHandler) HandleRetry(w http.ResponseWriter, r *http.Reque
 		DeliveryAttempted:     false,
 		ChunksPendingGCBefore: chunksPendingGCBefore,
 		ChunksPendingGCAfter:  chunksPendingGCBefore,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// M17-E Session 17.6.1 — GET /api/v1/admin/file/{file_id}/shards
+// (getFileShards, ADR-084 §D-2a)
+//
+// This is cmd/operator's `shards <file_id>` command's sole data source —
+// the operator's complete view of one file's chunk placement, structurally
+// prevented (I-DEMO-1) from ever holding a decoding path or a database
+// connection of its own. display_name_ciphertext is returned exactly as
+// stored: opaque bytes, hex-encoded, never decrypted here or anywhere in
+// this package (ADR-020).
+// ═══════════════════════════════════════════════════════════════════════
+
+type adminFileShardItem struct {
+	ChunkID    string    `json:"chunk_id"`
+	SegmentID  uuid.UUID `json:"segment_id"`
+	ShardIndex int       `json:"shard_index"`
+	ProviderID uuid.UUID `json:"provider_id"`
+	ASN        string    `json:"asn"`
+	SizeBytes  int       `json:"size_bytes"`
+}
+
+type adminFileShardsResponseBody struct {
+	FileID                uuid.UUID            `json:"file_id"`
+	OriginalSizeBytes     int64                `json:"original_size_bytes"`
+	DisplayNameCiphertext *string              `json:"display_name_ciphertext,omitempty"`
+	Shards                []adminFileShardItem `json:"shards"`
+}
+
+// AdminFileShardsHandler serves GET /api/v1/admin/file/{file_id}/shards.
+type AdminFileShardsHandler struct {
+	db      *sql.DB
+	profile config.NetworkProfile
+}
+
+func NewAdminFileShardsHandler(db *sql.DB, profile config.NetworkProfile) *AdminFileShardsHandler {
+	return &AdminFileShardsHandler{db: db, profile: profile}
+}
+
+// hexPtrOrNil hex-encodes raw, returning nil for an empty/nil slice —
+// mirrors files.display_name_ciphertext's own nullability (DM §4.3: "NULL
+// is acceptable if the owner provides no label").
+func hexPtrOrNil(raw []byte) *string {
+	if len(raw) == 0 {
+		return nil
+	}
+	s := hex.EncodeToString(raw)
+	return &s
+}
+
+func (h *AdminFileShardsHandler) HandleShards(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	fileID, err := uuid.Parse(r.PathValue("file_id"))
+	if err != nil {
+		WriteError(w, http.StatusBadRequest, ErrInvalidRequest, "file_id must be a UUID", nil, "file_id", nil)
+		return
+	}
+
+	var originalSizeBytes int64
+	var displayNameCiphertext []byte
+	err = h.db.QueryRowContext(ctx, `
+		SELECT original_size_bytes, display_name_ciphertext FROM files WHERE file_id = $1`, fileID,
+	).Scan(&originalSizeBytes, &displayNameCiphertext)
+	if errors.Is(err, sql.ErrNoRows) {
+		WriteError(w, http.StatusNotFound, ErrNotFound, "file not found", nil, "file_id", nil)
+		return
+	}
+	if err != nil {
+		WriteError(w, http.StatusInternalServerError, ErrInternal, "file lookup failed", nil, "", nil)
+		return
+	}
+
+	// Real (non-vetting) shards currently placed for this file. ACTIVE and
+	// REPAIRING both count as "currently placed" — the same status set
+	// ManualRepairTriggerHandler's own available_shard_count computation
+	// above uses; DELETED/PENDING_DELETION rows are gone, not part of the
+	// operator's live view.
+	rows, err := h.db.QueryContext(ctx, `
+		SELECT ca.chunk_id, ca.segment_id, ca.shard_index, ca.provider_id, p.asn
+		FROM chunk_assignments ca
+		JOIN segments s ON s.segment_id = ca.segment_id
+		JOIN providers p ON p.provider_id = ca.provider_id
+		WHERE s.file_id = $1 AND ca.is_vetting_chunk = FALSE AND ca.status IN ('ACTIVE', 'REPAIRING')
+		ORDER BY s.segment_index ASC, ca.shard_index ASC`, fileID)
+	if err != nil {
+		WriteError(w, http.StatusInternalServerError, ErrInternal, "shard query failed", nil, "", nil)
+		return
+	}
+	defer func() {
+		if err := rows.Close(); err != nil {
+			slog.Error("AdminFileShardsHandler.HandleShards: close rows", "error", err)
+		}
+	}()
+
+	shards := make([]adminFileShardItem, 0)
+	for rows.Next() {
+		var item adminFileShardItem
+		var chunkIDRaw []byte
+		if err := rows.Scan(&chunkIDRaw, &item.SegmentID, &item.ShardIndex, &item.ProviderID, &item.ASN); err != nil {
+			WriteError(w, http.StatusInternalServerError, ErrInternal, "scan failed", nil, "", nil)
+			return
+		}
+		item.ChunkID = hex.EncodeToString(chunkIDRaw)
+		// SizeBytes: chunk_assignments carries no per-row byte length of its
+		// own (DM §4.5) — every real shard is exactly one profile.ShardSize
+		// block on the wire, identical in both profiles (build skill's own
+		// silent invariant), so the profile constant is the correct source,
+		// not a stored value.
+		item.SizeBytes = h.profile.ShardSize
+		shards = append(shards, item)
+	}
+	if err := rows.Err(); err != nil {
+		WriteError(w, http.StatusInternalServerError, ErrInternal, "row iteration failed", nil, "", nil)
+		return
+	}
+
+	resp := adminFileShardsResponseBody{
+		FileID:                fileID,
+		OriginalSizeBytes:     originalSizeBytes,
+		DisplayNameCiphertext: hexPtrOrNil(displayNameCiphertext),
+		Shards:                shards,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
