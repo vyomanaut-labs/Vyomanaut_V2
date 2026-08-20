@@ -326,10 +326,30 @@ func (h *UploadAssignHandler) HandleAssign(w http.ResponseWriter, r *http.Reques
 
 	if len(existing) == 0 {
 		// Check 1 — readiness gate.
-		readinessResp, err := h.readiness.Evaluate(ctx)
-		if err != nil {
-			WriteError(w, http.StatusInternalServerError, ErrInternal, "readiness evaluation failed", nil, "", nil)
-			return
+		//
+		// [Corrected — M12 audit corrections, Finding 3, hand-adapted here:
+		// the original patch's context was h.readiness.Evaluate(ctx) called
+		// unconditionally at the top of HandleAssign, one indent level
+		// shallower than today. ADR-072/073's incremental-submission
+		// rewrite (see this handler's own header) moved that whole block
+		// inside this "if len(existing) == 0" guard sometime after the
+		// M12 correction was written, so the original diff's context lines
+		// no longer matched — this is the same logical fix, applied at the
+		// current nesting level.] This was previously a live, synchronous,
+		// full seven-condition evaluation on every single upload-assign
+		// request that reaches this branch — the busiest write path in the
+		// system — when IC §3.4 specifies a 60-second cache. Now reads
+		// h.readiness.Cached() instead; see that method's own doc comment
+		// for the cold-start fallback below and readiness.go's header note
+		// for the full history of this gap.
+		readinessResp, ok := h.readiness.Cached()
+		if !ok {
+			var err error
+			readinessResp, err = h.readiness.Evaluate(ctx)
+			if err != nil {
+				WriteError(w, http.StatusInternalServerError, ErrInternal, "readiness evaluation failed", nil, "", nil)
+				return
+			}
 		}
 		if !readinessResp.AllConditionsMet {
 			writeNetworkNotReadyError(w)

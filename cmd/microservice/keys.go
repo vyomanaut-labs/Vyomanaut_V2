@@ -35,6 +35,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/api"
 )
 
 // microserviceSigningSeedEnvVar holds the 32-byte Ed25519 seed (64 hex
@@ -91,15 +93,17 @@ func loadOrGenerateMicroserviceSigningKey(requireSecretsManager bool, seedHex st
 }
 
 // adminAPIKeyEnvVar holds the X-Admin-API-Key value (OAS AdminApiKey
-// security scheme: >=32 random bytes, hex-encoded — adminAPIKeyMinHexLen in
+// security scheme: >=32 random bytes, hex-encoded — api.AdminAPIKeyMinHexLen in
 // internal/api/router.go).
 const adminAPIKeyEnvVar = "VYOMANAUT_ADMIN_API_KEY"
 
-// adminAPIKeyMinHexLen mirrors internal/api/router.go's own unexported
-// constant of the same value; duplicated here (not imported — it is
-// unexported) purely so this file's own validation can give an early, clear
-// startup error instead of every admin request failing after the fact.
-const adminAPIKeyMinHexLen = 64
+// [Corrected — M12 audit corrections, Finding 9] Previously duplicated
+// internal/api/router.go's constant here (it was unexported, so importing
+// it wasn't possible) — now that it is exported as
+// api.AdminAPIKeyMinHexLen, this file uses that single definition directly
+// instead of maintaining a second, independently-kept-in-sync-by-convention
+// literal. cmd/microservice already imports internal/api (main.go,
+// background_loops.go) for other reasons.
 
 const hexCharsPerByte = 2
 
@@ -111,9 +115,9 @@ const hexCharsPerByte = 2
 // short-lived and the value must simply be discoverable somewhere.
 func loadOrGenerateAdminAPIKey(requireSecretsManager bool, keyHex string) (string, error) {
 	if keyHex != "" {
-		if len(keyHex) < adminAPIKeyMinHexLen {
+		if len(keyHex) < api.AdminAPIKeyMinHexLen {
 			return "", fmt.Errorf("cmd/microservice: %s must be at least %d hex characters, got %d",
-				adminAPIKeyEnvVar, adminAPIKeyMinHexLen, len(keyHex))
+				adminAPIKeyEnvVar, api.AdminAPIKeyMinHexLen, len(keyHex))
 		}
 		if _, err := hex.DecodeString(keyHex); err != nil {
 			return "", fmt.Errorf("cmd/microservice: %s is not valid hex: %w", adminAPIKeyEnvVar, err)
@@ -125,7 +129,7 @@ func loadOrGenerateAdminAPIKey(requireSecretsManager bool, keyHex string) (strin
 		return "", fmt.Errorf("cmd/microservice: %s must be set in production", adminAPIKeyEnvVar)
 	}
 
-	buf := make([]byte, adminAPIKeyMinHexLen/hexCharsPerByte)
+	buf := make([]byte, api.AdminAPIKeyMinHexLen/hexCharsPerByte)
 	if _, err := cryptorand.Read(buf); err != nil {
 		return "", fmt.Errorf("cmd/microservice: generate ephemeral admin API key: %w", err)
 	}

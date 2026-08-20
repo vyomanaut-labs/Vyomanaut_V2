@@ -12,8 +12,29 @@
 // this file assembles; see audit_dispatch.go (Session 12.1.2) for the audit
 // challenge dispatch loop step 16 starts.
 //
-// [REF: MVP §2.3, MVP §5.3, MVP §5.5, IC §2, IC §3.4, IC §4.2, IC §8, IC §9,
-// ARCH §18, NFR-028, build.md Milestone 12 Phase 12.1]
+// [Corrected — M12 audit corrections, Finding 2] This file previously never
+// constructed a p2p.DHT at all — the capability was structurally absent,
+// not merely unused, despite Session 12.1.2 step 1 requiring a "DHT
+// fallback if multiaddr_stale = true" and a working p2p.NewDHT/FindProviders
+// already existing from an earlier milestone. Step 10 below now also
+// constructs a DHT alongside p2pHost, mirroring cmd/provider/main.go's own
+// existing DHT construction exactly (same NewDHT call shape, no configured
+// Seeds/SelfAddrs — see that file's own step 9): the microservice is a
+// read-only DHT participant here (FindPeer only, via adapters.go's
+// resolveProviderPeer), never announcing PutProviderRecord for itself, so
+// it needs nothing beyond what NewDHT's zero-value DHTConfig fields already
+// provide. See adapters.go's header note for the full fallback design and
+// its known, pre-existing, cross-milestone limitations (no DHT bootstrap
+// seed mechanism yet exists for the provider network, distinct from this
+// step's own gossip-cluster seeds; cmd/provider's own heartbeat-driven DHT
+// republication is itself a documented GAP with Store: nil) — this session
+// makes the microservice capable of benefiting from that traffic once
+// those companion gaps close, without silently overstating what it fixes
+// today.
+//
+// [REF: MVP §2.3, MVP §5.3, MVP §5.5, IC §2, IC §3.4, IC §4.2, IC §5.4,
+// IC §8, IC §9, ARCH §13, ARCH §18, NFR-028, build.md Milestone 12 Phase
+// 12.1, Milestone 12 audit corrections Finding 2]
 package main
 
 import (
@@ -382,7 +403,22 @@ func runMicroservice(ctx context.Context, cfg startupConfig) (*app, error) {
 	// load balancer's own address until Milestone 17 provides the real
 	// gossip-aware implementation — a no-op until M17, not the real
 	// membership-aware routing logic (see cluster/router.go).
-	clusterRouter := cluster.NewRouter(clusterMembership, cfg.HTTPListenAddr)
+	//
+	// [Corrected — M12 audit corrections, Finding 11] The placeholder
+	// address previously passed here was cfg.HTTPListenAddr — this
+	// replica's OWN listen address, not a real load balancer's. Harmless
+	// today only because clusterRouter is discarded unused (`_ =
+	// clusterRouter` below); the trap the audit flagged is for whoever
+	// wires ResponsibleReplica into a real call site later without
+	// noticing the placeholder doesn't represent a shared LB endpoint —
+	// "routing through the load balancer" would silently just mean
+	// routing back to whichever single replica happened to construct it.
+	// cfg.LoadBalancerAddr (VYOMANAUT_LOAD_BALANCER_ADDR, see
+	// config_env.go) gives a future session a real value to set with no
+	// further code change required here; it defaults to cfg.HTTPListenAddr
+	// so today's behaviour is unchanged until that env var is actually
+	// configured against a real load balancer.
+	clusterRouter := cluster.NewRouter(clusterMembership, cfg.LoadBalancerAddr)
 	_ = clusterRouter // constructed per this session's step 9; consulted by Milestone 17's real dispatch paths, not by this session's own loops
 
 	// ── Step 10 ───────────────────────────────────────────────────────────
@@ -393,10 +429,26 @@ func runMicroservice(ctx context.Context, cfg startupConfig) (*app, error) {
 	}
 	a.p2pHost = p2pHost
 
+	// [Added — M12 audit corrections, Finding 2] p2p.NewDHT, mirroring
+	// cmd/provider/main.go's own DHT construction exactly (no configured
+	// Seeds/SelfAddrs — the microservice never announces PutProviderRecord
+	// for itself; it only consumes FindPeer). See this file's header note
+	// and adapters.go's resolveProviderPeer doc comment for the full
+	// design and its known limitations. A construction failure here is
+	// treated the same as a p2p.NewHost failure (fail the whole startup,
+	// not a silent nil-DHT degrade) — an audit challenge/repair dispatcher
+	// that can never recover a stale address is a real capability loss,
+	// not a cosmetic one.
+	dht, err := p2p.NewDHT(p2pHost, p2p.DHTConfig{RecordTTL: profile.DHTExpiryDuration})
+	if err != nil {
+		a.shutdown()
+		return nil, fmt.Errorf("runMicroservice: construct DHT: %w", err)
+	}
+
 	// ── Step 11 ───────────────────────────────────────────────────────────
 	// repairTransport := p2pHost, adapted — see adapters.go's header note on
 	// why repairTransportAdapter (not a bare structural cast) is required.
-	repairTransport := &repairTransportAdapter{db: db, host: p2pHost}
+	repairTransport := &repairTransportAdapter{db: db, host: p2pHost, dht: dht}
 
 	// ── Step 12 ───────────────────────────────────────────────────────────
 	paymentProvider := buildPaymentProvider(db, profile)
@@ -417,7 +469,7 @@ func runMicroservice(ctx context.Context, cfg startupConfig) (*app, error) {
 	go runRepairExecutorLoop(ctx, db, profile, repairTransport, erasureEngine, jwtPriv, p2pHost)
 
 	// ── Step 16 ───────────────────────────────────────────────────────────
-	go runAuditDispatchLoop(ctx, db, profile, cache, p2pHost, jwtPriv)
+	go runAuditDispatchLoop(ctx, db, profile, cache, p2pHost, dht, jwtPriv)
 
 	// ── Step 17 ───────────────────────────────────────────────────────────
 	go payment.RunReleaseComputationLoop(ctx, db, primaryDB, profile, paymentProvider)
