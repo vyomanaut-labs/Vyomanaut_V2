@@ -26,6 +26,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -341,5 +345,93 @@ func TestOtpVerifyExistingOwnerGetsOwnerToken(t *testing.T) {
 	}
 	if claims.Expiry.Sub(time.Now().UTC()) > OwnerTokenTTL || claims.Expiry.Before(time.Now().UTC()) {
 		t.Errorf("token expiry %v is not within OwnerTokenTTL of now", claims.Expiry)
+	}
+}
+
+// ── FileOtpSender (ADR-084 D-3, M17-E Session 17.4.2) ──────────────────────
+//
+// Tests:
+//   - TestFileOtpSenderAppendsOneLinePerSend
+//   - TestFileOtpSenderCreatesLogMode0600
+//   - TestFileOtpSenderIsConcurrencySafe
+
+func TestFileOtpSenderAppendsOneLinePerSend(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "otp-delivery.log")
+	sender, err := NewFileOtpSender(path)
+	if err != nil {
+		t.Fatalf("NewFileOtpSender: %v", err)
+	}
+	t.Cleanup(func() { _ = sender.Close() })
+
+	if err := sender.SendOTP(context.Background(), "+919876500001", "111111"); err != nil {
+		t.Fatalf("SendOTP (1): %v", err)
+	}
+	if err := sender.SendOTP(context.Background(), "+919876500002", "222222"); err != nil {
+		t.Fatalf("SendOTP (2): %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read delivery log: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines, want 2 (one send == one line): %q", len(lines), data)
+	}
+	if !strings.Contains(lines[0], "+919876500001") || !strings.Contains(lines[0], "111111") {
+		t.Errorf("line 1 = %q, want it to contain the phone number and code", lines[0])
+	}
+	if !strings.Contains(lines[1], "+919876500002") || !strings.Contains(lines[1], "222222") {
+		t.Errorf("line 2 = %q, want it to contain the phone number and code", lines[1])
+	}
+}
+
+func TestFileOtpSenderCreatesLogMode0600(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "otp-delivery.log")
+	sender, err := NewFileOtpSender(path)
+	if err != nil {
+		t.Fatalf("NewFileOtpSender: %v", err)
+	}
+	t.Cleanup(func() { _ = sender.Close() })
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("delivery log mode = %o, want 0600 — this file holds plaintext OTP codes", perm)
+	}
+}
+
+// TestFileOtpSenderIsConcurrencySafe fires many SendOTP calls concurrently
+// (the shape multiple in-flight HandleSend requests produce) and verifies
+// every line survives intact — a missing mutex would interleave partial
+// writes and corrupt, merge, or drop lines under `go test -race`.
+func TestFileOtpSenderIsConcurrencySafe(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "otp-delivery.log")
+	sender, err := NewFileOtpSender(path)
+	if err != nil {
+		t.Fatalf("NewFileOtpSender: %v", err)
+	}
+	t.Cleanup(func() { _ = sender.Close() })
+
+	const n = 50
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_ = sender.SendOTP(context.Background(), fmt.Sprintf("+9198765%05d", i), fmt.Sprintf("%06d", i))
+		}(i)
+	}
+	wg.Wait()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read delivery log: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) != n {
+		t.Fatalf("got %d lines, want %d — a data race would corrupt/merge/drop concurrent writes", len(lines), n)
 	}
 }
