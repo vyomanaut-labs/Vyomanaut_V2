@@ -115,6 +115,7 @@ func allRegisteredRoutes() []routeFixture {
 		{"GET", "/api/v1/admin/audit/stats", authAdmin, true},
 		{"GET", "/api/v1/admin/vetting/status", authAdmin, true},
 		{"POST", "/api/v1/admin/vetting/gc/retry", authAdmin, true},
+		{"GET", "/api/v1/admin/file/11111111-1111-1111-1111-111111111111/shards", authAdmin, true}, // M17-E Session 17.6.1, ADR-084 §D-2a
 		{"POST", "/webhooks/razorpay", authNone, false},
 	}
 }
