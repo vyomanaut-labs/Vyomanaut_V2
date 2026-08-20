@@ -46,6 +46,15 @@ type startupConfig struct {
 
 	HTTPListenAddr string // VYOMANAUT_HTTP_LISTEN_ADDR; default ":8080"
 	P2PListenAddr  string // VYOMANAUT_P2P_LISTEN_ADDR; empty = outbound-only (HostConfig's own documented default for the microservice)
+
+	// OtpDeliveryLogPath (M17-E Session 17.4.2, ADR-084 D-3): path to a
+	// demo-mode OTP delivery log — set from --otp-delivery-log or
+	// VYOMANAUT_OTP_DELIVERY_LOG. Empty (the default) preserves this
+	// daemon's exact original behavior: api.NoopOtpSender, no file, no SMS
+	// integration. Non-empty is FATAL outside demo mode (runMicroservice) —
+	// a file-backed OTP gateway is a legitimate demo convenience and a
+	// genuine incident waiting to happen in production.
+	OtpDeliveryLogPath string
 }
 
 // envOr returns the value of the named environment variable, or def if unset
@@ -113,5 +122,7 @@ func loadStartupConfigFromEnv() startupConfig {
 
 		HTTPListenAddr: envOr("VYOMANAUT_HTTP_LISTEN_ADDR", ":8080"),
 		P2PListenAddr:  os.Getenv("VYOMANAUT_P2P_LISTEN_ADDR"), // empty = outbound-only (HostConfig doc comment)
+
+		OtpDeliveryLogPath: os.Getenv("VYOMANAUT_OTP_DELIVERY_LOG"), // empty = NoopOtpSender (unchanged default)
 	}
 }
