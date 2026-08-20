@@ -202,6 +202,37 @@ func (idx *rocksDBIndex) allChunkIDs() [][32]byte {
 	return ids
 }
 
+// listChunkIDs is allChunkIDs' counterpart for ChunkStore.ListChunks
+// (M17-E Session 17.5.1) — a SEPARATE method, not a refactor of
+// allChunkIDs above, deliberately: allChunkIDs has one existing caller
+// (vlog.go's RunGC, outside this session's FILES: scope) with a
+// long-standing signature ([][32]byte, no error) this session does not
+// touch. ChunkStore.ListChunks's own contract returns an error, so this
+// method — unlike allChunkIDs — checks Iterator.Err() after the scan: an
+// interface that promises error reporting should not silently report
+// success if RocksDB's C++ iterator actually hit one (e.g. a corrupted
+// SST file), no matter how unlikely in practice.
+//
+// Returns a non-nil, zero-length slice for an empty CF — never nil with a
+// nil error (ChunkStore.ListChunks' documented post-condition, store.go).
+func (idx *rocksDBIndex) listChunkIDs() ([][32]byte, error) {
+	it := idx.db.NewIteratorCF(idx.readOps, idx.cfData)
+	defer it.Close()
+
+	ids := make([][32]byte, 0)
+	for it.SeekToFirst(); it.Valid(); it.Next() {
+		k := it.Key()
+		var id [32]byte
+		copy(id[:], k.Data())
+		k.Free()
+		ids = append(ids, id)
+	}
+	if err := it.Err(); err != nil {
+		return nil, fmt.Errorf("storage: rocksDBIndex.listChunkIDs: iteration: %w", err)
+	}
+	return ids, nil
+}
+
 // close releases all RocksDB handles in the correct order:
 // CF handles before WriteOptions/ReadOptions before the DB itself.
 func (idx *rocksDBIndex) close() {
@@ -266,3 +297,19 @@ func newEngineStore(dataDir string) (ChunkStore, error) {
 // so vlog.go's diff for Session 16.0.1 is exactly zero (Design Council
 // verdict, correction #2).
 var _ ChunkStore = (*wiskeyStore)(nil)
+
+// ListChunks satisfies ChunkStore.ListChunks (store.go, M17-E Session
+// 17.5.1) for wiskeyStore. Defined here, not vlog.go, for the identical
+// reason the compile-time assertion immediately above is: keeping
+// vlog.go's diff at zero, the same precedent Session 16.0.1 (ADR-046 §1)
+// already established for this exact file — a wiskeyStore method living
+// in a file other than the one declaring the type is not a new pattern
+// this session invents.
+//
+// A thin wrapper, not inline iteration logic: real work is
+// rocksDBIndex.listChunkIDs (above), the same "ChunkStore-facing method +
+// private rocksDBIndex helper" shape put/get/del/allChunkIDs already use
+// throughout this file.
+func (s *wiskeyStore) ListChunks() ([][32]byte, error) {
+	return s.index.listChunkIDs()
+}
