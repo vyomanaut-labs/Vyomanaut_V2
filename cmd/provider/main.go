@@ -98,11 +98,21 @@ type providerFlags struct {
 	dataDir           string
 	declaredStorageGB int
 	relayAddrs        string
-	simCount          int
-	simBasePort       int
-	simDataDir        string
-	simASNCount       int
-	simOnlyIndex      *int // nil = run every instance (zero-value-safe: unlike an int sentinel, a directly-constructed providerFlags{} defaults to nil, not a misleading 0)
+
+	// listenPort/advertiseAddr (M17-E Session 17.4.1, ADR-084 D-7, F-D-3,
+	// F-D-4): normal (non-simulation) mode only. listenPort lets two
+	// providers share one host — simulation mode already has its own
+	// independent port scheme (simBasePort) and never reads this field.
+	// advertiseAddr is resolved into a concrete host once per instance by
+	// resolveAdvertiseHost (advertise.go); empty means autodetect.
+	listenPort    int
+	advertiseAddr string
+
+	simCount     int
+	simBasePort  int
+	simDataDir   string
+	simASNCount  int
+	simOnlyIndex *int // nil = run every instance (zero-value-safe: unlike an int sentinel, a directly-constructed providerFlags{} defaults to nil, not a misleading 0)
 
 	// registrationBearerToken: the OTP-verify-issued registration bearer
 	// token POST /api/v1/provider/register requires (router.go wraps it in
@@ -119,23 +129,49 @@ type providerFlags struct {
 	registrationBearerToken string
 }
 
-func parseProviderFlags() providerFlags {
+// defaultProviderDataDir returns the default --data-dir every provider
+// subcommand (run, onboard, inspect, earnings, depart) falls back to when
+// the flag is omitted — the SAME default across all of them, so a bare
+// `provider onboard` followed later by a bare `provider run` naturally
+// operate on the same directory without the operator having to remember
+// --data-dir at all (M17-E Session 17.4.2).
+func defaultProviderDataDir() string {
 	home, _ := os.UserHomeDir()
-	defaultDataDir := filepath.Join(home, ".vyomanaut")
+	return filepath.Join(home, ".vyomanaut")
+}
+
+// parseProviderFlags parses args (the "run" subcommand's own argv —
+// dispatch.go's resolveSubcommand supplies either os.Args[1:] unchanged,
+// for the pre-Session-17.4.1 bare-flags invocation shape, or the remainder
+// after an explicit "run" word) into a providerFlags value.
+//
+// A fresh flag.FlagSet per call (M17-E Session 17.4.1), not the
+// package-level flag.CommandLine this function used before: the prior form
+// could only ever be invoked once per process (a second call panics with
+// "flag redefined"), which was fine when this was main()'s only job but
+// stops being fine now that cmd/provider has four sibling subcommands in
+// the same binary. flag.ExitOnError preserves this function's original
+// behavior on a malformed flag exactly — print usage, os.Exit(2).
+func parseProviderFlags(args []string) providerFlags {
+	defaultDataDir := defaultProviderDataDir()
+
+	fs := flag.NewFlagSet("provider run", flag.ExitOnError)
 
 	var f providerFlags
-	flag.StringVar(&f.mode, "mode", "", "'demo' or 'prod'; overrides VYOMANAUT_MODE")
-	flag.StringVar(&f.microserviceURL, "microservice-url", "", "Required. HTTPS base URL of the coordination microservice.")
-	flag.StringVar(&f.dataDir, "data-dir", defaultDataDir, "Persistent data directory.")
-	flag.IntVar(&f.declaredStorageGB, "declared-storage-gb", 0, "Required in normal mode.")
-	flag.StringVar(&f.relayAddrs, "relay-addrs", "", "Comma-separated relay node multiaddrs.")
-	flag.IntVar(&f.simCount, "sim-count", 0, "Simulation instances in a single process. 0 = normal mode.")
-	flag.IntVar(&f.simBasePort, "sim-base-port", defaultSimBasePort, "Base libp2p listen port for simulation instances.")
-	flag.StringVar(&f.simDataDir, "sim-data-dir", "/tmp/vyomanaut-sim", "Root directory for simulation instance data.")
-	flag.IntVar(&f.simASNCount, "sim-asn-count", defaultSimASNCount, "Synthetic ASN count for simulation mode.")
-	flag.StringVar(&f.registrationBearerToken, "registration-bearer-token", "", "OTP-verify-issued registration bearer token for POST /api/v1/provider/register (see providerFlags.registrationBearerToken doc comment for why this is supplied externally rather than obtained by this daemon). Empty = skip registration.")
-	simOnlyIndexFlag := flag.Int("sim-only-index", -1, "If >= 0, run only this one instance index from the --sim-count group as its own OS process, computing the exact same dataDir/port/ASN it would have under a full single-process run. -1 (default) runs every instance in this process (original --sim-count behavior). Added post-Session-16.2.1: --sim-count's goroutines-in-one-process design has no way to terminate a single simulated instance without killing all of them, which demo_timeline_test.go's departure-detection check needs (Session 16.1.1).")
-	flag.Parse()
+	fs.StringVar(&f.mode, "mode", "", "'demo' or 'prod'; overrides VYOMANAUT_MODE")
+	fs.StringVar(&f.microserviceURL, "microservice-url", "", "Required. HTTPS base URL of the coordination microservice.")
+	fs.StringVar(&f.dataDir, "data-dir", defaultDataDir, "Persistent data directory.")
+	fs.IntVar(&f.declaredStorageGB, "declared-storage-gb", 0, "Required in normal mode.")
+	fs.StringVar(&f.relayAddrs, "relay-addrs", "", "Comma-separated relay node multiaddrs.")
+	fs.IntVar(&f.listenPort, "listen-port", defaultProviderListenPort, "Inbound libp2p listen port for normal (non-simulation) mode. Lets two providers share one host (M17-E F-D-3).")
+	fs.StringVar(&f.advertiseAddr, "advertise-addr", "", "IPv4 host (or host:port — the port is ignored; --listen-port is authoritative) this daemon advertises to the network in its multiaddr. Empty = autodetect the first non-loopback, non-link-local interface address, falling back to 127.0.0.1 with a logged warning if none is found (M17-E F-D-4). A demo across separate desktops REQUIRES this to resolve to a real, reachable address.")
+	fs.IntVar(&f.simCount, "sim-count", 0, "Simulation instances in a single process. 0 = normal mode.")
+	fs.IntVar(&f.simBasePort, "sim-base-port", defaultSimBasePort, "Base libp2p listen port for simulation instances.")
+	fs.StringVar(&f.simDataDir, "sim-data-dir", "/tmp/vyomanaut-sim", "Root directory for simulation instance data.")
+	fs.IntVar(&f.simASNCount, "sim-asn-count", defaultSimASNCount, "Synthetic ASN count for simulation mode.")
+	fs.StringVar(&f.registrationBearerToken, "registration-bearer-token", "", "OTP-verify-issued registration bearer token for POST /api/v1/provider/register (see providerFlags.registrationBearerToken doc comment for why this is supplied externally rather than obtained by this daemon). Empty = skip registration.")
+	simOnlyIndexFlag := fs.Int("sim-only-index", -1, "If >= 0, run only this one instance index from the --sim-count group as its own OS process, computing the exact same dataDir/port/ASN it would have under a full single-process run. -1 (default) runs every instance in this process (original --sim-count behavior). Added post-Session-16.2.1: --sim-count's goroutines-in-one-process design has no way to terminate a single simulated instance without killing all of them, which demo_timeline_test.go's departure-detection check needs (Session 16.1.1).")
+	_ = fs.Parse(args)
 	if *simOnlyIndexFlag >= 0 {
 		f.simOnlyIndex = simOnlyIndexFlag
 	}
@@ -213,6 +249,13 @@ type providerInstanceConfig struct {
 	declaredStorageGB int
 	microserviceURL   string
 
+	// advertiseAddr is providerFlags.advertiseAddr, threaded through
+	// unchanged (M17-E Session 17.4.1, ADR-084 F-D-4). Resolved into a
+	// concrete host exactly once per instance, inside runProviderInstance,
+	// by resolveAdvertiseHost (advertise.go) — never re-resolved anywhere
+	// else, so the registration and heartbeat multiaddrs always agree.
+	advertiseAddr string
+
 	// syntheticASN is non-empty only under --sim-count: SIM-AS{1..sim-asn-count},
 	// cycling if sim-count > sim-asn-count. Sent as demo_asn in the
 	// self-registration call below.
@@ -223,8 +266,15 @@ type providerInstanceConfig struct {
 	registrationBearerToken string
 }
 
-func main() {
-	flags := parseProviderFlags()
+// runCmd is the "run" subcommand's handler (dispatch.go) — this daemon's
+// full startup sequence, unchanged in substance from this function's
+// pre-Session-17.4.1 form as main() itself. args is the argv this
+// subcommand owns: os.Args[1:] when invoked with bare flags and no
+// subcommand word (the pre-existing, still-supported shape every
+// integration test uses — resolveSubcommand, dispatch.go), or the
+// remainder after an explicit "run" word.
+func runCmd(args []string) {
+	flags := parseProviderFlags(args)
 
 	// ── Step 2: profile selection + startup guards ──────────────────────
 	profile := config.SelectProfile(flags.mode)
@@ -274,9 +324,10 @@ func main() {
 		label:                   "single",
 		dataDir:                 flags.dataDir,
 		chunkStoreDir:           flags.dataDir,
-		listenPort:              defaultProviderListenPort,
+		listenPort:              flags.listenPort,
 		declaredStorageGB:       flags.declaredStorageGB,
 		microserviceURL:         flags.microserviceURL,
+		advertiseAddr:           flags.advertiseAddr,
 		registrationBearerToken: flags.registrationBearerToken,
 	}
 	if err := runProviderInstance(ctx, profile, cfg); err != nil {
@@ -370,6 +421,7 @@ func runSimulation(ctx context.Context, flags providerFlags, profile config.Netw
 			declaredStorageGB:       flags.declaredStorageGB,
 			microserviceURL:         flags.microserviceURL,
 			syntheticASN:            syntheticASN,
+			advertiseAddr:           flags.advertiseAddr,
 			registrationBearerToken: flags.registrationBearerToken,
 		}
 
@@ -445,6 +497,24 @@ func runProviderInstance(ctx context.Context, profile config.NetworkProfile, cfg
 	}
 	log.Printf("[STARTUP]%s Peer ID: %s", logTag, peerID)
 
+	// ── advertised address (F-D-4, ADR-084, M17-E Session 17.4.1) ───────
+	// Resolved exactly ONCE per instance startup. Both places this daemon
+	// publishes an address to the network — the registration multiaddr
+	// below and the heartbeat/DHT multiaddr further down — build from
+	// THIS SAME advertiseHost value, never a second independently-computed
+	// one. Before this session both call sites hardcoded 127.0.0.1
+	// directly and in fact already agreed with each other for that reason
+	// alone; a divergence was never actually possible, which is exactly
+	// why the daemon advertising itself as unreachable from every other
+	// host stayed invisible until read directly — every test to date runs
+	// every peer on one host, where loopback happens to be correct
+	// regardless of whether the two sites are truly wired together.
+	advertiseHost, advertiseWarning := resolveAdvertiseHost(cfg.advertiseAddr)
+	if advertiseWarning != "" {
+		log.Printf("[STARTUP]%s WARNING: %s", logTag, advertiseWarning)
+	}
+	log.Printf("[STARTUP]%s advertising %s:%d to the network", logTag, advertiseHost, cfg.listenPort)
+
 	// ── provider self-registration (closes PROVIDER-REGISTRATION GAP) ───
 	// Flagged, not silently worked around, in Session 16.2.1: no client-side
 	// call to POST /api/v1/provider/register existed anywhere in cmd/provider
@@ -488,29 +558,53 @@ func runProviderInstance(ctx context.Context, profile config.NetworkProfile, cfg
 	// heartbeatCfg below is constructed accordingly either way.
 	var registeredProviderID, providerJWT string
 
-	if cfg.registrationBearerToken == "" {
-		log.Printf("[STARTUP]%s no --registration-bearer-token supplied; skipping provider self-registration (this instance will not count toward readiness)", logTag)
-	} else {
-		// Trailing /p2p/<PeerID> is required — internal/client/upload's
-		// transfer.go parses this segment to know which peer identity to
-		// dial safely (a bare IP:port isn't sufficient in a
-		// peer-authenticated P2P system). Missing here originally; found
-		// live when the first real (post-ACTIVE) upload failed with "no
-		// /p2p/<PeerID> segment found in any multiaddr" — see ADR-070
-		// F-070-7's follow-up.
-		multiaddr := fmt.Sprintf("/ip4/127.0.0.1/tcp/%d/p2p/%s", cfg.listenPort, peerID)
-		var regErr error
-		registeredProviderID, providerJWT, regErr = registerProviderWithMicroservice(ctx, cfg.microserviceURL, cfg.registrationBearerToken, providerSigningKey,
-			cfg.declaredStorageGB, demoProviderCity, demoProviderRegion, cfg.syntheticASN, []string{multiaddr})
-		if regErr != nil {
-			// Non-fatal, matching the JWKS-fetch failure below: a transient
-			// microservice outage at startup should not crash the daemon. The
-			// provider simply will not count toward readiness until a future
-			// heartbeat/retry path re-registers it — there is no retry loop
-			// here yet (a real gap, distinct from the one this closes).
-			log.Printf("[STARTUP]%s WARNING: provider registration failed (%v); this instance will not count toward readiness until registered", logTag, regErr)
+	// ── persisted registration (M17-E Session 17.4.2) ────────────────────
+	// If `provider onboard` (onboard.go) already registered this data-dir's
+	// identity, its record takes priority over --registration-bearer-token
+	// outright: registration tokens are single-use (see
+	// providerFlags.registrationBearerToken's doc comment) and onboard's
+	// own token was already consumed at onboarding time — attempting the
+	// HTTP registration flow again here would simply fail. A missing
+	// record (recErr == nil, found == false) is the normal case for every
+	// harness/--sim-count instance and for a --registration-bearer-token
+	// invocation that has never run `onboard`; it falls through to the
+	// exact pre-existing behavior below, unchanged.
+	if rec, found, recErr := loadRegistrationRecord(cfg.dataDir); recErr != nil {
+		log.Printf("[STARTUP]%s WARNING: read persisted registration: %v; falling back to --registration-bearer-token flow", logTag, recErr)
+	} else if found {
+		registeredProviderID, providerJWT = rec.ProviderID, rec.Token
+		log.Printf("[STARTUP]%s using registration persisted by `provider onboard` (provider_id=%s)", logTag, registeredProviderID)
+	}
+
+	if registeredProviderID == "" {
+		if cfg.registrationBearerToken == "" {
+			log.Printf("[STARTUP]%s no persisted registration and no --registration-bearer-token supplied; skipping provider self-registration (this instance will not count toward readiness)", logTag)
 		} else {
-			log.Printf("[STARTUP]%s registered with microservice (provider_id=%s)", logTag, registeredProviderID)
+			// Trailing /p2p/<PeerID> is required — internal/client/upload's
+			// transfer.go parses this segment to know which peer identity to
+			// dial safely (a bare IP:port isn't sufficient in a
+			// peer-authenticated P2P system). Missing here originally; found
+			// live when the first real (post-ACTIVE) upload failed with "no
+			// /p2p/<PeerID> segment found in any multiaddr" — see ADR-070
+			// F-070-7's follow-up.
+			//
+			// F-D-4: advertiseHost (resolved once, above) replaces what was
+			// previously a hardcoded 127.0.0.1 here — the same value the
+			// heartbeat multiaddr below is built from.
+			multiaddr := advertiseMultiaddr(advertiseHost, cfg.listenPort, peerID)
+			var regErr error
+			registeredProviderID, providerJWT, regErr = registerProviderWithMicroservice(ctx, cfg.microserviceURL, cfg.registrationBearerToken, providerSigningKey,
+				cfg.declaredStorageGB, demoProviderCity, demoProviderRegion, cfg.syntheticASN, []string{multiaddr})
+			if regErr != nil {
+				// Non-fatal, matching the JWKS-fetch failure below: a transient
+				// microservice outage at startup should not crash the daemon. The
+				// provider simply will not count toward readiness until a future
+				// heartbeat/retry path re-registers it — there is no retry loop
+				// here yet (a real gap, distinct from the one this closes).
+				log.Printf("[STARTUP]%s WARNING: provider registration failed (%v); this instance will not count toward readiness until registered", logTag, regErr)
+			} else {
+				log.Printf("[STARTUP]%s registered with microservice (provider_id=%s)", logTag, registeredProviderID)
+			}
 		}
 	}
 
@@ -640,19 +734,24 @@ func runProviderInstance(ctx context.Context, profile config.NetworkProfile, cfg
 		return fmt.Errorf("NewDHT: %w", err)
 	}
 
-	// localMultiaddr: the SAME address computed for registration's
-	// initial_multiaddrs (above) — this daemon's own known local listen
-	// address. Heartbeat's CurrentAddrs previously always returned nil
-	// (documented as a NAT/relay-discovery gap), which meant
-	// last_known_multiaddrs stayed NULL for every provider even after
-	// heartbeat itself started succeeding — and with no known address,
+	// localMultiaddr: the SAME advertiseHost computed once above (F-D-4,
+	// ADR-084) as registration's initial_multiaddrs — this daemon's own
+	// resolved, network-reachable address, not merely its local one.
+	// Heartbeat's CurrentAddrs previously always returned nil (documented
+	// as a NAT/relay-discovery gap), which meant last_known_multiaddrs
+	// stayed NULL for every provider even after heartbeat itself started
+	// succeeding — and with no known address,
 	// vettingchunk.Generator.GenerateChunk (cmd/microservice) had nowhere
 	// to dial, blocking VETTING→ACTIVE just as completely as the earlier
-	// heartbeat-auth gap did. Reporting the daemon's own loopback listen
-	// address here is honest and correct for this local/simulation
-	// context (no NAT is actually involved); real NAT traversal / relay
-	// address discovery for non-local deployments remains a genuine,
-	// separate, larger gap this does not attempt to close.
+	// heartbeat-auth gap did. Prior to M17-E Session 17.4.1 this always
+	// reported 127.0.0.1, which was honest only for the single-host
+	// simulation context every test to date runs in;
+	// resolveAdvertiseHost now autodetects a real interface address (or
+	// honors an explicit --advertise-addr) so the address genuinely
+	// reaches this daemon from a separate desktop. Real NAT traversal /
+	// relay address discovery for deployments NOT on one shared LAN
+	// remains a genuine, separate, larger gap this does not attempt to
+	// close (M19, ADR-084 Answers Q2).
 	// Trailing /p2p/<PeerID> is required here too, for the same reason as
 	// the registration multiaddr above — internal/client/upload's
 	// transfer.go parses this segment from last_known_multiaddrs to know
@@ -660,7 +759,10 @@ func runProviderInstance(ctx context.Context, profile config.NetworkProfile, cfg
 	// dialing happened to work without it (it doesn't parse the multiaddr
 	// this way), which is why this omission wasn't caught until the first
 	// real (post-ACTIVE) upload attempt — see ADR-070 F-070-7's follow-up.
-	localMultiaddr, addrErr := p2p.ParseMultiaddr(fmt.Sprintf("/ip4/127.0.0.1/tcp/%d/p2p/%s", cfg.listenPort, peerID))
+	//
+	// F-D-4: advertiseHost here is the exact same value used to build the
+	// registration multiaddr above — one resolution, two call sites.
+	localMultiaddr, addrErr := p2p.ParseMultiaddr(advertiseMultiaddr(advertiseHost, cfg.listenPort, peerID))
 	if addrErr != nil {
 		log.Printf("[STARTUP]%s WARNING: parse local multiaddr: %v", logTag, addrErr)
 	}
