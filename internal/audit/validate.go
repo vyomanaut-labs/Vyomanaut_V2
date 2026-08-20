@@ -118,3 +118,75 @@ func ValidateResponse(
 	}
 	return nil
 }
+
+// ── FAIL-status signing input (IC §4.2 Frame 2, status 0x01/0x02) ──────────
+
+// statusByteSize is the byte length of a ChallengeResponse status field.
+const statusByteSize = 1
+
+// failSigningInputSize is the FAIL-status signing input's fixed length:
+// status_byte(1) || challenge_nonce(33) || server_challenge_ts_ms(8) ||
+// provider_id(16) = 58 bytes. Distinct from signingInputSize (the OK-status
+// shape, keyed by response_hash instead of status_byte) — see this
+// function's own doc comment for why the two must never be conflated.
+const failSigningInputSize = statusByteSize + challengeNonceSize + serverTsSize + providerIDSize
+
+// ValidateFailResponse verifies a provider's FAIL-status (0x01
+// FAIL_NOT_FOUND / 0x02 FAIL_CORRUPTION) audit response signature — IC
+// §4.2 Frame 2's SECOND, distinct provider_sig signing-input shape:
+// SHA-256(status_byte || challenge_nonce || server_challenge_ts_ms ||
+// provider_id). This is deliberately a different signing input from
+// ValidateResponse's OK-status shape (which signs response_hash, a field
+// IC §4.2 says is "present only when status = 0x00" and therefore does not
+// exist to sign for a FAIL response) — IC §4.2's own stated purpose for
+// this second shape is to "prove the provider deliberately reported FAIL
+// rather than a transport drop." Calling ValidateResponse against a FAIL
+// frame's zero-valued response_hash field would check the wrong signing
+// input entirely and always fail, which is not "verifying the FAIL
+// signature," just a guaranteed spurious error — this function exists so
+// callers have the actually-specified check available instead.
+//
+// statusByte must be challengeStatusFailNotFound (0x01) or
+// challengeStatusFailCorruption (0x02) — the two status values IC §4.2
+// defines this signing-input shape for. Passing any other value is a
+// caller error, not a signature-verification outcome; ValidateFailResponse
+// does not itself enforce this (callers already switch on status before
+// reaching here — see cmd/microservice/audit_dispatch.go's
+// adjudicateResponse) to avoid this package depending on cmd/microservice's
+// own status-code constants.
+//
+// Error semantics:
+//   - ErrInvalidSignature: providerSig does not verify against
+//     providerPubKey for the reconstructed FAIL signing input.
+//   - nil: signature verifies — the provider is proven to have
+//     deliberately signed this FAIL, not merely dropped the connection.
+//
+// Goroutine-safe: yes (pure function, no shared mutable state).
+//
+// [REF: IC §4.2, IC §3.2, Milestone 12 Phase 12.1 audit corrections, Finding 4]
+func ValidateFailResponse(
+	statusByte byte,
+	challengeNonce [33]byte,
+	serverChallengeTsMs int64,
+	providerID [16]byte,
+	providerSig [64]byte,
+	providerPubKey [32]byte,
+) error {
+	// signingInput = statusByte || challengeNonce ||
+	// big-endian(serverChallengeTsMs) || providerID.
+	const (
+		failNonceOffset = statusByteSize
+		failTsOffset    = failNonceOffset + challengeNonceSize
+		failIDOffset    = failTsOffset + serverTsSize
+	)
+	var signingInput [failSigningInputSize]byte
+	signingInput[0] = statusByte
+	copy(signingInput[failNonceOffset:failTsOffset], challengeNonce[:])
+	binary.BigEndian.PutUint64(signingInput[failTsOffset:failIDOffset], uint64(serverChallengeTsMs))
+	copy(signingInput[failIDOffset:], providerID[:])
+
+	if !crypto.VerifyBytes(providerPubKey, signingInput[:], providerSig) {
+		return ErrInvalidSignature
+	}
+	return nil
+}
