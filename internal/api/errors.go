@@ -20,7 +20,9 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strconv"
 
 	"github.com/google/uuid"
 )
@@ -68,6 +70,19 @@ const (
 	// exists in ACTIVE status, the opposite of what that code name means).
 	ErrFileAlreadyRegistered ErrorCode = "FILE_ALREADY_REGISTERED"
 
+	// [M11 audit remediation, Finding 9] New — every ownerID/providerID !=
+	// claims.Subject check (owner balance, file list, escrow history,
+	// withdraw; provider status, heartbeat) previously returned
+	// 403 + ErrUnauthorized. OAS scopes UNAUTHORIZED to 401 specifically —
+	// "JWT is missing, expired, or carries an invalid signature" — and
+	// never reuses a 401 code in a 403Forbidden example. A client
+	// following that contract and treating error_code: UNAUTHORIZED as
+	// "re-authenticate" loops pointlessly: the same, correctly
+	// authenticated identity re-authenticating never grants access to
+	// someone else's resource. requireSubjectMatch (owner.go, provider.go)
+	// is the single call site that produces this code.
+	ErrResourceOwnerMismatch ErrorCode = "RESOURCE_OWNER_MISMATCH"
+
 	// Referenced in Session 11.11.1 but not yet present in openapi.yaml —
 	// flagged for an OAS addition before this ships; the constant is
 	// implemented now so the Go code compiles and is ready the moment OAS
@@ -102,6 +117,17 @@ type errorBody struct {
 // `omitempty`. availableASNs is optional (OAS Error.properties.
 // available_asns) and should be non-nil only for
 // INSUFFICIENT_ASN_DIVERSITY — pass nil otherwise.
+//
+// [M11 audit remediation, found while implementing Finding 3] retryAfter,
+// when non-nil, is now also set as a real Retry-After HTTP response header
+// (RFC 9110 §10.2.3), not just the JSON body's retry_after field. OAS
+// explicitly declares a Retry-After header (not just the body field) on
+// otp/send's 429 and auth/token/refresh's 429 — this function previously
+// only ever wrote the body field, so neither endpoint's 429 has ever sent
+// the header OAS documents for it. Fixed once, here, rather than at each
+// of this function's ~15 retryAfter-passing call sites (upload/assign's
+// two 503s included, which OAS documents retry_after in the body only —
+// sending the header there too is harmless and consistent).
 func WriteError(w http.ResponseWriter, statusCode int, errorCode ErrorCode, message string, retryAfter *int, field string, availableASNs *int) {
 	requestID, err := uuid.NewV7()
 	var requestIDStr string
@@ -123,8 +149,32 @@ func WriteError(w http.ResponseWriter, statusCode int, errorCode ErrorCode, mess
 		AvailableASNs: availableASNs,
 	}
 
+	if retryAfter != nil {
+		w.Header().Set("Retry-After", strconv.Itoa(*retryAfter))
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Request-ID", requestIDStr)
 	w.WriteHeader(statusCode)
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// requireSubjectMatch enforces that pathID (an owner_id or provider_id
+// taken from the URL path) equals the authenticated request's
+// claims.Subject, writing a 403 and returning false if not. entityIDField
+// names the mismatched field in the error message ("owner_id" or
+// "provider_id") for the two packages that call this.
+//
+// [M11 audit remediation, Finding 9] Extracted from 5 near-identical inline
+// checks (owner.go x3: balance, file list, escrow history/withdraw;
+// provider.go x2: register, status/heartbeat) so the fix below only needs
+// to land in one place. Previously each site wrote 403 + ErrUnauthorized
+// directly — see ErrResourceOwnerMismatch's own doc comment for why that
+// code is wrong for this case and what replaces it.
+func requireSubjectMatch(w http.ResponseWriter, claims VerifiedClaims, pathID uuid.UUID, entityIDField string) bool {
+	if pathID != claims.Subject {
+		WriteError(w, http.StatusForbidden, ErrResourceOwnerMismatch,
+			fmt.Sprintf("%s does not match the token subject", entityIDField), nil, "", nil)
+		return false
+	}
+	return true
 }

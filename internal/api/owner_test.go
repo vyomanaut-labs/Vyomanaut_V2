@@ -70,7 +70,7 @@ func TestOwnerRegisterSucceedsWithValidSig(t *testing.T) {
 	}
 	phone := randPhoneForOwner()
 	subject := RegistrationSubjectForPhone(phone)
-	if _, err := db.Exec(`INSERT INTO pending_registrations (subject, phone_number, expires_at) VALUES ($1,$2,NOW()+interval '1 hour')`,
+	if _, err := db.Exec(`INSERT INTO pending_registrations (subject, phone_number, purpose, expires_at) VALUES ($1,$2,'OWNER_REGISTER',NOW()+interval '1 hour')`,
 		subject, phone); err != nil {
 		t.Fatalf("seed pending_registrations: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestOwnerRegisterRejectsBadSig(t *testing.T) {
 	}
 	phone := randPhoneForOwner()
 	subject := RegistrationSubjectForPhone(phone)
-	if _, err := db.Exec(`INSERT INTO pending_registrations (subject, phone_number, expires_at) VALUES ($1,$2,NOW()+interval '1 hour')`,
+	if _, err := db.Exec(`INSERT INTO pending_registrations (subject, phone_number, purpose, expires_at) VALUES ($1,$2,'OWNER_REGISTER',NOW()+interval '1 hour')`,
 		subject, phone); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestOwnerRegisterRejectsDuplicatePhone(t *testing.T) {
 		t.Fatalf("GenerateKey (owner): %v", err)
 	}
 	subject := RegistrationSubjectForPhone(phone)
-	if _, err := db.Exec(`INSERT INTO pending_registrations (subject, phone_number, expires_at) VALUES ($1,$2,NOW()+interval '1 hour')`,
+	if _, err := db.Exec(`INSERT INTO pending_registrations (subject, phone_number, purpose, expires_at) VALUES ($1,$2,'OWNER_REGISTER',NOW()+interval '1 hour')`,
 		subject, phone); err != nil {
 		t.Fatalf("seed pending: %v", err)
 	}
@@ -221,6 +221,84 @@ func TestOwnerRegisterRejectsNonRegistrationToken(t *testing.T) {
 
 	if rec.Code != 403 {
 		t.Errorf("status = %d, want 403 (not a registration token)", rec.Code)
+	}
+}
+
+// TestOwnerRegisterRejectsWrongPurposeToken is the audit's Finding 4
+// regression test, exercised end-to-end through the real OTP send/verify
+// pipeline rather than a hand-built pending_registrations row: an OTP
+// requested with purpose "LOGIN" for a brand-new phone number is verified
+// (is_new_entity is true regardless of purpose — lookupEntityByPhone has no
+// purpose input), and the resulting registration token is then redeemed
+// against POST /api/v1/owner/register. Before this fix, purpose was
+// checked and stored on otp_codes at send time but never carried any
+// further, so this succeeded with a 201 and a full valid JWT — the gate
+// simply didn't exist anywhere in the pipeline. See otp.go's HandleVerify
+// and this file's HandleRegister for the fix.
+func TestOwnerRegisterRejectsWrongPurposeToken(t *testing.T) {
+	db := openTestDB(t)
+	sender := &capturingOtpSender{}
+	otpHandler := NewOtpHandler(db, sender)
+	msPub, msPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	verifyHandler := NewOtpVerifyHandler(otpHandler, msPriv)
+	registerHandler := NewOwnerRegisterHandler(db, msPriv)
+	phone := randPhoneForOwner() // brand new phone number, not in owners or providers
+
+	sendBody, _ := json.Marshal(otpSendRequestBody{PhoneNumber: phone, Purpose: "LOGIN"})
+	sendReq := httptest.NewRequest("POST", "/api/v1/auth/otp/send", bytes.NewReader(sendBody))
+	otpHandler.HandleSend(httptest.NewRecorder(), sendReq)
+
+	verifyBody, _ := json.Marshal(otpVerifyRequestBody{PhoneNumber: phone, OtpCode: sender.lastCode})
+	verifyReq := httptest.NewRequest("POST", "/api/v1/auth/otp/verify", bytes.NewReader(verifyBody))
+	verifyRec := httptest.NewRecorder()
+	verifyHandler.HandleVerify(verifyRec, verifyReq)
+
+	var verifyResp otpVerifyResponseBody
+	if err := json.Unmarshal(verifyRec.Body.Bytes(), &verifyResp); err != nil {
+		t.Fatalf("unmarshal verify response: %v", err)
+	}
+	if !verifyResp.IsNewEntity {
+		t.Fatalf("IsNewEntity = false, want true for a never-before-seen phone number")
+	}
+	claims, err := VerifyJWT(msPub, verifyResp.Token)
+	if err != nil {
+		t.Fatalf("VerifyJWT: %v", err)
+	}
+
+	ownerPub, ownerPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey (owner): %v", err)
+	}
+	pubKeyHex := hex.EncodeToString(ownerPub)
+	sigHex := signOwnerSig(ownerPriv, pubKeyHex)
+	registerBody, _ := json.Marshal(ownerRegisterRequestBody{Ed25519PublicKey: pubKeyHex, OwnerSig: sigHex})
+	registerReq := httptest.NewRequest("POST", "/api/v1/owner/register", bytes.NewReader(registerBody))
+	registerReq = withClaims(registerReq, claims)
+	registerRec := httptest.NewRecorder()
+	registerHandler.HandleRegister(registerRec, registerReq)
+
+	if registerRec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, body = %s, want 403 (LOGIN-purpose token must not redeem for owner registration)",
+			registerRec.Code, registerRec.Body.String())
+	}
+	var errBody map[string]any
+	if err := json.Unmarshal(registerRec.Body.Bytes(), &errBody); err != nil {
+		t.Fatalf("unmarshal error response: %v", err)
+	}
+	if errBody["error_code"] != string(ErrWrongRole) {
+		t.Errorf("error_code = %v, want %q", errBody["error_code"], ErrWrongRole)
+	}
+
+	// No owner row should have been created.
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM owners WHERE phone_number = $1`, phone).Scan(&count); err != nil {
+		t.Fatalf("count owners: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("owners row count = %d, want 0 (registration must have been rejected before insert)", count)
 	}
 }
 
@@ -461,6 +539,47 @@ func TestOwnerBalanceComputesAvailableCorrectly(t *testing.T) {
 	}
 	if resp.AvailablePaise != resp.BalancePaise-resp.ReservedNext30dPaise {
 		t.Errorf("AvailablePaise = %d, want balance - reserved = %d", resp.AvailablePaise, resp.BalancePaise-resp.ReservedNext30dPaise)
+	}
+}
+
+// TestOwnerBalanceRejectsSubjectMismatchWithResourceOwnerMismatch is the
+// audit's Finding 9 regression test: a correctly-authenticated owner
+// requesting a *different* owner's balance must get 403
+// RESOURCE_OWNER_MISMATCH, not 403 UNAUTHORIZED. Every ownerID !=
+// claims.Subject check in this file goes through the same
+// requireSubjectMatch helper (errors.go), so this one call site stands in
+// for owner.go's other two (file list, escrow history/withdraw) —
+// provider.go's equivalent two call sites have their own test,
+// TestProviderStatusRejectsSubjectMismatchWithResourceOwnerMismatch.
+// Previously every one of these five sites returned error_code:
+// UNAUTHORIZED, which OAS scopes specifically to "JWT is missing, expired,
+// or carries an invalid signature" — a client following that contract and
+// treating UNAUTHORIZED as "re-authenticate" would loop pointlessly, since
+// the same, correctly authenticated identity re-authenticating never
+// grants access to someone else's resource.
+func TestOwnerBalanceRejectsSubjectMismatchWithResourceOwnerMismatch(t *testing.T) {
+	db := openTestDB(t)
+	profile := config.DemoProfile
+	handler := NewOwnerBalanceHandler(db, profile)
+	ownerID := insertTestOwnerForOwnerTests(t, db, "")
+	someoneElse := uuid.New() // a validly-authenticated but different subject
+
+	req := httptest.NewRequest("GET", "/api/v1/owner/"+ownerID.String()+"/balance", nil)
+	req.SetPathValue("owner_id", ownerID.String())
+	req = withClaims(req, VerifiedClaims{Subject: someoneElse, Role: "owner"})
+	rec := httptest.NewRecorder()
+	handler.HandleBalance(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, body = %s, want 403", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal error body: %v", err)
+	}
+	if body["error_code"] != string(ErrResourceOwnerMismatch) {
+		t.Errorf("error_code = %v, want %q (not %q — a same-identity re-auth would never fix a resource-ownership mismatch)",
+			body["error_code"], ErrResourceOwnerMismatch, ErrUnauthorized)
 	}
 }
 

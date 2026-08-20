@@ -79,13 +79,22 @@ func (h *OwnerRegisterHandler) HandleRegister(w http.ResponseWriter, r *http.Req
 	}
 
 	ctx := r.Context()
-	phoneNumber, err := RecoverPendingRegistration(ctx, h.db, claims.Subject)
+	phoneNumber, purpose, err := RecoverPendingRegistration(ctx, h.db, claims.Subject)
 	if errors.Is(err, sql.ErrNoRows) {
 		WriteError(w, http.StatusUnauthorized, ErrUnauthorized, "registration token expired or invalid", nil, "", nil)
 		return
 	}
 	if err != nil {
 		WriteError(w, http.StatusInternalServerError, ErrInternal, "registration lookup failed", nil, "", nil)
+		return
+	}
+	// [M11 audit remediation, Finding 4] purpose gate: a registration token
+	// issued for LOGIN or PROVIDER_REGISTER must not redeem here. Before
+	// this check existed anywhere in the pipeline, an OTP requested with
+	// purpose: "LOGIN" for a brand new phone number could be verified and
+	// its resulting token redeemed against this endpoint successfully.
+	if purpose != "OWNER_REGISTER" {
+		WriteError(w, http.StatusForbidden, ErrWrongRole, "registration token was not issued for owner registration", nil, "", nil)
 		return
 	}
 
@@ -284,8 +293,9 @@ func (h *OwnerBalanceHandler) HandleBalance(w http.ResponseWriter, r *http.Reque
 		WriteError(w, http.StatusBadRequest, ErrInvalidRequest, "owner_id must be a UUID", nil, "owner_id", nil)
 		return
 	}
-	if ownerID != claims.Subject {
-		WriteError(w, http.StatusForbidden, ErrUnauthorized, "owner_id does not match the token subject", nil, "", nil)
+	// [M11 audit remediation, Finding 9] Was 403 + ErrUnauthorized — see
+	// requireSubjectMatch's own doc comment (errors.go) for why.
+	if !requireSubjectMatch(w, claims, ownerID, "owner_id") {
 		return
 	}
 
@@ -414,8 +424,9 @@ func (h *OwnerFileListHandler) HandleFiles(w http.ResponseWriter, r *http.Reques
 		WriteError(w, http.StatusBadRequest, ErrInvalidRequest, "owner_id must be a UUID", nil, "owner_id", nil)
 		return
 	}
-	if ownerID != claims.Subject {
-		WriteError(w, http.StatusForbidden, ErrUnauthorized, "owner_id does not match the token subject", nil, "", nil)
+	// [M11 audit remediation, Finding 9] Was 403 + ErrUnauthorized — see
+	// requireSubjectMatch's own doc comment (errors.go) for why.
+	if !requireSubjectMatch(w, claims, ownerID, "owner_id") {
 		return
 	}
 
@@ -561,8 +572,9 @@ func (h *OwnerEscrowHistoryHandler) HandleEscrowHistory(w http.ResponseWriter, r
 		WriteError(w, http.StatusBadRequest, ErrInvalidRequest, "owner_id must be a UUID", nil, "owner_id", nil)
 		return
 	}
-	if ownerID != claims.Subject {
-		WriteError(w, http.StatusForbidden, ErrUnauthorized, "owner_id does not match the token subject", nil, "", nil)
+	// [M11 audit remediation, Finding 9] Was 403 + ErrUnauthorized — see
+	// requireSubjectMatch's own doc comment (errors.go) for why.
+	if !requireSubjectMatch(w, claims, ownerID, "owner_id") {
 		return
 	}
 
