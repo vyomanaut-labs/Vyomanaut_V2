@@ -177,6 +177,26 @@ type ChunkStore interface {
 	//
 	// Goroutine-safe: yes (safe to call concurrently with other methods, but only once).
 	Close() error
+
+	// ListChunks returns every chunk ID currently indexed by this store, in
+	// unspecified order (M17-E Session 17.5.1 — requirement 5, local
+	// storage inspection: cmd/provider's `inspect` subcommand, Session
+	// 17.5.2, needs a way to enumerate what a provider is actually
+	// holding).
+	//
+	// Read-only; goroutine-safe; concurrent with the writer goroutine — no
+	// coordination with AppendChunk is required, the same guarantee RunGC
+	// already documents for its own scan phase.
+	//
+	// Intended for local operator inspection, not for any hot path: an
+	// O(n) index scan. Never called from any request-handling code path.
+	//
+	// Post-conditions (on nil error):
+	//   - The returned slice is never nil, even when the store holds no
+	//     chunks — callers need no special case for "empty" vs. "absent".
+	//
+	// Goroutine-safe: yes.
+	ListChunks() ([][32]byte, error)
 }
 
 // NewChunkStore opens or creates the platform-appropriate chunk store rooted

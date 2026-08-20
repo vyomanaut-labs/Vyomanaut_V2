@@ -13,6 +13,7 @@ import (
 	"crypto/sha256"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -406,4 +407,171 @@ func TestRunGCReclaimsSpace(t *testing.T) {
 		require.ErrorIs(t, lookupErr, storage.ErrChunkNotFound,
 			"deleted chunk %d must not be found after GC", i)
 	}
+}
+
+// ── ListChunks (M17-E Session 17.5.1) ──────────────────────────────────────
+//
+// Tests:
+//   - TestListChunksReturnsEveryAppendedChunkID
+//   - TestListChunksReturnsEmptySliceNotNilForEmptyStore
+//   - TestListChunksOmitsDeletedChunks
+//   - TestListChunksIsSafeConcurrentWithWriter
+
+// TestListChunksReturnsEveryAppendedChunkID writes N chunks and verifies
+// ListChunks returns exactly their IDs — order-independent, matching
+// ChunkStore.ListChunks' own documented contract ("in unspecified order").
+func TestListChunksReturnsEveryAppendedChunkID(t *testing.T) {
+	store, err := storage.NewChunkStore(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, store.RecoverFromCrash())
+	t.Cleanup(func() { _ = store.Close() })
+
+	const numChunks = 10
+	writeCh := make(chan writeReq, numChunks)
+	startWriter(store, writeCh)
+
+	want := make(map[[32]byte]bool, numChunks)
+	for i := 0; i < numChunks; i++ {
+		data := make([]byte, 262144)
+		data[0] = byte(i)
+		id := sha256.Sum256(data)
+		rc := sendChunk(writeCh, id, data)
+		require.NoError(t, <-rc, "write chunk %d", i)
+		want[id] = true
+	}
+	close(writeCh)
+
+	got, listErr := store.ListChunks()
+	require.NoError(t, listErr)
+	require.Len(t, got, numChunks, "ListChunks must return exactly the chunks appended")
+
+	seen := make(map[[32]byte]bool, numChunks)
+	for _, id := range got {
+		require.True(t, want[id], "ListChunks returned an ID that was never appended: %x", id)
+		require.False(t, seen[id], "ListChunks returned duplicate ID %x", id)
+		seen[id] = true
+	}
+}
+
+// TestListChunksReturnsEmptySliceNotNilForEmptyStore verifies the empty
+// case returns a non-nil, zero-length slice — ChunkStore.ListChunks'
+// documented post-condition (store.go): "never a nil slice with nil
+// error, so callers need no special case."
+func TestListChunksReturnsEmptySliceNotNilForEmptyStore(t *testing.T) {
+	store, err := storage.NewChunkStore(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, store.RecoverFromCrash())
+	t.Cleanup(func() { _ = store.Close() })
+
+	got, listErr := store.ListChunks()
+	require.NoError(t, listErr)
+	require.NotNil(t, got, "ListChunks on an empty store must return a non-nil slice")
+	require.Len(t, got, 0)
+}
+
+// TestListChunksOmitsDeletedChunks verifies a deleted chunk's ID does not
+// reappear in a subsequent ListChunks call, and every surviving chunk
+// still does.
+func TestListChunksOmitsDeletedChunks(t *testing.T) {
+	store, err := storage.NewChunkStore(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, store.RecoverFromCrash())
+	t.Cleanup(func() { _ = store.Close() })
+
+	const total = 6
+	const deleteCount = 2
+
+	writeCh := make(chan writeReq, total)
+	startWriter(store, writeCh)
+
+	chunkIDs := make([][32]byte, total)
+	for i := 0; i < total; i++ {
+		data := make([]byte, 262144)
+		data[0] = byte(i)
+		chunkIDs[i] = sha256.Sum256(data)
+		rc := sendChunk(writeCh, chunkIDs[i], data)
+		require.NoError(t, <-rc, "write chunk %d", i)
+	}
+	close(writeCh)
+
+	for i := 0; i < deleteCount; i++ {
+		require.NoError(t, store.DeleteChunk(chunkIDs[i]), "delete chunk %d", i)
+	}
+
+	got, listErr := store.ListChunks()
+	require.NoError(t, listErr)
+	require.Len(t, got, total-deleteCount, "ListChunks must omit deleted chunks")
+
+	present := make(map[[32]byte]bool, len(got))
+	for _, id := range got {
+		present[id] = true
+	}
+	for i := 0; i < deleteCount; i++ {
+		require.False(t, present[chunkIDs[i]], "deleted chunk %d must not appear in ListChunks", i)
+	}
+	for i := deleteCount; i < total; i++ {
+		require.True(t, present[chunkIDs[i]], "surviving chunk %d must appear in ListChunks", i)
+	}
+}
+
+// TestListChunksIsSafeConcurrentWithWriter runs ListChunks repeatedly on
+// one goroutine while the writer goroutine appends chunks on another — the
+// concurrency contract ChunkStore.ListChunks' own doc comment declares
+// ("goroutine-safe; concurrent with the writer goroutine"), exercised
+// under -race rather than merely asserted. require/t.Fatal are called only
+// from this test's own goroutine (not the background reader) — Go's
+// testing package requires that; the reader instead records any error into
+// readErr, protected by mu, checked after both goroutines finish.
+func TestListChunksIsSafeConcurrentWithWriter(t *testing.T) {
+	store, err := storage.NewChunkStore(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, store.RecoverFromCrash())
+	t.Cleanup(func() { _ = store.Close() })
+
+	const numChunks = 30
+	writeCh := make(chan writeReq, numChunks)
+	startWriter(store, writeCh)
+
+	var mu sync.Mutex
+	var readErr error
+	stopReading := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stopReading:
+				return
+			default:
+				if _, err := store.ListChunks(); err != nil {
+					mu.Lock()
+					if readErr == nil {
+						readErr = err
+					}
+					mu.Unlock()
+				}
+			}
+		}
+	}()
+
+	for i := 0; i < numChunks; i++ {
+		data := make([]byte, 262144)
+		data[0] = byte(i)
+		id := sha256.Sum256(data)
+		rc := sendChunk(writeCh, id, data)
+		require.NoError(t, <-rc, "write chunk %d", i)
+	}
+	close(writeCh)
+	close(stopReading)
+	wg.Wait()
+
+	mu.Lock()
+	gotReadErr := readErr
+	mu.Unlock()
+	require.NoError(t, gotReadErr, "ListChunks must never error while concurrent with the writer goroutine")
+
+	got, listErr := store.ListChunks()
+	require.NoError(t, listErr)
+	require.Len(t, got, numChunks, "every chunk must be visible once writing has finished")
 }
