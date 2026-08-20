@@ -39,6 +39,11 @@ const sha256Size = 32
 // runPromotionTicker implements this session's step 14: on
 // profile.PollingInterval, promote stale QUEUED PRE_WARNING jobs to
 // PERMANENT_DEPARTURE priority (FR-043). Blocks until ctx is cancelled.
+//
+// [Corrected — M12 audit corrections, Finding 5] Each tick now acquires a
+// backgroundSemaphore slot before calling PromoteStalePreWarningJobs — see
+// acquireBackgroundSlot's own doc comment (background_loops.go) for why
+// this closes a real, previously-unwired gap in NFR-028's throttle.
 func runPromotionTicker(ctx context.Context, db *sql.DB, profile config.NetworkProfile) {
 	ticker := time.NewTicker(profile.PollingInterval)
 	defer ticker.Stop()
@@ -47,7 +52,12 @@ func runPromotionTicker(ctx context.Context, db *sql.DB, profile config.NetworkP
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			release, err := acquireBackgroundSlot(ctx)
+			if err != nil {
+				return // ctx cancelled while waiting for a throttle slot
+			}
 			promoted, err := repair.PromoteStalePreWarningJobs(ctx, db, profile)
+			release()
 			if err != nil {
 				log.Printf("[REPAIR] PromoteStalePreWarningJobs: %v", err)
 				continue
@@ -128,6 +138,15 @@ func findSurvivingHolders(ctx context.Context, db *sql.DB, segmentID uuid.UUID, 
 // runRepairExecutorLoop implements this session's step 15: dequeue and run
 // the repair pipeline for one job at a time. Blocks until ctx is cancelled.
 // Nothing else in the build plan drives repair.DequeueNextJob.
+//
+// [Corrected — M12 audit corrections, Finding 5] Once a real job is
+// dequeued, a backgroundSemaphore slot is acquired before the actual
+// DB-heavy repair work (findSurvivingHolders, ExecuteRepairJob) — see
+// acquireBackgroundSlot's own doc comment (background_loops.go). Acquired
+// only after confirming a job exists, not around DequeueNextJob's own idle
+// polling — holding a throttle slot while merely blocked in an empty-queue
+// backoff would waste that slot on no real background work, defeating the
+// throttle's own purpose.
 func runRepairExecutorLoop(
 	ctx context.Context,
 	db *sql.DB,
@@ -158,10 +177,16 @@ func runRepairExecutorLoop(
 			continue
 		}
 
+		release, err := acquireBackgroundSlot(ctx)
+		if err != nil {
+			return // ctx cancelled while waiting for a throttle slot
+		}
+
 		holders, holderIDs, err := findSurvivingHolders(ctx, db, job.SegmentID, job.ProviderID)
 		if err != nil {
 			log.Printf("[REPAIR] job %s: find surviving holders: %v", job.JobID, err)
 			_ = repair.MarkJobComplete(ctx, db, job.JobID, false)
+			release()
 			continue
 		}
 		excludeProviderIDs := holderIDs
@@ -170,6 +195,7 @@ func runRepairExecutorLoop(
 		}
 
 		err = repair.ExecuteRepairJob(ctx, db, profile, transport, engine, signingKey, microservicePeerID, job, holders, excludeProviderIDs)
+		release()
 		if err != nil && !errors.Is(err, context.Canceled) {
 			log.Printf("[REPAIR] job %s: %v", job.JobID, err)
 		}

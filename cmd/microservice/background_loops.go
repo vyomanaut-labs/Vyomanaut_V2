@@ -4,29 +4,38 @@
 // step 18, NFR-028, ARCH §18) and the readiness gate evaluator goroutine
 // (step 7, IC §3.4).
 //
-// [Decision — readiness monitor is observational only] internal/api's own
-// ReadinessEvaluator.Evaluate is called synchronously, live, by BOTH
+// [Corrected — M12 audit corrections, Finding 3] This file's readiness
+// monitor loop was ORIGINALLY observational only — internal/api's own
+// ReadinessEvaluator.Evaluate was called synchronously, live, by BOTH
 // existing Milestone 11 consumers (HandleReadiness for GET
 // /api/v1/admin/readiness, and UploadAssignHandler for the upload-assign
-// gate) — neither reads from a cache. IC §3.4's "re-evaluated every 60
-// seconds" and readiness.go's own comment ("the 60-second caching cadence...
-// is a background-goroutine concern... Milestone 12, Session 12.1.1") name
-// this session as owning that cadence, but modifying either existing,
-// already-tested Milestone 11 handler to consult a new cache is outside
-// this session's own file list (cmd/microservice only). The loop below
-// satisfies "start the readiness gate evaluator goroutine... 60-second
-// cycle" literally and safely: it runs Evaluate on that cadence for
-// observability (logging condition state and transitions), without
-// changing either existing handler's live-evaluation behaviour.
+// gate), neither reading from any cache; this loop just ran Evaluate for
+// logging, on the same 60-second cadence, without those two handlers ever
+// consuming its result. That split was a deliberate scope decision at the
+// time (modifying either existing, already-tested Milestone 11 handler was
+// outside this session's own file list, cmd/microservice only) — but the
+// audit's own Recheck pass treated it as a real finding rather than an
+// accepted scope boundary, since it leaves the busiest write path in the
+// system doing 5+ extra DB queries, a gossip-membership call, and a
+// secrets-cache check on every single request. Given IC §3.4's explicit
+// "MUST NOT cache... re-query each 60-second cycle" language for the
+// razorpay sub-condition ONLY makes sense if a 60-second-cadence cached
+// evaluation is the intended architecture for everything else, this
+// session's corrections now close that gap directly: startReadinessMonitorLoop
+// calls ReadinessEvaluator.RefreshCache (internal/api/readiness.go), and
+// both existing handlers now read ReadinessEvaluator.Cached() instead of
+// calling Evaluate live — see those two files' own updated header notes.
 //
-// [REF: IC §3.4, NFR-028, ARCH §18, ADR-025, build.md Milestone 12 Phase
-// 12.1 Session 12.1.1]
+// [REF: IC §3.4, NFR-028, ARCH §18, ADR-025, ADR-029, build.md Milestone 12
+// Phase 12.1 Session 12.1.1, Milestone 12 audit corrections Finding 3,
+// Finding 5]
 package main
 
 import (
 	"context"
 	"database/sql"
 	"log"
+	"sync/atomic"
 	"time"
 
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/api"
@@ -36,31 +45,62 @@ import (
 // readinessEvaluationCycle is IC §3.4's 60-second re-evaluation cadence.
 const readinessEvaluationCycle = 60 * time.Second
 
-// startReadinessMonitorLoop implements this session's step 7: runs the
-// readiness gate evaluator on IC §3.4's 60-second cycle, logging condition
-// state and any ready/not-ready transitions. See this file's header note on
-// why this is observational rather than a cache the existing handlers read
-// from. Blocks until ctx is cancelled; intended to be run in its own
-// goroutine.
+// startReadinessMonitorLoop implements this session's step 15/Session
+// 12.1.1 background half of IC §3.4's 60-second readiness cache.
+//
+// [Corrected — M12 audit corrections, Finding 3] Previously called
+// evaluator.Evaluate(ctx) purely for transition logging — nothing ever
+// consumed its result, so the actual gate (internal/api/upload.go's
+// UploadAssignHandler and the admin GET /readiness handler) evaluated live
+// on every request instead of reading a cache this loop was supposed to be
+// maintaining. Now calls evaluator.RefreshCache(ctx), which does everything
+// Evaluate did AND atomically publishes the result for those two consumers
+// to read via ReadinessEvaluator.Cached() — see that method's own doc
+// comment.
+//
+// Runs one refresh immediately, before entering the ticker loop, rather
+// than waiting up to readinessEvaluationCycle for the first tick — this
+// shrinks Cached()'s cold-start "not yet populated" window (during which
+// callers fall back to a live per-request Evaluate) down to roughly "however
+// long one Evaluate call takes," not up to a full cycle.
+//
+// [Corrected — M12 audit corrections, Finding 5] Each refresh now acquires
+// a backgroundSemaphore slot first (NFR-028) — this loop's own DB work is
+// exactly the kind of background load NFR-028 says should be throttled
+// under foreground pressure, and previously wasn't (see
+// acquireBackgroundSlot's own doc comment for why a plain channel-capacity
+// check isn't sufficient once multiple goroutines share it).
 func startReadinessMonitorLoop(ctx context.Context, evaluator *api.ReadinessEvaluator) {
 	ticker := time.NewTicker(readinessEvaluationCycle)
 	defer ticker.Stop()
 
 	lastReady := true // assume ready until the first evaluation proves otherwise, to avoid a spurious transition log at startup
+
+	refresh := func() {
+		release, err := acquireBackgroundSlot(ctx)
+		if err != nil {
+			return // ctx cancelled while waiting for a throttle slot
+		}
+		defer release()
+
+		resp, err := evaluator.RefreshCache(ctx)
+		if err != nil {
+			log.Printf("[READINESS] evaluation failed: %v", err)
+			return
+		}
+		if resp.AllConditionsMet != lastReady {
+			log.Printf("[READINESS] transition: ready=%v", resp.AllConditionsMet)
+			lastReady = resp.AllConditionsMet
+		}
+	}
+
+	refresh() // prime the cache immediately — see this function's own doc comment
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			resp, err := evaluator.Evaluate(ctx)
-			if err != nil {
-				log.Printf("[READINESS] evaluation failed: %v", err)
-				continue
-			}
-			if resp.AllConditionsMet != lastReady {
-				log.Printf("[READINESS] transition: ready=%v", resp.AllConditionsMet)
-				lastReady = resp.AllConditionsMet
-			}
+			refresh()
 		}
 	}
 }
@@ -92,7 +132,29 @@ const (
 // Merkle log compaction all ultimately run through these) so its capacity
 // can be throttled under foreground load. A buffered channel used as a
 // counting semaphore: acquire by sending, release by receiving.
-var backgroundSemaphore = make(chan struct{}, backgroundSemaphoreMaxSize)
+//
+// [Corrected — M12 audit corrections, Finding 5] Previously a plain
+// package-level `chan struct{}` that resizeBackgroundSemaphore reassigned
+// directly (`backgroundSemaphore = make(...)`) with a comment claiming this
+// needed "no additional synchronization beyond the channel itself" — true
+// only as long as nothing ever concurrently READ that variable while the
+// throttle loop's single goroutine WROTE it, which was the actual situation
+// before this fix: the audit's own finding was that nothing anywhere ever
+// acquired a token from backgroundSemaphore at all. The moment real
+// acquisition is wired in below (three consumer loops, each its own
+// goroutine, reading this package var concurrently with the throttle loop's
+// resizes), a plain unsynchronized variable read/write race becomes real —
+// exactly the kind `go test -race` is a hard CI gate to catch. Stored
+// behind atomic.Pointer instead: Store (throttle loop, single writer) and
+// Load (every acquirer, many readers) are both atomic pointer operations,
+// so a resize is always fully visible-or-not to any concurrent acquirer,
+// never a torn read.
+var backgroundSemaphore atomic.Pointer[chan struct{}]
+
+func init() {
+	ch := make(chan struct{}, backgroundSemaphoreMaxSize)
+	backgroundSemaphore.Store(&ch)
+}
 
 // dbReadP99Prober is the shape of a function returning the 99th-percentile
 // foreground DB read latency over the last 60 seconds (NFR-028). Exposed as
@@ -138,13 +200,38 @@ func runBackgroundThrottleLoop(ctx context.Context, db *sql.DB, probe dbReadP99P
 	}
 }
 
-// resizeBackgroundSemaphore replaces backgroundSemaphore with one of the
-// given capacity. Only this loop ever calls it (single-writer), avoiding any
-// need for additional synchronization beyond the channel itself.
+// resizeBackgroundSemaphore replaces backgroundSemaphore's underlying
+// channel with one of the given capacity. Only this loop ever calls it
+// (single-writer) — but see backgroundSemaphore's own doc comment for why
+// that alone no longer means "no synchronization needed" now that
+// acquireBackgroundSlot gives it concurrent readers too.
 func resizeBackgroundSemaphore(size int) {
-	// avoid unused var error
-	_ = cap(backgroundSemaphore)
-	backgroundSemaphore = make(chan struct{}, size)
+	ch := make(chan struct{}, size)
+	backgroundSemaphore.Store(&ch)
+}
+
+// acquireBackgroundSlot blocks until a background-work slot is available
+// under runBackgroundThrottleLoop's current NFR-028 concurrency limit, or
+// ctx is cancelled first. Every caller MUST defer the returned release
+// func on success.
+//
+// [Added — M12 audit corrections, Finding 5] Reads backgroundSemaphore
+// fresh via Load() on every call, rather than a caller capturing the
+// channel once at its own loop's start — a resize takes effect on this
+// caller's very NEXT acquisition either way, not just for callers/
+// goroutines started after the resize. Wired into all three of this
+// package's background-work loops: startReadinessMonitorLoop above, and
+// runPromotionTicker / runRepairExecutorLoop in repair_loop.go — closing
+// the gap the audit found (backgroundSemaphore correctly computed and
+// resized, but nothing anywhere ever acquired from it).
+func acquireBackgroundSlot(ctx context.Context) (release func(), err error) {
+	sem := *backgroundSemaphore.Load()
+	select {
+	case sem <- struct{}{}:
+		return func() { <-sem }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // backgroundRefreshedViews are the materialized views this loop keeps
