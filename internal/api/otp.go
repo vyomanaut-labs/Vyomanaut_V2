@@ -31,7 +31,9 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"os"
 	"regexp"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -87,6 +89,65 @@ type OtpSender interface {
 type NoopOtpSender struct{}
 
 func (NoopOtpSender) SendOTP(context.Context, string, string) error { return nil }
+
+// FileOtpSender is a real OtpSender implementation (ADR-084 D-3, M17-E
+// Session 17.4.2): it appends each OTP to a delivery log on disk — mode
+// 0600, append-only — instead of doing nothing (NoopOtpSender) or requiring
+// a database read (the rejected alternative; see ADR-084 §D-3, which
+// weighed this against a demo-mode endpoint returning the plaintext code
+// and against an `operator otp` command brute-forcing otp_codes.code_hash).
+// This is what a real SMS gateway's own delivery log looks like: the
+// gateway holds the plaintext code transiently, the database never does —
+// otp_codes.code_hash stays hash-only regardless of which OtpSender is
+// wired in at cmd/microservice/main.go.
+//
+// Never served over HTTP and read by no handler in this package. The only
+// intended reader is cmd/operator's `otp` subcommand (a later M17-E
+// session), tailing the file directly — the same authority a human
+// onboarding as a provider (cmd/provider's `onboard` subcommand,
+// M17-E Session 17.4.2) does not have and is not given.
+type FileOtpSender struct {
+	mu   sync.Mutex
+	file *os.File
+}
+
+// NewFileOtpSender opens (creating if absent) the delivery log at path,
+// mode 0600, for append-only writes. The file is opened ONCE, here, for
+// this sender's lifetime — not reopened per SendOTP call — matching how a
+// long-lived gateway client would actually behave.
+func NewFileOtpSender(path string) (*FileOtpSender, error) {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("api: NewFileOtpSender: open %s: %w", path, err)
+	}
+	return &FileOtpSender{file: f}, nil
+}
+
+// Close releases the underlying file handle. Safe to call once, typically
+// at daemon shutdown (cmd/microservice/main.go's app.shutdown).
+func (s *FileOtpSender) Close() error {
+	return s.file.Close()
+}
+
+var _ OtpSender = (*FileOtpSender)(nil)
+
+// SendOTP appends one line to the delivery log:
+//
+//	<RFC3339 UTC timestamp>  <phone_number>  <code>
+//
+// Writes are serialized under s.mu — concurrent HandleSend calls
+// (multiple in-flight OTP requests) must never interleave partial writes
+// into the log.
+func (s *FileOtpSender) SendOTP(_ context.Context, phoneNumber, code string) error {
+	line := fmt.Sprintf("%s  %s  %s\n", time.Now().UTC().Format(time.RFC3339), phoneNumber, code)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.file.WriteString(line); err != nil {
+		return fmt.Errorf("api: FileOtpSender.SendOTP: write: %w", err)
+	}
+	return nil
+}
 
 // OtpHandler holds the dependencies for both OTP endpoints.
 type OtpHandler struct {
