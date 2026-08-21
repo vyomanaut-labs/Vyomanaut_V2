@@ -56,6 +56,18 @@ type startupConfig struct {
 	// genuine incident waiting to happen in production.
 	OtpDeliveryLogPath string
 
+	// DepartureThresholdOverride (M17-E Session 17.7.1, ADR-084 §D-4): Go
+	// duration syntax (e.g. "90s"), from --departure-threshold or
+	// VYOMANAUT_DEPARTURE_THRESHOLD. Empty (the default) leaves
+	// profile.DepartureThreshold completely unchanged — DemoProfile itself
+	// is never edited (TestViabilityActiveTransitionAtTenMinutes keeps
+	// passing against the real 10-minute constant). Non-empty is FATAL
+	// outside demo mode, and fatally rejected below the derived safety
+	// floor even in demo mode (runMicroservice) — shortening detection
+	// latency below the heartbeat cadence reads a live provider's normal
+	// jitter as a departure, which freezes it and seizes its escrow.
+	DepartureThresholdOverride string
+
 	// LoadBalancerAddr is the address cluster.NewRouter's ResponsibleReplica
 	// stub reports as "the load balancer" (ARCH §18, Milestone 17 Phase
 	// 17.2.1's eventual real target). VYOMANAUT_LOAD_BALANCER_ADDR;
@@ -149,6 +161,10 @@ func loadStartupConfigFromEnv() startupConfig {
 		P2PListenAddr:  os.Getenv("VYOMANAUT_P2P_LISTEN_ADDR"), // empty = outbound-only (HostConfig doc comment)
 
 		OtpDeliveryLogPath: os.Getenv("VYOMANAUT_OTP_DELIVERY_LOG"), // empty = NoopOtpSender (unchanged default)
+
+		// DepartureThresholdOverride: see this field's own doc comment.
+		// Empty leaves profile.DepartureThreshold untouched.
+		DepartureThresholdOverride: os.Getenv("VYOMANAUT_DEPARTURE_THRESHOLD"),
 
 		// LoadBalancerAddr: see this field's own doc comment (M12 audit
 		// corrections, Finding 11) — defaults to this replica's own
