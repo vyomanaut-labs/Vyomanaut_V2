@@ -61,6 +61,15 @@ type readinessAdminResponse struct {
 	Mode                      string                   `json:"mode"`
 	Conditions                readinessConditionsAdmin `json:"conditions"`
 	ProvidersNearCeilingCount int                      `json:"providers_near_ceiling_count"`
+	// EffectiveDepartureThresholdSeconds (M17-E Session 17.7.1, ADR-084
+	// §D-4): the AUTHORITATIVE detection-latency value the running
+	// cmd/microservice's departure detector is actually using right now
+	// — which may differ from config.NetworkProfile's own compiled
+	// constant whenever that process was started with its own runtime
+	// override flag. The fleet panel's countdown reads this field, not a
+	// separately-computed local guess (panels.go's own
+	// effectiveDepartureThreshold, below).
+	EffectiveDepartureThresholdSeconds int64 `json:"effective_departure_threshold_seconds"`
 }
 
 type providerAdminItem struct {
@@ -199,6 +208,18 @@ const maxEventFeedEntries = 20
 
 const tickInterval = 1 * time.Second
 
+// fanOutEndpointCount is the number of admin endpoints fetchCmd polls
+// concurrently each cycle (task item 1's own five: readiness, providers,
+// repair queue, audit stats, vetting status) — named so wg.Add's argument
+// isn't a bare literal that could silently drift from the actual number of
+// goroutines launched below.
+const fanOutEndpointCount = 5
+
+// fetchTimeout bounds one fan-out cycle so a single unreachable endpoint
+// cannot stall the console indefinitely — five times tickInterval gives
+// each cycle room to complete well before the next tick fires.
+const fetchTimeout = 5 * time.Second
+
 type tickMsg time.Time
 
 // fetchResultMsg carries one fan-out cycle's results. Fields are pointers
@@ -251,7 +272,7 @@ func tickCmd() tea.Cmd {
 // blocks or blanks the other four (TestUpdateHandlesFetchErrorWithoutPanicking).
 func fetchCmd(client *adminClient) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 		defer cancel()
 
 		var (
@@ -271,7 +292,7 @@ func fetchCmd(client *adminClient) tea.Cmd {
 			}
 		}
 
-		wg.Add(5)
+		wg.Add(fanOutEndpointCount)
 		go fetch("readiness", func() error {
 			resp, err := client.fetchReadiness(ctx)
 			if err != nil {
@@ -473,7 +494,7 @@ func (m watchModel) View() string {
 
 	panels := []string{
 		renderReadiness(m.profile, m.snapshot.Readiness),
-		renderFleet(m.profile, m.snapshot.Providers, m.now),
+		renderFleet(m.profile, m.snapshot.Providers, m.snapshot.Readiness, m.now),
 		renderASNCap(m.profile, m.snapshot.Providers),
 		renderRepair(m.profile, m.snapshot.RepairQueue),
 		renderAudit(m.profile, m.snapshot.AuditStats, m.now),
@@ -488,6 +509,12 @@ func (m watchModel) View() string {
 
 	return header + "\n" + strings.Join(panels, "\n") + errLine + "\n" + dimStyle.Render("press q to quit")
 }
+
+// percentageScale converts a 0..1 fraction to a whole-number percentage —
+// shared by scoreLabel below and by panels.go's ASN-cap and audit panels,
+// so "100" as the fraction-to-percentage multiplier is named once rather
+// than repeated as a bare literal at each call site.
+const percentageScale = 100
 
 // asnShardCap returns floor(TotalShards × ASNCapFraction) — ADR-014's own
 // per-ASN shard cap, and the ASN-cap panel's governing constant (task item
@@ -512,5 +539,5 @@ func scoreLabel(score *float64) string {
 	if score == nil {
 		return "\u2014"
 	}
-	return fmt.Sprintf("%d%%", int(*score*100))
+	return fmt.Sprintf("%d%%", int(*score*percentageScale))
 }

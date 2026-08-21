@@ -34,7 +34,7 @@ func TestHeartbeatAgePastHalfThresholdRendersCountdown(t *testing.T) {
 		},
 	}
 
-	out := renderFleet(profile, providers, now)
+	out := renderFleet(profile, providers, nil, now)
 
 	if !strings.Contains(out, "departs in") {
 		t.Errorf("renderFleet output missing a countdown for a heartbeat past half the effective threshold:\n%s", out)
@@ -48,7 +48,7 @@ func TestHeartbeatAgePastHalfThresholdRendersCountdown(t *testing.T) {
 			{ProviderID: "22222222-2222-2222-2222-222222222222", Status: "ACTIVE", ASN: "AS2", LastHeartbeatTS: &freshHeartbeat},
 		},
 	}
-	freshOut := renderFleet(profile, freshProviders, now)
+	freshOut := renderFleet(profile, freshProviders, nil, now)
 	if strings.Contains(freshOut, "departs in") {
 		t.Errorf("renderFleet showed a countdown for a fresh heartbeat, want none:\n%s", freshOut)
 	}
@@ -119,15 +119,31 @@ func TestReadinessPanelReadsProfileThresholds(t *testing.T) {
 
 // TestEffectiveDepartureThresholdMatchesProfile confirms the named
 // function VERIFY's COUNTDOWN_USES_EFFECTIVE_THRESHOLD check looks for
-// actually returns profile.DepartureThreshold, and reflects a change to
-// that field rather than a compiled-in constant.
+// falls back to profile.DepartureThreshold before any readiness snapshot
+// has arrived (reflecting a change to that field rather than a
+// compiled-in constant), and — the point of Session 17.7.1's own update —
+// prefers the server's authoritative effective_departure_threshold_seconds
+// the moment one is available, even when it disagrees with this
+// process's own local profile constant.
 func TestEffectiveDepartureThresholdMatchesProfile(t *testing.T) {
 	profile := config.DemoProfile
 	profile.DepartureThreshold = 37 * time.Minute
 
-	got := effectiveDepartureThreshold(profile)
+	// No readiness snapshot yet: falls back to the local profile constant.
+	got := effectiveDepartureThreshold(profile, nil)
 	if got != 37*time.Minute {
-		t.Errorf("effectiveDepartureThreshold = %v, want %v (profile.DepartureThreshold)", got, 37*time.Minute)
+		t.Errorf("effectiveDepartureThreshold(profile, nil) = %v, want %v (profile.DepartureThreshold)", got, 37*time.Minute)
+	}
+
+	// A readiness snapshot with a DIFFERENT value present: the server's
+	// authoritative figure wins, even though it disagrees with this
+	// process's own profile.DepartureThreshold above — the console must
+	// never show a countdown that disagrees with the detector actually
+	// running (ADR-084 §D-4).
+	readiness := &readinessAdminResponse{EffectiveDepartureThresholdSeconds: 90}
+	got = effectiveDepartureThreshold(profile, readiness)
+	if got != 90*time.Second {
+		t.Errorf("effectiveDepartureThreshold(profile, readiness) = %v, want %v (the server's authoritative value, not the local profile constant)", got, 90*time.Second)
 	}
 }
 

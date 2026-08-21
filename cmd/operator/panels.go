@@ -25,22 +25,31 @@ import (
 )
 
 // effectiveDepartureThreshold is the duration of heartbeat silence after
-// which a provider is treated as departed. Named as its own function
-// (rather than every call site reading profile.DepartureThreshold
-// directly) for two reasons: VERIFY's own COUNTDOWN_USES_EFFECTIVE_THRESHOLD
-// check looks for this name, and — the real reason the name matters, not
-// just the check — this is this session's one clearly-marked extension
-// point. A provider with an ACTIVE promised-return window
-// (internal/api/provider.go's promised_return_at, ADR-007) should get a
-// longer effective threshold than a silent one, but GET /admin/providers
-// does not currently expose promised_return_at (neither this session's
-// nor Session 17.6.1's own FILES list touched admin.go's response shape
-// for it), so today this function is exactly profile.DepartureThreshold —
-// a future session that adds that field to the wire contract is the one
-// that should extend this function, not invent a parallel one.
-func effectiveDepartureThreshold(profile config.NetworkProfile) time.Duration {
+// which a provider is treated as departed.
+//
+// [Updated, M17-E Session 17.7.1, ADR-084 §D-4] cmd/microservice can now
+// be started with its own runtime override
+// (--departure-threshold/VYOMANAUT_DEPARTURE_THRESHOLD), so
+// profile.DepartureThreshold — this operator process's OWN, separately
+// selected profile constant — is no longer guaranteed to match what the
+// running detector is actually using. GET /admin/readiness now carries
+// the authoritative value the server itself computed
+// (effective_departure_threshold_seconds, internal/api/readiness.go); this
+// function prefers that field whenever a readiness snapshot is available,
+// falling back to the local profile constant only before the very first
+// successful fetch — "no countdown yet" is honest; "a countdown that
+// disagrees with the detector" (ADR-084 §D-4's own words) is not.
+func effectiveDepartureThreshold(profile config.NetworkProfile, readiness *readinessAdminResponse) time.Duration {
+	if readiness != nil && readiness.EffectiveDepartureThresholdSeconds > 0 {
+		return time.Duration(readiness.EffectiveDepartureThresholdSeconds) * time.Second
+	}
 	return profile.DepartureThreshold
 }
+
+// halfDivisor names the "half of the effective departure threshold" split
+// task item 3 defines — the point past which the fleet panel starts
+// showing a countdown, rather than a bare literal 2 at the one call site.
+const halfDivisor = 2
 
 func waitingPanel(title string) string {
 	return panelStyle.Render(panelTitleStyle.Render(title) + "\n" + dimStyle.Render("waiting for data..."))
@@ -93,14 +102,14 @@ func renderReadiness(profile config.NetworkProfile, r *readinessAdminResponse) s
 // 2. Provider fleet
 // ═══════════════════════════════════════════════════════════════════════
 
-func renderFleet(profile config.NetworkProfile, providers *adminProvidersResponse, now time.Time) string {
+func renderFleet(profile config.NetworkProfile, providers *adminProvidersResponse, readiness *readinessAdminResponse, now time.Time) string {
 	const title = "Provider fleet"
 	if providers == nil {
 		return waitingPanel(title)
 	}
 
-	threshold := effectiveDepartureThreshold(profile)
-	half := threshold / 2
+	threshold := effectiveDepartureThreshold(profile, readiness)
+	half := threshold / halfDivisor
 
 	lines := []string{dimStyle.Render(fmt.Sprintf("%-10s %-8s %-10s %-28s %5s %7s %6s", "ID", "ASN", "STATUS", "HEARTBEAT", "GB", "CHUNKS", "SCORE"))}
 	for _, p := range providers.Providers {
@@ -149,7 +158,7 @@ func renderASNCap(profile config.NetworkProfile, providers *adminProvidersRespon
 	sort.Strings(asns)
 
 	lines := []string{
-		dimStyle.Render(fmt.Sprintf("cap = floor(%d shards \u00d7 %.0f%%) = %d per ASN", profile.TotalShards, profile.ASNCapFraction*100, shardCap)),
+		dimStyle.Render(fmt.Sprintf("cap = floor(%d shards \u00d7 %.0f%%) = %d per ASN", profile.TotalShards, profile.ASNCapFraction*percentageScale, shardCap)),
 	}
 	for _, asn := range asns {
 		count := occ[asn]
@@ -226,8 +235,8 @@ func renderAudit(profile config.NetworkProfile, as *auditStatsAdminResponse, now
 		return waitingPanel(title)
 	}
 
-	passRatePct := int(as.PassRate * 100)
-	timeoutRatePct := int(as.TimeoutRate * 100)
+	passRatePct := int(as.PassRate * percentageScale)
+	timeoutRatePct := int(as.TimeoutRate * percentageScale)
 	nextTick := as.WindowEnd.Add(profile.AuditPeriodDuration)
 
 	lines := []string{
