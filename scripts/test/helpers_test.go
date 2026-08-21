@@ -652,6 +652,113 @@ func firstRealChunkHolderIndex(t *testing.T, ctx context.Context, db *sql.DB, fi
 	return providerIndexForID(t, ctx, db, providerID)
 }
 
+// realChunkHolderIndices returns count DISTINCT --sim-only-index values
+// currently holding a real (non-vetting), ACTIVE shard of fileID — Session
+// 17.7.3's own BURST phase needs multiple, genuinely distinct holders in
+// one query, since a provider's chunk_assignments row does not change the
+// instant it is SIGKILLed (see departAtBurst's own doc comment on why two
+// separate firstRealChunkHolderIndex calls would risk returning the same
+// provider twice).
+func realChunkHolderIndices(t *testing.T, ctx context.Context, db *sql.DB, fileID uuid.UUID, count int) []int {
+	t.Helper()
+	rows, err := db.QueryContext(ctx, `
+		SELECT DISTINCT ca.provider_id
+		FROM chunk_assignments ca
+		JOIN segments s ON s.segment_id = ca.segment_id
+		WHERE s.file_id = $1 AND ca.is_vetting_chunk = FALSE AND ca.status = 'ACTIVE'
+		LIMIT $2`, fileID, count)
+	if err != nil {
+		t.Fatalf("realChunkHolderIndices: query: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var indices []int
+	for rows.Next() {
+		var providerID uuid.UUID
+		if err := rows.Scan(&providerID); err != nil {
+			t.Fatalf("realChunkHolderIndices: scan: %v", err)
+		}
+		indices = append(indices, providerIndexForID(t, ctx, db, providerID))
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("realChunkHolderIndices: iterate: %v", err)
+	}
+	if len(indices) < count {
+		t.Fatalf("realChunkHolderIndices: found only %d distinct real chunk holder(s) for file %s, want %d", len(indices), fileID, count)
+	}
+	return indices
+}
+
+// providerIDForIndex is providerIndexForID's own inverse — given a
+// --sim-only-index, returns that provider's provider_id via the same
+// +91987653NNNN phone convention. Session 17.7.3's MID_REPAIR phase needs
+// this to identify the ORIGINAL holder's provider_id before departing it,
+// so the subsequent replacement-assignment poll can exclude it by ID.
+func providerIDForIndex(t *testing.T, ctx context.Context, db *sql.DB, index int) uuid.UUID {
+	t.Helper()
+	phone := fmt.Sprintf("+91987653%04d", index)
+	var providerID uuid.UUID
+	if err := db.QueryRowContext(ctx, `SELECT provider_id FROM providers WHERE phone_number = $1`, phone).Scan(&providerID); err != nil {
+		t.Fatalf("providerIDForIndex: query provider_id for index %d (phone %s): %v", index, phone, err)
+	}
+	return providerID
+}
+
+// chunkHeldByProviderForFile returns the raw chunk_id bytes of one real,
+// ACTIVE shard of fileID held by providerID — Session 17.7.3's MID_REPAIR
+// phase needs this specific chunk_id to poll for its own replacement's
+// assignment afterward (pollReplacementAssignment).
+func chunkHeldByProviderForFile(t *testing.T, ctx context.Context, db *sql.DB, fileID, providerID uuid.UUID) []byte {
+	t.Helper()
+	var chunkID []byte
+	err := db.QueryRowContext(ctx, `
+		SELECT ca.chunk_id
+		FROM chunk_assignments ca
+		JOIN segments s ON s.segment_id = ca.segment_id
+		WHERE s.file_id = $1 AND ca.provider_id = $2 AND ca.is_vetting_chunk = FALSE AND ca.status = 'ACTIVE'
+		LIMIT 1`, fileID, providerID).Scan(&chunkID)
+	if err != nil {
+		t.Fatalf("chunkHeldByProviderForFile: no ACTIVE real chunk found for provider %s on file %s: %v", providerID, fileID, err)
+	}
+	return chunkID
+}
+
+// pollReplacementAssignment polls for a chunk_assignments row for chunkID
+// held by a provider OTHER than excludeProviderID, in REPAIRING or ACTIVE
+// status — this is Session 17.7.3's MID_REPAIR race's own detection
+// signal: preRegisterChunkAssignment (internal/repair/executor.go) writes
+// this row BEFORE uploadShard is attempted, confirmed by reading that
+// function's own call order directly, not inferred.
+func pollReplacementAssignment(t *testing.T, ctx context.Context, db *sql.DB, chunkID []byte, excludeProviderID uuid.UUID, timeout time.Duration) uuid.UUID {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		var providerID uuid.UUID
+		err := db.QueryRowContext(ctx, `
+			SELECT provider_id FROM chunk_assignments
+			WHERE chunk_id = $1 AND provider_id != $2 AND status IN ('REPAIRING', 'ACTIVE')
+			ORDER BY created_at DESC LIMIT 1`, chunkID, excludeProviderID).Scan(&providerID)
+		if err == nil {
+			return providerID
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pollReplacementAssignment: no replacement chunk_assignments row appeared for chunk %x within %s: %v", chunkID, timeout, err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// retrieveTestFileTrackedAllowingError is retrieveTestFileTracked's core,
+// for callers (departAtMidRetrieve) that need to race a kill against the
+// retrieve itself and so cannot let a mid-flight failure call t.Fatalf
+// from inside a background goroutine — the same reason
+// uploadTestFileTrackedAllowingError exists on the upload side.
+func retrieveTestFileTrackedAllowingError(ctx context.Context, ms *liveMicroservice, owner *liveOwner, host p2p.Host, engine *erasure.Engine, masterSecret [32]byte, fileID uuid.UUID) ([]byte, error) {
+	profile := config.SelectProfile("demo")
+	orch := retrieve.NewOrchestrator(ms.baseURL, owner.token, http.DefaultClient, host, engine, profile)
+	return orch.RetrieveFile(ctx, masterSecret, owner.ownerID, fileID)
+}
+
 // ── graceful departure: `provider depart`, a separate one-shot CLI
 // invocation reusing the daemon's own --data-dir identity (cmd/provider/
 // depart.go's own header note on why this always verifies) ─────────────
