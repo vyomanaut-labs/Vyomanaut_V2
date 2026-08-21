@@ -18,11 +18,6 @@ const (
 )
 
 var (
-	titleStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(colorAccent).
-			MarginBottom(1)
-
 	panelStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colorDim).
@@ -63,7 +58,8 @@ func statusStyle(s severity) lipgloss.Style {
 		return alertStyle
 	case severityWarn:
 		return warnStyle
-	default:
+	case severityOK:
 		return okStyle
 	}
+	panic("unreachable: unknown severity")
 }

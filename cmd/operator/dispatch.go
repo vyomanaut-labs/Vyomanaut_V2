@@ -76,10 +76,6 @@ func validateGlobalFlags(g globalFlags) error {
 // and cmd/provider's own identical helpers — this CLI's operating envelope
 // has no meaningful recovery path for a broken output stream either (IC
 // §11: cmd/ is wiring only).
-func fprint(w io.Writer, a ...any) {
-	_, _ = fmt.Fprint(w, a...)
-}
-
 func fprintln(w io.Writer, a ...any) {
 	_, _ = fmt.Fprintln(w, a...)
 }

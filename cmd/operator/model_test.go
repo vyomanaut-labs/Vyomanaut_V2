@@ -71,7 +71,10 @@ func TestUpdateHandlesFetchErrorWithoutPanicking(t *testing.T) {
 	// panic when folded on top of the all-nil previous snapshot.
 	goodMsg := fetchResultMsg{at: time.Now(), readiness: &readinessAdminResponse{Mode: "demo"}}
 	updated2, _ := wm.Update(goodMsg)
-	wm2 := updated2.(watchModel)
+	wm2, ok := updated2.(watchModel)
+	if !ok {
+		t.Fatalf("updated2 has type %T, want watchModel", updated2)
+	}
 	if !wm2.haveData {
 		t.Error("haveData = false after a successful cycle, want true")
 	}
@@ -153,13 +156,19 @@ func TestAppendDerivedEventsTracksStatusTransitions(t *testing.T) {
 		Providers: []providerAdminItem{{ProviderID: "p1", Status: "VETTING"}},
 	}}
 	updated, _ := m.Update(cycle1)
-	wm := updated.(watchModel)
+	wm, ok := updated.(watchModel)
+	if !ok {
+		t.Fatalf("updated has type %T, want watchModel", updated)
+	}
 
 	cycle2 := fetchResultMsg{at: time.Now(), providers: &adminProvidersResponse{
 		Providers: []providerAdminItem{{ProviderID: "p1", Status: "ACTIVE"}},
 	}}
 	updated2, _ := wm.Update(cycle2)
-	wm2 := updated2.(watchModel)
+	wm2, ok := updated2.(watchModel)
+	if !ok {
+		t.Fatalf("updated2 has type %T, want watchModel", updated2)
+	}
 
 	found := false
 	for _, e := range wm2.events {

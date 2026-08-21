@@ -55,6 +55,11 @@ func dispatchShards(args []string, out, errOut io.Writer) int {
 	return 0
 }
 
+const (
+	tableTabWidth = 2
+	tablePadding  = 2
+)
+
 // renderShards writes resp to out. jsonOutput selects the same
 // machine-readable-vs-human-readable split every other cmd/*'s --json flag
 // already establishes (cmd/client, cmd/provider earnings.go).
@@ -75,7 +80,7 @@ func renderShards(out io.Writer, resp shardsAdminResponseBody, jsonOutput bool) 
 	}
 	fprintf(out, "  shards:         %d\n\n", len(resp.Shards))
 
-	tw := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
+	tw := tabwriter.NewWriter(out, 0, tableTabWidth, tablePadding, ' ', 0)
 	fprintln(tw, "SEGMENT_ID\tSHARD\tCHUNK_ID\tPROVIDER_ID\tASN\tSIZE_BYTES")
 	for _, s := range resp.Shards {
 		fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%d\n", s.SegmentID, s.ShardIndex, s.ChunkID, s.ProviderID, s.ASN, s.SizeBytes)
