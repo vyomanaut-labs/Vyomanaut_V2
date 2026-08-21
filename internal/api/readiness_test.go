@@ -178,7 +178,7 @@ func seedReadinessSatisfyingProviders(t *testing.T, db *sql.DB, n int) {
 func TestReadinessAllSevenConditionsEvaluated(t *testing.T) {
 	db := openTestDB(t)
 	profile := config.DemoProfile
-	evaluator := NewReadinessEvaluator(db, profile, unloadedClusterSecretCache(), MockClusterMembership{}, StubRelayNodeCounter{})
+	evaluator := NewReadinessEvaluator(db, profile, unloadedClusterSecretCache(), MockClusterMembership{}, StubRelayNodeCounter{}, profile.DepartureThreshold)
 
 	resp, err := evaluator.Evaluate(context.Background())
 	if err != nil {
@@ -206,12 +206,38 @@ func TestReadinessAllSevenConditionsEvaluated(t *testing.T) {
 	}
 }
 
+// TestReadinessReportsEffectiveDepartureThreshold confirms
+// effective_departure_threshold_seconds (M17-E Session 17.7.1, ADR-084
+// §D-4) reports EXACTLY the duration threaded into NewReadinessEvaluator's
+// own effectiveDepartureThreshold parameter — never
+// profile.DepartureThreshold read directly (this file deliberately does
+// not read that field at all; see ReadinessEvaluator's own struct field
+// doc comment on why) — proven by passing a value that deliberately
+// DISAGREES with profile.DepartureThreshold and confirming the response
+// reflects the passed-in value, not the profile's own compiled constant.
+func TestReadinessReportsEffectiveDepartureThreshold(t *testing.T) {
+	db := openTestDB(t)
+	profile := config.DemoProfile // profile.DepartureThreshold = 10 minutes
+
+	const overrideSeconds = 90 // deliberately disagrees with the 10-minute profile constant
+	evaluator := NewReadinessEvaluator(db, profile, unloadedClusterSecretCache(), MockClusterMembership{}, StubRelayNodeCounter{}, overrideSeconds*time.Second)
+
+	resp, err := evaluator.Evaluate(context.Background())
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if resp.EffectiveDepartureThresholdSeconds != overrideSeconds {
+		t.Errorf("effective_departure_threshold_seconds = %d, want %d (the value passed to NewReadinessEvaluator, not profile.DepartureThreshold's %d seconds)",
+			resp.EffectiveDepartureThresholdSeconds, overrideSeconds, int64(profile.DepartureThreshold.Seconds()))
+	}
+}
+
 func TestReadinessAllConditionsMetWhenAllSatisfied(t *testing.T) {
 	db := openTestDB(t)
 	profile := config.DemoProfile
 	seedReadinessSatisfyingProviders(t, db, profile.MinDistinctASNs) // 5 in demo; also satisfies MinActiveProviders(5), MinMetroRegions(1), MinCooledAccounts(5)
 
-	evaluator := NewReadinessEvaluator(db, profile, loadedClusterSecretCache(t), MockClusterMembership{}, StubRelayNodeCounter{})
+	evaluator := NewReadinessEvaluator(db, profile, loadedClusterSecretCache(t), MockClusterMembership{}, StubRelayNodeCounter{}, profile.DepartureThreshold)
 	resp, err := evaluator.Evaluate(context.Background())
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)
@@ -225,7 +251,7 @@ func TestReadinessDemoQuorumAlwaysSatisfiedWithoutQuery(t *testing.T) {
 	db := openTestDB(t)
 	profile := config.DemoProfile // RequireQuorum = false
 	membership := &recordingClusterMembership{}
-	evaluator := NewReadinessEvaluator(db, profile, unloadedClusterSecretCache(), membership, StubRelayNodeCounter{})
+	evaluator := NewReadinessEvaluator(db, profile, unloadedClusterSecretCache(), membership, StubRelayNodeCounter{}, profile.DepartureThreshold)
 
 	resp, err := evaluator.Evaluate(context.Background())
 	if err != nil {
@@ -248,7 +274,7 @@ func TestReadinessRazorpayIsLiveQueryNotCached(t *testing.T) {
 	db := openTestDB(t)
 	verify := openVerifyDB(t)
 	profile := config.DemoProfile
-	evaluator := NewReadinessEvaluator(db, profile, unloadedClusterSecretCache(), MockClusterMembership{}, StubRelayNodeCounter{})
+	evaluator := NewReadinessEvaluator(db, profile, unloadedClusterSecretCache(), MockClusterMembership{}, StubRelayNodeCounter{}, profile.DepartureThreshold)
 
 	resp1, err := evaluator.Evaluate(context.Background())
 	if err != nil {
@@ -287,7 +313,7 @@ func TestReadinessModeFieldReflectsProfile(t *testing.T) {
 		{"production", config.ProductionProfile, "prod"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			evaluator := NewReadinessEvaluator(db, tc.profile, unloadedClusterSecretCache(), MockClusterMembership{}, StubRelayNodeCounter{})
+			evaluator := NewReadinessEvaluator(db, tc.profile, unloadedClusterSecretCache(), MockClusterMembership{}, StubRelayNodeCounter{}, tc.profile.DepartureThreshold)
 			resp, err := evaluator.Evaluate(context.Background())
 			if err != nil {
 				t.Fatalf("Evaluate: %v", err)
@@ -371,7 +397,7 @@ func TestReadinessDemoValueIgnoresModeString(t *testing.T) {
 		profile := config.DemoProfile
 		profile.Mode = "staging" // synthetic: neither "demo" nor "prod"
 		profile.IsDemoMode = true
-		e := NewReadinessEvaluator(db, profile, nil, MockClusterMembership{}, StubRelayNodeCounter{})
+		e := NewReadinessEvaluator(db, profile, nil, MockClusterMembership{}, StubRelayNodeCounter{}, profile.DepartureThreshold)
 
 		got := e.demoValue(5)
 		if got == nil || *got != 5 {
@@ -383,7 +409,7 @@ func TestReadinessDemoValueIgnoresModeString(t *testing.T) {
 		profile := config.ProductionProfile
 		profile.Mode = "staging" // synthetic: neither "demo" nor "prod"
 		profile.IsDemoMode = false
-		e := NewReadinessEvaluator(db, profile, nil, MockClusterMembership{}, StubRelayNodeCounter{})
+		e := NewReadinessEvaluator(db, profile, nil, MockClusterMembership{}, StubRelayNodeCounter{}, profile.DepartureThreshold)
 
 		got := e.demoValue(5)
 		if got != nil {

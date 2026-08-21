@@ -94,7 +94,7 @@ func insertActiveProviderWithASN(t *testing.T, db *sql.DB, asn string) uuid.UUID
 // reimplemented.
 func newReadyEvaluator(t *testing.T, db *sql.DB, profile config.NetworkProfile) *ReadinessEvaluator {
 	t.Helper()
-	return NewReadinessEvaluator(db, profile, loadedClusterSecretCache(t), MockClusterMembership{}, StubRelayNodeCounter{})
+	return NewReadinessEvaluator(db, profile, loadedClusterSecretCache(t), MockClusterMembership{}, StubRelayNodeCounter{}, profile.DepartureThreshold)
 }
 
 // seedReadyDemoProviderPool seeds exactly profile.MinDistinctASNs ACTIVE
@@ -173,7 +173,7 @@ func TestUploadAssignRejectsWhenNetworkNotReady(t *testing.T) {
 	db := openTestDB(t)
 	ownerID := insertTestOwnerWithEscrow(t, db, 100_000_00) // plenty of escrow; readiness is what should fail
 	// No providers seeded at all -> readiness must fail.
-	evaluator := NewReadinessEvaluator(db, config.DemoProfile, unloadedClusterSecretCache(), MockClusterMembership{}, StubRelayNodeCounter{})
+	evaluator := NewReadinessEvaluator(db, config.DemoProfile, unloadedClusterSecretCache(), MockClusterMembership{}, StubRelayNodeCounter{}, config.DemoProfile.DepartureThreshold)
 
 	_, msPriv, _ := ed25519.GenerateKey(nil)
 	h := NewUploadAssignHandler(db, config.DemoProfile, msPriv, evaluator)

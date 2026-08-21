@@ -433,7 +433,7 @@ func runMicroservice(ctx context.Context, cfg startupConfig) (*app, error) {
 	}
 
 	// ── Step 7 — readiness evaluator: only starts now that step 6 resolved ──
-	readinessEvaluator := api.NewReadinessEvaluator(db, profile, cache, clusterMembership, api.StubRelayNodeCounter{})
+	readinessEvaluator := api.NewReadinessEvaluator(db, profile, cache, clusterMembership, api.StubRelayNodeCounter{}, effectiveDepartureThreshold)
 	go startReadinessMonitorLoop(ctx, readinessEvaluator)
 
 	// ── Microservice signing key + admin key (shared across steps 8-16) ────

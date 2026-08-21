@@ -118,12 +118,21 @@ type ReadinessConditions struct {
 // is informational/non-gating — it does not participate in
 // AllConditionsMet — surfacing how many ACTIVE providers are approaching
 // the per-provider chunk storage ceiling upload/assign enforces (upload.go).
+//
+// EffectiveDepartureThresholdSeconds (M17-E Session 17.7.1, ADR-084 §D-4)
+// is likewise informational/non-gating: the console's own live countdown
+// (cmd/operator/panels.go) needs the AUTHORITATIVE detection-latency value
+// actually governing repair.NewDepartureDetector right now — which may
+// differ from the compiled profile constant whenever cmd/microservice was
+// started with its own departure-threshold override flag — not a
+// separately-configured guess that could silently disagree with it.
 type ReadinessResponse struct {
-	AllConditionsMet          bool                `json:"all_conditions_met"`
-	EvaluatedAt               time.Time           `json:"evaluated_at"`
-	Mode                      string              `json:"mode"`
-	Conditions                ReadinessConditions `json:"conditions"`
-	ProvidersNearCeilingCount int                 `json:"providers_near_ceiling_count"`
+	AllConditionsMet                   bool                `json:"all_conditions_met"`
+	EvaluatedAt                        time.Time           `json:"evaluated_at"`
+	Mode                               string              `json:"mode"`
+	Conditions                         ReadinessConditions `json:"conditions"`
+	ProvidersNearCeilingCount          int                 `json:"providers_near_ceiling_count"`
+	EffectiveDepartureThresholdSeconds int64               `json:"effective_departure_threshold_seconds"`
 }
 
 // ReadinessEvaluator evaluates all seven readiness conditions (ADR-029,
@@ -156,6 +165,20 @@ type ReadinessEvaluator struct {
 	clusterMembership  ClusterMembership
 	relayNodeCounter   RelayNodeCounter
 
+	// effectiveDepartureThreshold (M17-E Session 17.7.1, ADR-084 §D-4) is
+	// threaded in separately from the profile field above, by design: this
+	// package deliberately does not read config.NetworkProfile's own
+	// detection-latency setting anywhere in this file — the departure
+	// detector (internal/repair) remains the ONLY reader of that specific
+	// field inside internal/ (build.md's own "single read site" property,
+	// which is what makes a runtime override low-risk in the first place).
+	// cmd/microservice/main.go computes the authoritative value once
+	// (validated against ADR-084's derived floor) and passes it here
+	// explicitly, so this evaluator reports EXACTLY what the running
+	// detector is actually using, never a second, independently-derived
+	// guess that could drift from it.
+	effectiveDepartureThreshold time.Duration
+
 	// cached holds the last RefreshCache result. nil until the first
 	// refresh ever completes (see Cached's own doc comment for how callers
 	// must handle that window). A pointer, not a value, so Store/Load are
@@ -169,19 +192,25 @@ type ReadinessEvaluator struct {
 // NewReadinessEvaluator constructs a ReadinessEvaluator. clusterMembership
 // and relayNodeCounter may be MockClusterMembership{} / StubRelayNodeCounter{}
 // until their respective real subsystems exist (see this file's header note).
+// effectiveDepartureThreshold should be exactly the duration value the
+// caller is also handing to repair.NewDepartureDetector — see this
+// struct's own field doc comment on why this evaluator holds that value
+// independently rather than reading it out of profile.
 func NewReadinessEvaluator(
 	db *sql.DB,
 	profile config.NetworkProfile,
 	clusterSecretCache *audit.ClusterSecretCache,
 	clusterMembership ClusterMembership,
 	relayNodeCounter RelayNodeCounter,
+	effectiveDepartureThreshold time.Duration,
 ) *ReadinessEvaluator {
 	return &ReadinessEvaluator{
-		db:                 db,
-		profile:            profile,
-		clusterSecretCache: clusterSecretCache,
-		clusterMembership:  clusterMembership,
-		relayNodeCounter:   relayNodeCounter,
+		db:                          db,
+		profile:                     profile,
+		clusterSecretCache:          clusterSecretCache,
+		clusterMembership:           clusterMembership,
+		relayNodeCounter:            relayNodeCounter,
+		effectiveDepartureThreshold: effectiveDepartureThreshold,
 	}
 }
 
@@ -247,11 +276,12 @@ func (e *ReadinessEvaluator) Evaluate(ctx context.Context) (ReadinessResponse, e
 		quorumCond.Satisfied && razorpayCond.Satisfied && relayCond.Satisfied && secretCond.Satisfied
 
 	return ReadinessResponse{
-		AllConditionsMet:          allMet,
-		EvaluatedAt:               time.Now().UTC(),
-		Mode:                      e.profile.Mode,
-		Conditions:                conditions,
-		ProvidersNearCeilingCount: nearCeilingCount,
+		AllConditionsMet:                   allMet,
+		EvaluatedAt:                        time.Now().UTC(),
+		Mode:                               e.profile.Mode,
+		Conditions:                         conditions,
+		ProvidersNearCeilingCount:          nearCeilingCount,
+		EffectiveDepartureThresholdSeconds: int64(e.effectiveDepartureThreshold.Seconds()),
 	}, nil
 }
 
