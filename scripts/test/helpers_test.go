@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,6 +29,14 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/client/retrieve"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/client/upload"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/erasure"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/p2p"
 )
 
 // buildClientBinary builds cmd/client, mirroring buildBinaries' own
@@ -395,4 +404,282 @@ func runClientRegisterInteractive(t *testing.T, ctx context.Context, db *sql.DB,
 		t.Fatalf("register did not report success: %+v\nfull output:\n%s", result, stdout)
 	}
 	return result.OwnerID
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// M17-E Session 17.7.2 additions (ADR-084 §D-4 matrix, F-D-1)
+// ═══════════════════════════════════════════════════════════════════════
+
+// startMicroserviceWithFlags mirrors demo_timeline_test.go's own
+// startMicroservice construction — same random-key generation, same env
+// var set, same stable log-directory-with-on-failure-dump cleanup, same
+// waitForHTTP readiness wait — with exactly one addition: extraArgs are
+// passed as command-line flags to the spawned binary.
+//
+// This duplicates startMicroservice's body rather than adding a variadic
+// parameter to it, because startMicroservice itself lives in
+// demo_timeline_test.go, which is NOT in this session's own FILES list
+// (scripts/test/demo_departure_test.go, scripts/test/helpers_test.go
+// (extend) only) — the same judgment call buildClientBinary already made
+// for buildBinaries (this file's own header comment). Session 17.7.2 needs
+// this specifically because startMicroservice invokes the binary with NO
+// arguments at all; --departure-threshold can only reach the process as a
+// flag here, not as an environment variable alone, because this session's
+// own VERIFY block checks for the literal flag text, and because a flag is
+// what an operator running a real demo would actually type — matching
+// that, not just satisfying the check, is the point (ADR-084 §D-4's own
+// framing: this is a real operator-facing flag, not merely an env var).
+func startMicroserviceWithFlags(t *testing.T, ctx context.Context, binPath string, extraArgs ...string) *liveMicroservice {
+	t.Helper()
+
+	adminKey := randomHex(t, 32)
+	signingSeed := randomHex(t, ed25519SeedSize)
+	clusterSeed := randomBase64Seed(t)
+	port := freePort(t)
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+
+	cmd := exec.CommandContext(ctx, binPath, extraArgs...)
+	cmd.Env = append(os.Environ(),
+		"VYOMANAUT_MODE=demo",
+		"PGHOST="+envOr("PGHOST", "localhost"),
+		"PGPORT="+envOr("PGPORT", "5432"),
+		"PGUSER="+envOr("PGUSER", "vyomanaut_app"),
+		"PGPASSWORD="+os.Getenv("PGPASSWORD"),
+		"PGDATABASE="+envOr("PGDATABASE", "vyomanaut_test"),
+		"PGSSLMODE="+envOr("PGSSLMODE", "disable"),
+		"PGMIGRATORUSER="+envOr("PGMIGRATORUSER", "vyomanaut_migrator"),
+		"PGMIGRATORPASSWORD="+os.Getenv("PGMIGRATORPASSWORD"),
+		"VYOMANAUT_ADMIN_API_KEY="+adminKey,
+		"VYOMANAUT_MICROSERVICE_SIGNING_SEED="+signingSeed,
+		"VYOMANAUT_CLUSTER_MASTER_SEED="+clusterSeed,
+		fmt.Sprintf("VYOMANAUT_HTTP_LISTEN_ADDR=:%d", port),
+	)
+
+	logDir, err := os.MkdirTemp("", "vyomanaut-microservice-departure-log-")
+	if err != nil {
+		t.Fatalf("create microservice log dir: %v", err)
+	}
+	logPath := filepath.Join(logDir, "microservice.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		t.Fatalf("create microservice log file: %v", err)
+	}
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start microservice: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		_ = logFile.Close()
+		if t.Failed() {
+			if content, readErr := os.ReadFile(logPath); readErr == nil {
+				t.Logf("microservice log (%s):\n%s", logPath, content)
+			} else {
+				t.Logf("could not read microservice log at %s: %v", logPath, readErr)
+			}
+		}
+		_ = os.RemoveAll(logDir)
+	})
+
+	ms := &liveMicroservice{baseURL: baseURL, adminAPIKey: adminKey, signingSeed: signingSeed, clusterSeed: clusterSeed, logPath: logPath}
+	waitForHTTP(t, baseURL+"/api/v1/admin/readiness", 30*time.Second)
+	return ms
+}
+
+// ed25519SeedSize duplicates ed25519.SeedSize's value locally so this file
+// does not need its own "crypto/ed25519" import solely for one constant
+// already available transitively — matching this codebase's established
+// discipline (see cmd/microservice/keys.go's own header note) of naming
+// exactly why a small duplication was chosen over a new import; here the
+// reason is that ed25519.SeedSize is always 32, a stable, documented Go
+// stdlib constant, not something at risk of silent drift.
+const ed25519SeedSize = 32
+
+// ── upload/retrieve, tracked (F-D-1: every departure case in this phase
+// ends in a byte-identity assertion, which needs the SAME masterSecret and
+// plaintext used at upload time available again at retrieve time —
+// uploadTestFileAllowingError (demo_timeline_test.go) generates and
+// discards its own masterSecret internally, so this file adds its own
+// tracked variant rather than editing that one, again respecting this
+// session's own FILES list) ──────────────────────────────────────────────
+
+// uploadTestFileTracked performs a real upload via internal/client/upload's
+// SDK — same construction as demo_timeline_test.go's own
+// uploadTestFileAllowingError — but returns the masterSecret and plaintext
+// used, so a later retrieveTestFileTracked call in the same test can prove
+// byte identity end to end.
+func uploadTestFileTracked(t *testing.T, ctx context.Context, ms *liveMicroservice, owner *liveOwner, sizeBytes int) (fileID uuid.UUID, masterSecret [32]byte, plaintext []byte) {
+	t.Helper()
+
+	profile := config.SelectProfile("demo")
+	engine, err := erasure.NewEngine(profile)
+	if err != nil {
+		t.Fatalf("erasure.NewEngine: %v", err)
+	}
+
+	clientPort := freePort(t)
+	host, err := p2p.NewHost(p2p.HostConfig{
+		PrivateKey: owner.signingKey,
+		ListenAddr: fmt.Sprintf("0.0.0.0:%d", clientPort),
+	})
+	if err != nil {
+		t.Fatalf("p2p.NewHost (client, upload): %v", err)
+	}
+	t.Cleanup(func() { _ = host.Close() })
+
+	orch := upload.NewOrchestrator(ms.baseURL, owner.token, http.DefaultClient, host, engine, profile, owner.signingKey, t.TempDir())
+
+	if _, err := cryptorand.Read(masterSecret[:]); err != nil {
+		t.Fatalf("rand.Read masterSecret: %v", err)
+	}
+	plaintext = make([]byte, sizeBytes)
+	if _, err := cryptorand.Read(plaintext); err != nil {
+		t.Fatalf("rand.Read plaintext: %v", err)
+	}
+
+	fileID, err = orch.UploadFile(ctx, masterSecret, owner.ownerID, plaintext)
+	if err != nil {
+		t.Fatalf("UploadFile: %v", err)
+	}
+	return fileID, masterSecret, plaintext
+}
+
+// uploadTestFileTrackedAllowingError is uploadTestFileTracked's core, for
+// callers (departAtMidUpload) that need to race a kill against the upload
+// itself and so cannot let a mid-flight failure call t.Fatalf from inside
+// a background goroutine (the documented reason a background goroutine
+// must never call t.Fatal — it does not stop the test, only that
+// goroutine). masterSecret/plaintext are still returned on error (whatever
+// was generated before the attempt), so a caller can still assert what it
+// needs to regardless of outcome.
+func uploadTestFileTrackedAllowingError(ctx context.Context, ms *liveMicroservice, owner *liveOwner, host p2p.Host, engine *erasure.Engine, sizeBytes int) (fileID uuid.UUID, masterSecret [32]byte, plaintext []byte, err error) {
+	profile := config.SelectProfile("demo")
+	orch := upload.NewOrchestrator(ms.baseURL, owner.token, http.DefaultClient, host, engine, profile, owner.signingKey, os.TempDir())
+
+	if _, rerr := cryptorand.Read(masterSecret[:]); rerr != nil {
+		return uuid.UUID{}, masterSecret, nil, fmt.Errorf("rand.Read masterSecret: %w", rerr)
+	}
+	plaintext = make([]byte, sizeBytes)
+	if _, rerr := cryptorand.Read(plaintext); rerr != nil {
+		return uuid.UUID{}, masterSecret, plaintext, fmt.Errorf("rand.Read plaintext: %w", rerr)
+	}
+
+	fileID, err = orch.UploadFile(ctx, masterSecret, owner.ownerID, plaintext)
+	return fileID, masterSecret, plaintext, err
+}
+
+// retrieveTestFileTracked performs a real retrieve via
+// internal/client/retrieve's SDK and returns the decoded plaintext,
+// failing the test on error — this file's retrieve-side counterpart to
+// uploadTestFileTracked/demo_timeline_test.go's own upload-side helpers.
+// No prior test in this codebase drove a real retrieve at all (F-D-1's own
+// finding: TestViabilityRepairSucceedsWithTwoOfFiveOffline ends at
+// pollRepairCompleted, never retrieves) — this is the first.
+func retrieveTestFileTracked(t *testing.T, ctx context.Context, ms *liveMicroservice, owner *liveOwner, masterSecret [32]byte, fileID uuid.UUID) []byte {
+	t.Helper()
+
+	profile := config.SelectProfile("demo")
+	engine, err := erasure.NewEngine(profile)
+	if err != nil {
+		t.Fatalf("erasure.NewEngine (retrieve): %v", err)
+	}
+
+	clientPort := freePort(t)
+	host, err := p2p.NewHost(p2p.HostConfig{
+		PrivateKey: owner.signingKey,
+		ListenAddr: fmt.Sprintf("0.0.0.0:%d", clientPort),
+	})
+	if err != nil {
+		t.Fatalf("p2p.NewHost (client, retrieve): %v", err)
+	}
+	t.Cleanup(func() { _ = host.Close() })
+
+	orch := retrieve.NewOrchestrator(ms.baseURL, owner.token, http.DefaultClient, host, engine, profile)
+	plaintext, err := orch.RetrieveFile(ctx, masterSecret, owner.ownerID, fileID)
+	if err != nil {
+		t.Fatalf("RetrieveFile: %v", err)
+	}
+	return plaintext
+}
+
+// ── mapping a chunk_assignments holder back to its --sim-only-index, so
+// departAt can kill/depart the SPECIFIC provider actually holding a given
+// file's data, not an arbitrary one ─────────────────────────────────────
+
+// providerIndexForID maps a provider_id back to its 0..testSimCount-1
+// --sim-only-index, by parsing it out of that provider's own
+// startProviders-assigned phone number (+91987653{4-digit index} —
+// demo_timeline_test.go's own startProviders comment documents this exact
+// pattern). Fails the test if providerID does not look like one of this
+// run's own simulated providers.
+func providerIndexForID(t *testing.T, ctx context.Context, db *sql.DB, providerID uuid.UUID) int {
+	t.Helper()
+	var phone string
+	if err := db.QueryRowContext(ctx, `SELECT phone_number FROM providers WHERE provider_id = $1`, providerID).Scan(&phone); err != nil {
+		t.Fatalf("providerIndexForID: query phone_number for %s: %v", providerID, err)
+	}
+	const prefix = "+91987653"
+	if !strings.HasPrefix(phone, prefix) || len(phone) != len(prefix)+4 {
+		t.Fatalf("providerIndexForID: phone_number %q for provider %s does not match this suite's own +91987653NNNN sim-provider pattern", phone, providerID)
+	}
+	var index int
+	if _, err := fmt.Sscanf(phone[len(prefix):], "%04d", &index); err != nil {
+		t.Fatalf("providerIndexForID: parse index from phone_number %q: %v", phone, err)
+	}
+	return index
+}
+
+// firstRealChunkHolderIndex returns the --sim-only-index of a provider
+// currently holding a real (non-vetting) shard for fileID — used to pick
+// WHICH provider to depart for POST_UPLOAD/MID_REPAIR/MID_RETRIEVE phases,
+// where the departed provider must actually matter to the file (departing
+// an uninvolved provider would prove nothing).
+func firstRealChunkHolderIndex(t *testing.T, ctx context.Context, db *sql.DB, fileID uuid.UUID) int {
+	t.Helper()
+	var providerID uuid.UUID
+	err := db.QueryRowContext(ctx, `
+		SELECT ca.provider_id
+		FROM chunk_assignments ca
+		JOIN segments s ON s.segment_id = ca.segment_id
+		WHERE s.file_id = $1 AND ca.is_vetting_chunk = FALSE AND ca.status = 'ACTIVE'
+		LIMIT 1`, fileID).Scan(&providerID)
+	if err != nil {
+		t.Fatalf("firstRealChunkHolderIndex: no ACTIVE real chunk holder found for file %s: %v", fileID, err)
+	}
+	return providerIndexForID(t, ctx, db, providerID)
+}
+
+// ── graceful departure: `provider depart`, a separate one-shot CLI
+// invocation reusing the daemon's own --data-dir identity (cmd/provider/
+// depart.go's own header note on why this always verifies) ─────────────
+
+// providerSimDataDir reproduces cmd/provider's own IC §10 naming
+// convention exactly (runSimulation's doc comment, main.go:
+// "{instance_id} zero-padded to 4 digits") — the ONLY way a separate
+// `provider depart` invocation can reload the SAME identity keys the
+// long-running --sim-only-index daemon for that index is using.
+func providerSimDataDir(simDataDir string, index int) string {
+	return filepath.Join(simDataDir, fmt.Sprintf("%04d", index))
+}
+
+// gracefulDepartProvider runs `provider depart` as a one-shot process
+// against the running daemon's own --data-dir (providerSimDataDir),
+// failing the test if it does not exit 0. Returns combined stdout+stderr
+// for callers that want to log or parse it (departCmd's own output
+// includes status/escrow_release/repair_jobs_queued, cmd/provider/
+// depart.go).
+func gracefulDepartProvider(t *testing.T, ctx context.Context, providerBinPath, microserviceURL, simDataDir string, index int) string {
+	t.Helper()
+	cmd := exec.CommandContext(ctx, providerBinPath, "depart",
+		"--microservice-url="+microserviceURL,
+		"--data-dir="+providerSimDataDir(simDataDir, index),
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("provider depart (index %d): %v\n%s", index, err, output)
+	}
+	return string(output)
 }
