@@ -39,6 +39,7 @@ import (
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/erasure"
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/p2p"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/repair"
 )
 
 // departureThresholdOverrideFlag is the exact flag this whole file's
@@ -84,11 +85,13 @@ type departEnv struct {
 	owner           *liveOwner
 
 	// Populated by departAt; read back by the caller after it returns.
-	departedIndex int
-	fileID        uuid.UUID
-	masterSecret  [32]byte
-	plaintext     []byte
-	uploadErr     error // MID_UPLOAD only: the racing UploadFile call's own outcome
+	departedIndex       int
+	secondDepartedIndex int // BURST and MID_REPAIR only: the second departure (respectively, the burst's own second provider, and MID_REPAIR's own killed replacement)
+	fileID              uuid.UUID
+	masterSecret        [32]byte
+	plaintext           []byte
+	uploadErr           error // MID_UPLOAD only: the racing UploadFile call's own outcome
+	retrieveErr         error // MID_RETRIEVE only: the racing RetrieveFile call's own outcome
 }
 
 // departAt is the one reusable harness helper (task item 2). phase names
@@ -104,15 +107,12 @@ func departAt(t *testing.T, ctx context.Context, env *departEnv, phase departPha
 		departAtMidUpload(t, ctx, env, mode)
 	case phasePostUpload:
 		departAtPostUpload(t, ctx, env, mode)
-	case phaseMidRepair, phaseMidRetrieve, phaseBurst:
-		// [Honest placeholder, matching this project's own established
-		// discipline for a phase this session's own FILES/TASK list does
-		// not build — cmd/operator's notYetImplemented is the same
-		// judgment call.] E-4/E-5/E-6 (Session 17.7.3) need this function
-		// to grow these three arms; adding them here now, ahead of that
-		// session's own detailed task text, would be guessing at
-		// requirements not yet written.
-		t.Fatalf("departAt: phase %s is not yet implemented (Session 17.7.3)", phase)
+	case phaseMidRepair:
+		departAtMidRepair(t, ctx, env, mode)
+	case phaseMidRetrieve:
+		departAtMidRetrieve(t, ctx, env, mode)
+	case phaseBurst:
+		departAtBurst(t, ctx, env, mode)
 	default:
 		t.Fatalf("departAt: unknown phase %q", phase)
 	}
@@ -234,6 +234,103 @@ func departAtPostUpload(t *testing.T, ctx context.Context, env *departEnv, mode 
 	index := firstRealChunkHolderIndex(t, ctx, env.db, env.fileID)
 	killOrDepart(t, ctx, env, index, mode)
 	env.departedIndex = index
+}
+
+// departAtMidRepair (E-4, Session 17.7.3): departs a real holder to
+// trigger repair, then races to depart the SELECTED REPLACEMENT while
+// ExecuteRepairJob (internal/repair/executor.go) is still blocked inside
+// its own uploadShard call — a single, synchronous, blocking network
+// operation, not a long-lived async state. preRegisterChunkAssignment
+// writes the replacement's chunk_assignments row (status='REPAIRING')
+// BEFORE uploadShard is attempted, which is this race's own detection
+// signal: as soon as that row appears for a DIFFERENT provider than the
+// one that just departed, its holder is killed immediately. High-risk by
+// construction — the window is however long a single ~256KB localhost
+// shard transfer takes.
+func departAtMidRepair(t *testing.T, ctx context.Context, env *departEnv, mode departMode) {
+	t.Helper()
+	if env.fileID == uuid.Nil {
+		t.Fatalf("departAtMidRepair: env.fileID is not set")
+	}
+	holderIndex := firstRealChunkHolderIndex(t, ctx, env.db, env.fileID)
+	holderProviderID := providerIDForIndex(t, ctx, env.db, holderIndex)
+	chunkID := chunkHeldByProviderForFile(t, ctx, env.db, env.fileID, holderProviderID)
+
+	killOrDepart(t, ctx, env, holderIndex, mode)
+	env.departedIndex = holderIndex
+
+	replacementProviderID := pollReplacementAssignment(t, ctx, env.db, chunkID, holderProviderID, 90*time.Second)
+	replacementIndex := providerIndexForID(t, ctx, env.db, replacementProviderID)
+	// Always a hard KILL for the replacement: it never had the chance to
+	// depart gracefully — it is being interrupted mid-transfer, by this
+	// phase's own construction, regardless of what mode the ORIGINAL
+	// holder departed under.
+	env.providers.killProvider(t, replacementIndex)
+	env.secondDepartedIndex = replacementIndex
+}
+
+// departAtMidRetrieve (E-5, Session 17.7.3): departs a real holder while a
+// real RetrieveFile call is in flight. Unlike MID_UPLOAD, there is no
+// database write to poll for — retrieval is a pure P2P read
+// (internal/client/retrieve's own orchestrator never writes to
+// chunk_assignments or any other table) — so this uses a small, fixed
+// delay instead of a poll, an honest engineering judgment call rather
+// than a precisely-timed hook (this function's own header note). At
+// DataShards=3 of TotalShards=5, retrieval is designed to gather k=3 from
+// whichever holders respond, so the exact millisecond timing of the kill
+// relative to any one holder's own shard fetch matters less than for
+// MID_UPLOAD/MID_REPAIR: what this phase actually proves is that losing a
+// holder DURING an in-flight retrieve doesn't corrupt or abort it.
+func departAtMidRetrieve(t *testing.T, ctx context.Context, env *departEnv, mode departMode) {
+	t.Helper()
+	if env.fileID == uuid.Nil {
+		t.Fatalf("departAtMidRetrieve: env.fileID is not set")
+	}
+	index := firstRealChunkHolderIndex(t, ctx, env.db, env.fileID)
+	host, engine := newClientHostAndEngine(t, env.owner)
+
+	type retrieveOutcome struct {
+		plaintext []byte
+		err       error
+	}
+	resultCh := make(chan retrieveOutcome, 1)
+	go func() {
+		plaintext, err := retrieveTestFileTrackedAllowingError(ctx, env.ms, env.owner, host, engine, env.masterSecret, env.fileID)
+		resultCh <- retrieveOutcome{plaintext, err}
+	}()
+
+	const midRetrieveKillDelay = 20 * time.Millisecond
+	time.Sleep(midRetrieveKillDelay)
+	killOrDepart(t, ctx, env, index, mode)
+	env.departedIndex = index
+
+	result := <-resultCh
+	env.plaintext = result.plaintext
+	env.retrieveErr = result.err
+}
+
+// departAtBurst (E-6, Session 17.7.3): departs two real holders of the
+// same file back-to-back, with no delay between the two killOrDepart
+// calls — both SIGKILLs execute within milliseconds of each other, both
+// are silent until DepartureThreshold elapses for each independently, so
+// sequential calls with no artificial gap are indistinguishable in
+// practice from a genuinely simultaneous burst for this test's own
+// purposes. realChunkHolderIndices (not firstRealChunkHolderIndex, called
+// twice) is used deliberately: a provider's own chunk_assignments row
+// does not change status the instant it is SIGKILLed — a second
+// first-holder query issued right after the first kill could return the
+// SAME provider again, since nothing in the database has changed yet.
+func departAtBurst(t *testing.T, ctx context.Context, env *departEnv, mode departMode) {
+	t.Helper()
+	if env.fileID == uuid.Nil {
+		t.Fatalf("departAtBurst: env.fileID is not set")
+	}
+	const burstDepartureCount = 2
+	indices := realChunkHolderIndices(t, ctx, env.db, env.fileID, burstDepartureCount)
+	killOrDepart(t, ctx, env, indices[0], mode)
+	killOrDepart(t, ctx, env, indices[1], mode)
+	env.departedIndex = indices[0]
+	env.secondDepartedIndex = indices[1]
 }
 
 // pollFirstChunkAssignmentHolder polls for the first chunk_assignments row
@@ -589,6 +686,192 @@ func TestReqD07FileRetrievableAfterProviderLossAndRepair(t *testing.T) {
 	// byte-for-byte against what was uploaded — see that function's own
 	// body for the full sequence this test is named for.
 	runDepartureAfterUpload(t, modeKill)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// E-4 — TestReplacementProviderDepartsMidRepair (Session 17.7.3)
+// ═══════════════════════════════════════════════════════════════════════
+
+// TestReplacementProviderDepartsMidRepair (E-4, high-risk): a real holder
+// departs, triggering repair; the SELECTED REPLACEMENT is then killed
+// while its own upload is still in flight (departAtMidRepair). The job
+// must be re-queued to a NEW replacement, not left stuck — asserted
+// against repair.RepairPromotionTimeout(profile) (3 minutes in demo)
+// rather than an arbitrary wait, per task item 1's own requirement.
+//
+// [Flag, read directly from internal/repair/executor.go, not inferred]
+// ExecuteRepairJob's own replacement-retry loop only retries on
+// ErrReplacementStorageFull (the M9 review's "Optional Fix A"); any OTHER
+// uploadShard failure — including a plain network failure from a
+// SIGKILLed replacement, which is exactly what this test causes — calls
+// MarkJobComplete(ctx, db, job.JobID, false) and returns immediately, with
+// no further retry attempted on that code path. Whether "the job must be
+// re-queued to a new replacement" (task item 1) is actually true today, or
+// is this session's own second finding (after Session 17.7.2's E-2), is
+// exactly what this test determines — the assertion below is not weakened
+// either way.
+func TestReplacementProviderDepartsMidRepair(t *testing.T) {
+	db := liveDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
+	defer cancel()
+	resetDemoDatabase(t, ctx, db)
+
+	microservicePath, providerPath := buildBinaries(t)
+	ms := startMicroserviceWithFlags(t, ctx, microservicePath, departureThresholdOverrideFlag)
+	owner := registerOwner(t, ctx, db, ms.baseURL)
+	depositForOwner(t, ctx, ms.baseURL, owner, 100_000_00)
+	providers := startProviders(t, ctx, db, providerPath, ms.baseURL)
+	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 60*time.Second)
+	pollFirstAuditPass(t, ctx, db, 3*time.Minute)
+	pollAllProvidersActive(t, ctx, db, 12*time.Minute)
+
+	profile := config.SelectProfile("demo")
+	fileID, masterSecret, plaintext := uploadTestFileTracked(t, ctx, ms, owner, testUploadBytes)
+	wantHash := sha256.Sum256(plaintext)
+	t.Logf("uploaded file_id=%s", fileID)
+
+	env := &departEnv{
+		db: db, ms: ms, providers: providers, providerBinPath: providerPath, owner: owner,
+		fileID: fileID, masterSecret: masterSecret, plaintext: plaintext,
+	}
+	departAt(t, ctx, env, phaseMidRepair, modeKill)
+	t.Logf("departed original holder index=%d; replacement killed mid-transfer index=%d", env.departedIndex, env.secondDepartedIndex)
+
+	pollDeparted(t, ctx, db, 1, 3*time.Minute)
+
+	// repair.RepairPromotionTimeout(profile) itself governs a DIFFERENT
+	// thing server-side (PRE_WARNING -> PERMANENT_DEPARTURE priority
+	// promotion, queue.go's own doc comment) — it is used HERE only as
+	// this test's own real, profile-derived poll budget (task item 1's
+	// own wording: "assert against RepairPromotionTimeout... rather than
+	// an arbitrary wait"), doubled for slack beyond the bare timeout
+	// value itself.
+	const repairPromotionBudgetMultiplier = 2
+	pollRepairCompleted(t, ctx, db, 1, repair.RepairPromotionTimeout(profile)*repairPromotionBudgetMultiplier)
+
+	got := retrieveTestFileTracked(t, ctx, ms, owner, masterSecret, fileID)
+	gotHash := sha256.Sum256(got)
+	if !bytes.Equal(gotHash[:], wantHash[:]) {
+		t.Fatalf("retrieved content does not match: sha256(retrieved)=%x, sha256(original)=%x", gotHash, wantHash)
+	}
+	if !bytes.Equal(got, plaintext) {
+		t.Fatalf("retrieved content differs from original byte-for-byte, despite matching sha256 (should be unreachable)")
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// E-5 — TestDepartureMidRetrievalStillGathersK (Session 17.7.3)
+// ═══════════════════════════════════════════════════════════════════════
+
+// TestDepartureMidRetrievalStillGathersK (E-5, high-risk): departs one of
+// a file's five real holders while a real retrieve is in flight
+// (departAtMidRetrieve). With DataShards=3 of TotalShards=5, retrieval
+// must still gather k=3 from the surviving four holders and reconstruct
+// byte-identical content.
+func TestDepartureMidRetrievalStillGathersK(t *testing.T) {
+	db := liveDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	defer cancel()
+	resetDemoDatabase(t, ctx, db)
+
+	microservicePath, providerPath := buildBinaries(t)
+	ms := startMicroserviceWithFlags(t, ctx, microservicePath, departureThresholdOverrideFlag)
+	owner := registerOwner(t, ctx, db, ms.baseURL)
+	depositForOwner(t, ctx, ms.baseURL, owner, 100_000_00)
+	providers := startProviders(t, ctx, db, providerPath, ms.baseURL)
+	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 60*time.Second)
+	pollFirstAuditPass(t, ctx, db, 3*time.Minute)
+	pollAllProvidersActive(t, ctx, db, 12*time.Minute)
+
+	fileID, masterSecret, plaintext := uploadTestFileTracked(t, ctx, ms, owner, testUploadBytes)
+	wantHash := sha256.Sum256(plaintext)
+	t.Logf("uploaded file_id=%s", fileID)
+
+	env := &departEnv{
+		db: db, ms: ms, providers: providers, providerBinPath: providerPath, owner: owner,
+		fileID: fileID, masterSecret: masterSecret, plaintext: plaintext,
+	}
+	departAt(t, ctx, env, phaseMidRetrieve, modeKill)
+	t.Logf("departed holder index=%d mid-retrieve; retrieve error=%v", env.departedIndex, env.retrieveErr)
+
+	if env.retrieveErr != nil {
+		t.Fatalf("retrieve failed despite DataShards=%d of TotalShards=5 remaining after losing 1 holder: %v", demoDataShards, env.retrieveErr)
+	}
+	gotHash := sha256.Sum256(env.plaintext)
+	if !bytes.Equal(gotHash[:], wantHash[:]) {
+		t.Fatalf("retrieved content does not match: sha256(retrieved)=%x, sha256(original)=%x", gotHash, wantHash)
+	}
+	if !bytes.Equal(env.plaintext, plaintext) {
+		t.Fatalf("retrieved content differs from original byte-for-byte, despite matching sha256 (should be unreachable)")
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// E-6 — TestTwoConcurrentDeparturesAtEmergencyFloor (Session 17.7.3)
+// ═══════════════════════════════════════════════════════════════════════
+
+// TestTwoConcurrentDeparturesAtEmergencyFloor (E-6): two real holders
+// depart together (departAtBurst), leaving s=DataShards=3 exactly — the
+// SAME scenario TestViabilityRepairSucceedsWithTwoOfFiveOffline
+// (demo_timeline_test.go, untouched — never modified or deleted, task
+// item 3's own instruction) already exercises, supplemented here with the
+// retrieval step F-D-1 showed that test was missing.
+//
+// [Flag, on "ADR-055's emergency-eject path must hold" (task item 3's own
+// wording)] ADR-055 (Burst-Failure Emergency Eject to Data Owner) has its
+// OWN document status field set to "Proposed", and a direct search of
+// internal/ for EmergencyEject/BurstFailure finds no implementation of
+// that ADR's own direct-to-owner-delivery mechanism anywhere in this
+// codebase — only EMERGENCY_FLOOR, which is a repair_jobs.priority value
+// belonging to the EXISTING, already-built ADR-007 floor trigger (ordinary
+// P2P repair, the same mechanism TestViabilityRepairSucceedsWithTwoOfFiveOffline
+// already proves). In demo profile, ADR-055's own would-be threshold
+// (⌈0.75×ParityShards⌉ = ⌈0.75×2⌉ = 2) and ADR-007's floor
+// (TotalShards-DataShards+1 = 3, i.e. losing 2 reaches it) happen to
+// coincide at "lose 2 of 5" — so this test necessarily exercises ADR-007's
+// real, built mechanism, not ADR-055's proposed, unbuilt one. Naming that
+// distinction here rather than silently implying ADR-055 is what's under
+// test.
+func TestTwoConcurrentDeparturesAtEmergencyFloor(t *testing.T) {
+	db := liveDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	resetDemoDatabase(t, ctx, db)
+
+	microservicePath, providerPath := buildBinaries(t)
+	ms := startMicroserviceWithFlags(t, ctx, microservicePath, departureThresholdOverrideFlag)
+	owner := registerOwner(t, ctx, db, ms.baseURL)
+	depositForOwner(t, ctx, ms.baseURL, owner, 100_000_00)
+	providers := startProviders(t, ctx, db, providerPath, ms.baseURL)
+	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 60*time.Second)
+	pollFirstAuditPass(t, ctx, db, 3*time.Minute)
+	pollAllProvidersActive(t, ctx, db, 12*time.Minute)
+
+	fileID, masterSecret, plaintext := uploadTestFileTracked(t, ctx, ms, owner, testUploadBytes)
+	wantHash := sha256.Sum256(plaintext)
+	t.Logf("uploaded file_id=%s", fileID)
+
+	env := &departEnv{
+		db: db, ms: ms, providers: providers, providerBinPath: providerPath, owner: owner,
+		fileID: fileID, masterSecret: masterSecret, plaintext: plaintext,
+	}
+	departAt(t, ctx, env, phaseBurst, modeKill)
+	t.Logf("departed indices=%d,%d — leaving s=DataShards=%d exactly", env.departedIndex, env.secondDepartedIndex, demoDataShards)
+
+	// DepartureThreshold applies per provider, independently — both
+	// departures must be detected, not just the first (same reasoning
+	// TestViabilityRepairSucceedsWithTwoOfFiveOffline's own comment gives).
+	pollDeparted(t, ctx, db, 2, 11*time.Minute)
+	pollRepairCompleted(t, ctx, db, 2, 5*time.Minute)
+
+	got := retrieveTestFileTracked(t, ctx, ms, owner, masterSecret, fileID)
+	gotHash := sha256.Sum256(got)
+	if !bytes.Equal(gotHash[:], wantHash[:]) {
+		t.Fatalf("retrieved content does not match: sha256(retrieved)=%x, sha256(original)=%x", gotHash, wantHash)
+	}
+	if !bytes.Equal(got, plaintext) {
+		t.Fatalf("retrieved content differs from original byte-for-byte, despite matching sha256 (should be unreachable)")
+	}
 }
 
 // ── small local helpers ─────────────────────────────────────────────────
