@@ -135,6 +135,7 @@ func (a *app) shutdown() {
 func main() {
 	modeFlag := flag.String("mode", "", "network profile: demo or prod (overrides VYOMANAUT_MODE)")
 	otpDeliveryLogFlag := flag.String("otp-delivery-log", "", "Path to a demo-mode OTP delivery log (overrides VYOMANAUT_OTP_DELIVERY_LOG). Empty = NoopOtpSender, no file. Demo mode only — ADR-084 D-3; fatal to set outside demo mode.")
+	departureThresholdFlag := flag.String("departure-threshold", "", "Override DepartureThreshold, Go duration syntax e.g. 90s (overrides VYOMANAUT_DEPARTURE_THRESHOLD). Empty leaves profile.DepartureThreshold unchanged. Demo mode only — ADR-084 D-4; fatal outside demo mode, and fatal below the derived safety floor even in demo mode.")
 	flag.Parse()
 
 	cfg := loadStartupConfigFromEnv()
@@ -145,6 +146,9 @@ func main() {
 	}
 	if *otpDeliveryLogFlag != "" {
 		cfg.OtpDeliveryLogPath = *otpDeliveryLogFlag
+	}
+	if *departureThresholdFlag != "" {
+		cfg.DepartureThresholdOverride = *departureThresholdFlag
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -164,6 +168,79 @@ func waitForShutdownSignal() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	<-sigCh
+}
+
+// ── Departure threshold override (M17-E Session 17.7.1, ADR-084 §D-4) ──
+
+// departureThresholdFloorDivisor is the "two" in "two missed heartbeats"
+// and "two polling intervals" — ADR-084 §D-4's own derivation: two missed
+// heartbeats is the minimum evidence that distinguishes silence from
+// jitter, and two polling intervals is the minimum that keeps detection
+// granularity below the threshold it measures. Named so the arithmetic
+// below reads as that reasoning, not an unexplained "2".
+const departureThresholdFloorDivisor = 2
+
+// departureThresholdFloor computes ADR-084 §D-4's derived safety floor,
+// entirely from the profile — never a hardcoded duration, since the floor
+// must move if HeartbeatInterval, HeartbeatJitter, or
+// DeparturePollingInterval ever do:
+//
+//	floor = max( 2 × (HeartbeatInterval + HeartbeatJitter), 2 × DeparturePollingInterval )
+func departureThresholdFloor(profile config.NetworkProfile) time.Duration {
+	twoMissedHeartbeats := departureThresholdFloorDivisor * (profile.HeartbeatInterval + profile.HeartbeatJitter)
+	twoPollingIntervals := departureThresholdFloorDivisor * profile.DeparturePollingInterval
+	return max(twoMissedHeartbeats, twoPollingIntervals)
+}
+
+// validateDepartureThresholdOverride implements ADR-084 §D-4's full
+// override contract:
+//
+//   - overrideStr == "" (the default): profile.DepartureThreshold passes
+//     through completely unchanged — DemoProfile itself is never edited,
+//     so TestViabilityActiveTransitionAtTenMinutes keeps passing against
+//     the real 10-minute constant with no special-casing anywhere.
+//   - overrideStr != "" and profile.Mode != "demo": fatal configuration
+//     error. A runtime departure-threshold override has no legitimate
+//     production use.
+//   - overrideStr != "" but not valid Go duration syntax: fatal
+//     configuration error.
+//   - overrideStr != "" and below departureThresholdFloor(profile): fatal
+//     configuration error. Punishing an honest provider — a live
+//     provider's normal heartbeat jitter read as departure, which marks
+//     it DEPARTED, freezes it, and seizes its escrow via
+//     processDeparture — to shorten a demo is not an acceptable failure
+//     mode, so this is checked, not merely documented.
+//   - overrideStr != "", valid, demo mode, at or above the floor: that
+//     duration is the effective value.
+func validateDepartureThresholdOverride(profile config.NetworkProfile, departureThresholdOverrideStr string) (time.Duration, error) {
+	if departureThresholdOverrideStr == "" {
+		return profile.DepartureThreshold, nil
+	}
+	if departureThresholdOverrideStr != "" && profile.Mode != "demo" {
+		return 0, fmt.Errorf("--departure-threshold/VYOMANAUT_DEPARTURE_THRESHOLD is demo-mode only (profile.Mode = %q, ADR-084 D-4) — this is a fatal configuration error, not an advisory one", profile.Mode)
+	}
+	override, err := time.ParseDuration(departureThresholdOverrideStr)
+	if err != nil {
+		return 0, fmt.Errorf("--departure-threshold/VYOMANAUT_DEPARTURE_THRESHOLD %q is not a valid Go duration: %w (this is a fatal configuration error)", departureThresholdOverrideStr, err)
+	}
+	floor := departureThresholdFloor(profile)
+	if override < floor {
+		return 0, fmt.Errorf(
+			"--departure-threshold/VYOMANAUT_DEPARTURE_THRESHOLD %s is below the derived safety floor %s — this is a fatal configuration error (ADR-084 D-4): floor = max(2 × (HeartbeatInterval + HeartbeatJitter), 2 × DeparturePollingInterval) = max(2 × (%s + %s), 2 × %s) = %s; below this, a live provider's normal heartbeat jitter is read as departure",
+			override, floor, profile.HeartbeatInterval, profile.HeartbeatJitter, profile.DeparturePollingInterval, floor)
+	}
+	return override, nil
+}
+
+// departureThresholdOverrideLogSuffix formats the startup-banner annotation
+// showing WHETHER the effective value above is the profile default or an
+// active override — task item 6's own "log the effective threshold"
+// requirement, made unambiguous about which case is in effect.
+func departureThresholdOverrideLogSuffix(overrideStr string) string {
+	if overrideStr == "" {
+		return " (profile default, no override — ADR-084 D-4)"
+	}
+	return " (--departure-threshold/VYOMANAUT_DEPARTURE_THRESHOLD override, demo mode only — ADR-084 D-4)"
 }
 
 // runMicroservice replaces the cmd/microservice/main.go stub with the
@@ -264,6 +341,27 @@ func runMicroservice(ctx context.Context, cfg startupConfig) (*app, error) {
 		cancel()
 		return nil, fmt.Errorf("runMicroservice: --otp-delivery-log / VYOMANAUT_OTP_DELIVERY_LOG is demo-mode only (profile.Mode = %q, ADR-084 D-3)", profile.Mode)
 	}
+
+	// ── Departure threshold override guard (added post-hoc, M17-E Session
+	// 17.7.1, ADR-084 §D-4 — same convention as the OTP guard immediately
+	// above). validateDepartureThresholdOverride is fatal in production
+	// mode and fatal below the derived safety floor even in demo mode;
+	// see that function's own doc comment for the arithmetic and the
+	// reasoning. effectiveDepartureThreshold is what actually reaches
+	// repair.NewDepartureDetector (Step 13 below, via a profile COPY —
+	// the shared `profile` variable itself is never mutated, keeping
+	// findDepartureCandidates the only reader of this field anywhere in
+	// internal/) and what the readiness evaluator (Step 7 below) reports
+	// as effective_departure_threshold_seconds — the same value, threaded
+	// to both places from this single computation, so the console can
+	// never observe a countdown that disagrees with the detector actually
+	// running.
+	effectiveDepartureThreshold, err := validateDepartureThresholdOverride(profile, cfg.DepartureThresholdOverride)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("runMicroservice: %w", err)
+	}
+	log.Printf("[STARTUP] effective departure threshold: %s%s", effectiveDepartureThreshold, departureThresholdOverrideLogSuffix(cfg.DepartureThresholdOverride))
 
 	// ── Step 3 ────────────────────────────────────────────────────────────
 	secretsClient, err := newSecretsClientForProfile(profile.RequireSecretsManager)
@@ -454,7 +552,17 @@ func runMicroservice(ctx context.Context, cfg startupConfig) (*app, error) {
 	paymentProvider := buildPaymentProvider(db, profile)
 
 	// ── Step 13 ───────────────────────────────────────────────────────────
-	departureDetector := repair.NewDepartureDetector(db, profile, paymentProvider.Penalise)
+	// departureProfile is a COPY of profile with only DepartureThreshold
+	// set to the validated effective value (M17-E Session 17.7.1, ADR-084
+	// §D-4) — the shared `profile` variable itself is never mutated, so
+	// every other subsystem constructed from it in this function keeps
+	// reading the real, unmodified profile constant. This copy exists for
+	// exactly one call, immediately below: findDepartureCandidates
+	// (internal/repair/departure.go) remains the only place inside
+	// internal/ that reads this field at all.
+	departureProfile := profile
+	departureProfile.DepartureThreshold = effectiveDepartureThreshold
+	departureDetector := repair.NewDepartureDetector(db, departureProfile, paymentProvider.Penalise)
 	go departureDetector.Run(ctx)
 
 	// ── Step 14 ───────────────────────────────────────────────────────────
