@@ -604,6 +604,33 @@ func runProviderInstance(ctx context.Context, profile config.NetworkProfile, cfg
 				log.Printf("[STARTUP]%s WARNING: provider registration failed (%v); this instance will not count toward readiness until registered", logTag, regErr)
 			} else {
 				log.Printf("[STARTUP]%s registered with microservice (provider_id=%s)", logTag, registeredProviderID)
+
+				// [Fixed — F-17E-04, discovered live via
+				// TestDepartureAfterUploadFileStillRetrievableGraceful]
+				// Previously registeredProviderID/providerJWT lived only in
+				// these local variables — never persisted via
+				// saveRegistrationRecord (onboard.go), the ONLY thing
+				// loadRegistrationRecord (depart.go, earnings.go) ever
+				// reads. A provider started via --registration-bearer-token
+				// (every --sim-count/--sim-only-index instance this
+				// project's own test harness spawns, and any real
+				// deployment choosing this flag over the interactive
+				// `provider onboard` flow) could therefore never gracefully
+				// depart at all: `provider depart --data-dir=<this
+				// instance's own dataDir>` unconditionally failed with "no
+				// registration found — run `provider onboard` first",
+				// discovered running this exact command against a live
+				// simulated instance. Persisting it here, exactly as
+				// onboard.go's own successful path does, closes that gap
+				// for both cases identically — this is not a
+				// simulation-only workaround.
+				if saveErr := saveRegistrationRecord(cfg.dataDir, registrationRecord{
+					ProviderID:        registeredProviderID,
+					Token:             providerJWT,
+					DeclaredStorageGB: cfg.declaredStorageGB,
+				}); saveErr != nil {
+					log.Printf("[STARTUP]%s WARNING: persist registration record: %v; `provider depart` will not find it later", logTag, saveErr)
+				}
 			}
 		}
 	}
