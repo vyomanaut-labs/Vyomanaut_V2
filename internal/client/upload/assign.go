@@ -237,6 +237,23 @@ func (o *Orchestrator) requestAssignment(ctx context.Context, fileID uuid.UUID, 
 	case http.StatusOK:
 		return &respBody, nil
 	case http.StatusServiceUnavailable:
+		// [Fixed — F-17E-01's own diagnostic gap] Previously discarded
+		// rawBody entirely for this status, collapsing all three distinct
+		// server-side 503 causes (NETWORK_NOT_READY, the general readiness
+		// gate; INSUFFICIENT_ASN_DIVERSITY; INSUFFICIENT_PROVIDER_CAPACITY,
+		// NFR-044's ceiling) into one indistinguishable, generic sentinel.
+		// That gap is what made this defect take a purpose-built diagnostic
+		// harness (scripts/test's own diagnoseUploadFailure) to root-cause
+		// instead of being visible in the error text on the very first
+		// failing run. ErrNetworkNotReady is still wrapped and still the
+		// thing IC §5.9 and every existing errors.Is(err, ErrNetworkNotReady)
+		// caller depends on (TestUploadMapsHTTP503ToErrNetworkNotReady, this
+		// package's own test, keeps passing unchanged) — decodeAPIError's
+		// result is wrapped alongside it, not instead of it, purely to put
+		// the real error_code/message into the text a caller actually sees.
+		if apiErr := decodeAPIError(rawBody); apiErr != nil {
+			return nil, fmt.Errorf("upload: requestAssignment: %w: %w", ErrNetworkNotReady, apiErr)
+		}
 		return nil, fmt.Errorf("upload: requestAssignment: %w", ErrNetworkNotReady)
 	case http.StatusConflict:
 		return nil, fmt.Errorf("upload: requestAssignment: %w", ErrInsufficientEscrow)
