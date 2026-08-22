@@ -704,6 +704,45 @@ func providerIDForIndex(t *testing.T, ctx context.Context, db *sql.DB, index int
 	return providerID
 }
 
+// pollProviderRegistered polls until index's own providers row actually
+// exists (its INSERT — internal/api/provider.go's HandleRegister — has
+// committed), returning its provider_id once it does.
+//
+// [Fixed — test-harness bug, discovered live via
+// TestDepartureDuringVettingProducesNoRepairJobs] startProviders
+// (demo_timeline_test.go) returns as soon as it has called cmd.Start() for
+// every --sim-only-index process — it does NOT wait for any of them to
+// actually finish their own startup sequence (parse flags, generate/load
+// keys, start the P2P listener, THEN make the real registration HTTP
+// call) and register. A caller that departs a provider immediately after
+// startProviders returns, with no synchronization in between, races that
+// startup sequence and can lose it — killing the OS process before its
+// own providers row was ever created, which pollDeparted below then waits
+// out for its own full timeout, finding nothing, since there is nothing
+// to find. This is exactly what removing the (semantically wrong, for
+// this exact scenario) pollReadiness pre-flight check exposed: it used to
+// accidentally provide enough incidental delay for registration to
+// complete first. This function is the correct, minimal, deliberate
+// synchronization phaseVetting actually needs — wait for the target's own
+// row to exist, nothing more — rather than an accidental side effect of
+// an unrelated call.
+func pollProviderRegistered(t *testing.T, ctx context.Context, db *sql.DB, index int, timeout time.Duration) uuid.UUID {
+	t.Helper()
+	phone := fmt.Sprintf("+91987653%04d", index)
+	deadline := time.Now().Add(timeout)
+	for {
+		var providerID uuid.UUID
+		err := db.QueryRowContext(ctx, `SELECT provider_id FROM providers WHERE phone_number = $1`, phone).Scan(&providerID)
+		if err == nil {
+			return providerID
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pollProviderRegistered: provider index %d (phone %s) never registered within %s: %v", index, phone, timeout, err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
 // chunkHeldByProviderForFile returns the raw chunk_id bytes of one real,
 // ACTIVE shard of fileID held by providerID — Session 17.7.3's MID_REPAIR
 // phase needs this specific chunk_id to poll for its own replacement's
