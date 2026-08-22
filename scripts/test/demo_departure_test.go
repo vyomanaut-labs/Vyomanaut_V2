@@ -438,7 +438,13 @@ func TestDepartureDuringVettingProducesNoRepairJobs(t *testing.T) {
 	microservicePath, providerPath := buildBinaries(t)
 	ms := startMicroserviceWithFlags(t, ctx, microservicePath, departureThresholdOverrideFlag)
 	providers := startProviders(t, ctx, db, providerPath, ms.baseURL)
-	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 60*time.Second)
+
+	// [Fixed — test-harness bug] wait for provider index 0's own row to
+	// actually exist before departing it — see pollProviderRegistered's
+	// own doc comment (helpers_test.go) for why this is necessary and why
+	// it replaces the pollReadiness call this line used to have, rather
+	// than nothing at all.
+	pollProviderRegistered(t, ctx, db, 0, 60*time.Second)
 
 	env := &departEnv{db: db, ms: ms, providers: providers, providerBinPath: providerPath}
 	departAt(t, ctx, env, phaseVetting, modeKill)
@@ -515,7 +521,7 @@ func TestDepartureMidUploadLeavesNoHalfRegisteredFile(t *testing.T) {
 	owner := registerOwner(t, ctx, db, ms.baseURL)
 	depositForOwner(t, ctx, ms.baseURL, owner, 100_000_00)
 	providers := startProviders(t, ctx, db, providerPath, ms.baseURL)
-	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 60*time.Second)
+	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 12*time.Minute) // [Fixed — F-17E-01] was 60s; see TestDemoTimeline's identical fix note (demo_timeline_test.go)
 	pollFirstAuditPass(t, ctx, db, 3*time.Minute)
 	pollAllProvidersActive(t, ctx, db, 12*time.Minute)
 
@@ -624,7 +630,7 @@ func runDepartureAfterUpload(t *testing.T, mode departMode) {
 	owner := registerOwner(t, ctx, db, ms.baseURL)
 	depositForOwner(t, ctx, ms.baseURL, owner, 100_000_00)
 	providers := startProviders(t, ctx, db, providerPath, ms.baseURL)
-	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 60*time.Second)
+	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 12*time.Minute) // [Fixed — F-17E-01] was 60s; see TestDemoTimeline's identical fix note (demo_timeline_test.go)
 	pollFirstAuditPass(t, ctx, db, 3*time.Minute)
 	pollAllProvidersActive(t, ctx, db, 12*time.Minute)
 
@@ -721,7 +727,7 @@ func TestReplacementProviderDepartsMidRepair(t *testing.T) {
 	owner := registerOwner(t, ctx, db, ms.baseURL)
 	depositForOwner(t, ctx, ms.baseURL, owner, 100_000_00)
 	providers := startProviders(t, ctx, db, providerPath, ms.baseURL)
-	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 60*time.Second)
+	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 12*time.Minute) // [Fixed — F-17E-01] was 60s; see TestDemoTimeline's identical fix note (demo_timeline_test.go)
 	pollFirstAuditPass(t, ctx, db, 3*time.Minute)
 	pollAllProvidersActive(t, ctx, db, 12*time.Minute)
 
@@ -779,7 +785,7 @@ func TestDepartureMidRetrievalStillGathersK(t *testing.T) {
 	owner := registerOwner(t, ctx, db, ms.baseURL)
 	depositForOwner(t, ctx, ms.baseURL, owner, 100_000_00)
 	providers := startProviders(t, ctx, db, providerPath, ms.baseURL)
-	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 60*time.Second)
+	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 12*time.Minute) // [Fixed — F-17E-01] was 60s; see TestDemoTimeline's identical fix note (demo_timeline_test.go)
 	pollFirstAuditPass(t, ctx, db, 3*time.Minute)
 	pollAllProvidersActive(t, ctx, db, 12*time.Minute)
 
@@ -843,7 +849,7 @@ func TestTwoConcurrentDeparturesAtEmergencyFloor(t *testing.T) {
 	owner := registerOwner(t, ctx, db, ms.baseURL)
 	depositForOwner(t, ctx, ms.baseURL, owner, 100_000_00)
 	providers := startProviders(t, ctx, db, providerPath, ms.baseURL)
-	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 60*time.Second)
+	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 12*time.Minute) // [Fixed — F-17E-01] was 60s; see TestDemoTimeline's identical fix note (demo_timeline_test.go)
 	pollFirstAuditPass(t, ctx, db, 3*time.Minute)
 	pollAllProvidersActive(t, ctx, db, 12*time.Minute)
 
