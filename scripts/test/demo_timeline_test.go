@@ -37,7 +37,6 @@
 // PASS
 // ok      github.com/vyomanaut-labs/Vyomanaut_V2/scripts/test     (cached)
 
-
 // Package test drives the full demo lifecycle from mvp.md §3.6 against a
 // real, live stack: a real Postgres instance, a real cmd/microservice
 // binary, and real cmd/provider processes — no step mocked, stubbed, or
@@ -946,8 +945,19 @@ func TestDemoTimeline(t *testing.T) {
 
 	providers := startProviders(t, ctx, db, providerPath, ms.baseURL)
 
-	// Assert readiness gate passes within 60s of startup.
-	readiness := pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 60*time.Second)
+	// [Fixed — F-17E-01] Previously "assert readiness gate passes within
+	// 60s of startup" — true only under the pre-fix bug where
+	// razorpay_accounts_ready counted razorpay_cooling_until alone,
+	// satisfied instantly at registration (RazorpayCoolingPeriod=0s in
+	// demo) regardless of vetting status. Now that condition also
+	// requires status='ACTIVE' (readiness.go's own fix, matching
+	// internal/repair/assignment.go's real assignment-eligibility
+	// predicate exactly), so AllConditionsMet genuinely cannot be true
+	// until providers finish vetting — the same ~5-10 minute window
+	// pollAllProvidersActive already waits out elsewhere in this file.
+	// 12 minutes matches that established, proven budget, not an
+	// arbitrary new one.
+	readiness := pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 12*time.Minute)
 
 	// Assert ReadinessResponse.mode == "demo" and demo thresholds match the
 	// OAS DemoReady example.
@@ -1057,7 +1067,13 @@ func assertDemoThreshold(t *testing.T, name string, cond readinessCondition, wan
 // against, not merely in the source file.
 func TestViabilityASNCapMatchesRunningDemoProfile(t *testing.T) {
 	db := liveDB(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	// [Fixed — F-17E-01] 5 minutes was sufficient when pollReadiness below
+	// returned as soon as providers registered (the pre-fix bug); now that
+	// razorpay_accounts_ready genuinely requires status='ACTIVE', reaching
+	// AllConditionsMet takes as long as vetting itself (~5-10 minutes) —
+	// 15 minutes gives that its own established margin, matching
+	// pollAllProvidersActive's 12-minute budget elsewhere plus headroom.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 	resetDemoDatabase(t, ctx, db)
 
@@ -1065,7 +1081,8 @@ func TestViabilityASNCapMatchesRunningDemoProfile(t *testing.T) {
 	ms := startMicroservice(t, ctx, microservicePath)
 	_ = startProviders(t, ctx, db, providerPath, ms.baseURL)
 
-	readiness := pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 60*time.Second)
+	// [Fixed — F-17E-01] see TestDemoTimeline's own identical fix note.
+	readiness := pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 12*time.Minute)
 
 	if config.DemoProfile.MinDistinctASNs != 5 {
 		t.Fatalf("config.DemoProfile.MinDistinctASNs = %d, want 5 (mvp.md §7.1 — the pre-ADR analysis value of 2 was mathematically inconsistent with the 20%% ASN cap at n=5)",
@@ -1097,7 +1114,8 @@ func TestViabilityRepairSucceedsWithTwoOfFiveOffline(t *testing.T) {
 	depositForOwner(t, ctx, ms.baseURL, owner, 100_000_00)
 
 	providers := startProviders(t, ctx, db, providerPath, ms.baseURL)
-	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 60*time.Second)
+	// [Fixed — F-17E-01] see TestDemoTimeline's own identical fix note.
+	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 12*time.Minute)
 	pollFirstAuditPass(t, ctx, db, 3*time.Minute)
 	pollAllProvidersActive(t, ctx, db, 12*time.Minute)
 
@@ -1201,8 +1219,19 @@ func TestViabilityActiveTransitionAtTenMinutes(t *testing.T) {
 	ms := startMicroservice(t, ctx, microservicePath)
 	_ = startProviders(t, ctx, db, providerPath, ms.baseURL)
 
-	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 60*time.Second)
-
+	// [Fixed — F-17E-01] The pollReadiness pre-flight check this line used
+	// to have is deliberately removed, not merely retimed: this test's own
+	// elapsed measurement below requires `start` to be recorded BEFORE any
+	// provider can possibly be ACTIVE. Under the pre-fix bug,
+	// razorpay_accounts_ready (and so AllConditionsMet) was satisfied
+	// instantly at registration, so a pollReadiness call here was a cheap,
+	// harmless no-op. Now that condition genuinely requires status='ACTIVE'
+	// (readiness.go's own fix), a pollReadiness call here would itself
+	// block until the very transition this test measures, making `start`
+	// begin AFTER that transition already happened — silently corrupting
+	// elapsed into a near-zero, always-passing non-measurement. This test
+	// needs no readiness pre-check at all: pollAllProvidersActive below is
+	// both the wait and the measurement.
 	start := time.Now()
 	pollAllProvidersActive(t, ctx, db, 12*time.Minute)
 	elapsed := time.Since(start)
