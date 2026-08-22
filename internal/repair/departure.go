@@ -129,6 +129,22 @@ type departureCandidate struct {
 
 // findDepartureCandidates is the corrected detection query — see this
 // file's header comment for why VETTING must be included alongside ACTIVE.
+//
+// [Fixed — F-17E-03, discovered live via
+// TestDepartureDuringVettingProducesNoRepairJobs] PENDING_ONBOARDING added
+// alongside ACTIVE and VETTING. FR-026 advances a provider
+// PENDING_ONBOARDING -> VETTING only on its OWN first successful heartbeat
+// (internal/api/provider.go's HandleHeartbeat) — a provider that registers
+// and then crashes (or is killed) before ever sending that first heartbeat
+// never makes that transition, and so never matched this query's previous
+// status filter at all: not ACTIVE, not VETTING, invisible to departure
+// detection forever, regardless of how stale last_heartbeat_ts became.
+// Confirmed harmless to add: vetting-chunk assignment
+// (cmd/microservice/vetting_chunk_loop.go) only ever targets
+// status='VETTING' providers, so a PENDING_ONBOARDING candidate has zero
+// chunks of any kind either way — processDeparture's branch below treats
+// it exactly like a VETTING departure (soft-delete, zero repair jobs) for
+// exactly that reason.
 func (d *DepartureDetector) findDepartureCandidates(ctx context.Context) ([]departureCandidate, error) {
 	// Postgres interval literals don't accept a Go time.Duration directly
 	// (pq would encode e.g. "10m0s", not valid interval syntax); format as
@@ -138,7 +154,7 @@ func (d *DepartureDetector) findDepartureCandidates(ctx context.Context) ([]depa
 	rows, err := d.db.QueryContext(ctx, `
 		SELECT provider_id, status
 		FROM providers
-		WHERE status IN ('ACTIVE', 'VETTING')
+		WHERE status IN ('ACTIVE', 'VETTING', 'PENDING_ONBOARDING')
 		  AND last_heartbeat_ts < NOW() - $1::interval`,
 		thresholdArg,
 	)
@@ -175,7 +191,12 @@ RETURNING departed_at`
 		return fmt.Errorf("mark departed: %w", err)
 	}
 
-	if c.originalStatus == "VETTING" {
+	// [Fixed — F-17E-03] PENDING_ONBOARDING treated identically to
+	// VETTING here: both have zero real chunks by construction (a
+	// PENDING_ONBOARDING provider hasn't even reached VETTING yet, the
+	// status vetting-chunk assignment itself requires), so both take the
+	// synthetic soft-delete path, never the real-chunk repair-enqueue one.
+	if c.originalStatus == "VETTING" || c.originalStatus == "PENDING_ONBOARDING" {
 		if err := DeleteVettingChunksOnDeparture(ctx, d.db, c.providerID); err != nil {
 			return fmt.Errorf("delete vetting chunks: %w", err)
 		}
