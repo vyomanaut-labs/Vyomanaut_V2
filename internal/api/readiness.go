@@ -416,10 +416,27 @@ func (e *ReadinessEvaluator) evaluateQuorum() ReadinessCondition {
 // evaluateRazorpayAccountsReady is a LIVE QUERY — never cached, re-run
 // every evaluation cycle (ADR-029: "the assignment service MUST NOT cache
 // this value between evaluations").
+//
+// [Fixed — F-17E-01] Previously counted `razorpay_cooling_until < NOW()`
+// alone. internal/repair/assignment.go's drawTwoActiveCandidates (M11
+// audit remediation, Finding 5) — the actual gate a provider must clear to
+// be a real-shard assignment candidate — requires THREE conditions:
+// status = 'ACTIVE', razorpay_linked_account_id IS NOT NULL, AND
+// razorpay_cooling_until < NOW(). This condition counted only the third,
+// so it could (and in demo mode, before provider.go's own registration
+// fix alongside this one, always did) report every provider ready while
+// assignment found zero eligible candidates — readiness and assignment
+// asking the same real-world question two different ways, the same
+// defect shape as the ADR-071 finding. Now mirrors
+// drawTwoActiveCandidates' predicate exactly, so this condition can never
+// again report ready while assignment cannot actually proceed.
 func (e *ReadinessEvaluator) evaluateRazorpayAccountsReady(ctx context.Context) (ReadinessCondition, error) {
 	var current int
 	err := e.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM providers WHERE razorpay_cooling_until < NOW()`,
+		`SELECT COUNT(*) FROM providers
+		 WHERE status = 'ACTIVE'
+		   AND razorpay_linked_account_id IS NOT NULL
+		   AND razorpay_cooling_until < NOW()`,
 	).Scan(&current)
 	if err != nil {
 		return ReadinessCondition{}, err

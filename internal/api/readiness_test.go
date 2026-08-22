@@ -148,11 +148,22 @@ func randPubKeyForReadiness() []byte {
 }
 
 // seedReadinessSatisfyingProviders inserts n freshly-ASN'd, freshly-regioned
-// ACTIVE providers with razorpay_cooling_until already in the past — enough
-// to push active_vetted_providers, distinct_asns, distinct_metro_regions,
-// and razorpay_accounts_ready over config.DemoProfile's thresholds
-// regardless of whatever already exists in this shared test database from
-// other packages' earlier tests.
+// ACTIVE providers with razorpay_cooling_until already in the past and
+// razorpay_linked_account_id set — enough to push active_vetted_providers,
+// distinct_asns, distinct_metro_regions, and razorpay_accounts_ready over
+// config.DemoProfile's thresholds regardless of whatever already exists in
+// this shared test database from other packages' earlier tests.
+//
+// [Fixed — F-17E-01, same fix as this file's own
+// TestReadinessRazorpayIsLiveQueryNotCached] razorpay_linked_account_id
+// must be set, not just razorpay_cooling_until in the past — see
+// evaluateRazorpayAccountsReady's own updated doc comment for why: it now
+// mirrors internal/repair/assignment.go's drawTwoActiveCandidates
+// predicate exactly, which upload_test.go's insertActiveProviderWithASN
+// already discovered and fixed at the test-fixture level (its own "M11
+// audit remediation, Finding 5 — extended" comment) well before this
+// evaluator-level fix closed the same gap in the real, HTTP-driven
+// registration path (provider.go).
 func seedReadinessSatisfyingProviders(t *testing.T, db *sql.DB, n int) {
 	t.Helper()
 	past := time.Now().UTC().Add(-time.Hour)
@@ -160,12 +171,14 @@ func seedReadinessSatisfyingProviders(t *testing.T, db *sql.DB, n int) {
 	for i := 0; i < n; i++ {
 		asn := fmt.Sprintf("READY-ASN-%s-%d", unique, i)
 		region := fmt.Sprintf("READY-REGION-%s-%d", unique, i)
+		linkedAccountID := fmt.Sprintf("mock_acct_ready_%s_%d", unique, i)
 		_, err := db.Exec(`
 			INSERT INTO providers (
 				provider_id, phone_number, ed25519_public_key, status,
-				declared_storage_gb, city, region, asn, razorpay_cooling_until
-			) VALUES ($1,$2,$3,'ACTIVE',50,'TestCity',$4,$5,$6)`,
-			uuid.New(), randPhoneForReadiness(), randPubKeyForReadiness(), region, asn, past,
+				declared_storage_gb, city, region, asn, razorpay_cooling_until,
+				razorpay_linked_account_id
+			) VALUES ($1,$2,$3,'ACTIVE',50,'TestCity',$4,$5,$6,$7)`,
+			uuid.New(), randPhoneForReadiness(), randPubKeyForReadiness(), region, asn, past, linkedAccountID,
 		)
 		if err != nil {
 			t.Fatalf("seedReadinessSatisfyingProviders: %v", err)
@@ -282,10 +295,13 @@ func TestReadinessRazorpayIsLiveQueryNotCached(t *testing.T) {
 	}
 	before := resp1.Conditions.RazorpayAccountsReady.CurrentValue
 
-	// Add one more cooled provider directly, then re-evaluate.
+	// Add one more cooled provider directly, then re-evaluate. Includes
+	// razorpay_linked_account_id — F-17E-01's own fix requires it non-NULL
+	// for this condition to count a provider, matching
+	// drawTwoActiveCandidates' real eligibility predicate exactly.
 	if _, err := verify.Exec(`
-		INSERT INTO providers (provider_id, phone_number, ed25519_public_key, status, declared_storage_gb, city, region, asn, razorpay_cooling_until)
-		VALUES ($1,$2,$3,'ACTIVE',50,'TestCity','TestRegion','SIM-AS1',NOW() - INTERVAL '1 hour')`,
+		INSERT INTO providers (provider_id, phone_number, ed25519_public_key, status, declared_storage_gb, city, region, asn, razorpay_cooling_until, razorpay_linked_account_id)
+		VALUES ($1,$2,$3,'ACTIVE',50,'TestCity','TestRegion','SIM-AS1',NOW() - INTERVAL '1 hour','mock_acct_test')`,
 		uuid.New(), randPhoneForReadiness(), randPubKeyForReadiness()); err != nil {
 		t.Fatalf("insert additional cooled provider: %v", err)
 	}
