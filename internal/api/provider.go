@@ -317,21 +317,67 @@ func (h *ProviderRegisterHandler) HandleRegister(w http.ResponseWriter, r *http.
 	// for this session is followed here, matching this project's established
 	// precedent of build.md's operative instructions taking priority over a
 	// docs comment describing a different (and, for this session, unbuilt)
-	// mechanism. Actually creating the Razorpay Route Linked Account (FR-025)
-	// has no hook in payment.PaymentProvider's current interface — that
-	// remains a downstream gap, not something this handler can invoke.
+	// mechanism.
 	razorpayCoolingUntil := time.Now().UTC().Add(h.profile.RazorpayCoolingPeriod)
+
+	// [Fixed — F-17E-01] razorpay_linked_account_id: in mock payment mode
+	// (cmd/microservice/payment_provider.go's own "if profile.PaymentMode
+	// == \"mock\"" gate — the only mode this demo track actually runs),
+	// there is no real Razorpay account.created webhook to ever populate
+	// this column later: POST /webhooks/razorpay is still wired to
+	// stub501 (router.go), and payment.HandleAccountCreated — the
+	// column's only writer anywhere in this codebase — has zero callers.
+	// Left NULL, as it was before this fix, this column being non-NULL is
+	// exactly what internal/repair/assignment.go's drawTwoActiveCandidates
+	// (M11 audit remediation, Finding 5) requires for a provider to be a
+	// real-shard assignment candidate at all — so every ACTIVE provider in
+	// demo mode was permanently ineligible for real shard assignment,
+	// unconditionally, on the very first upload attempt: readiness never
+	// checked this column (its own razorpay condition only looks at
+	// razorpay_cooling_until — see readiness.go's own fix alongside this
+	// one) and so reported ready, while /upload/assign 503'd with
+	// INSUFFICIENT_ASN_DIVERSITY every time. A deterministic mock
+	// identifier, set here at registration, is mock mode's equivalent of
+	// the missing webhook delivering a real one — the same eventual state
+	// HandleAccountCreated would produce, set synchronously because mock
+	// mode has no real gateway to deliver it asynchronously.
+	var razorpayLinkedAccountID *string
+	if h.profile.PaymentMode == "mock" {
+		mockAccountID := fmt.Sprintf("mock_acct_%s", phoneNumber)
+		razorpayLinkedAccountID = &mockAccountID
+	}
+
+	// [Fixed — F-17E-02] last_heartbeat_ts has no schema default and was
+	// previously left NULL by this INSERT, populated only later by
+	// HandleHeartbeat's own UPDATE. internal/repair/departure.go's
+	// findDepartureCandidates compares
+	// `last_heartbeat_ts < NOW() - threshold` — a comparison against SQL
+	// NULL is always UNKNOWN, never TRUE — so a provider that crashes (or
+	// is killed, as this session's own departure-matrix tests do) before
+	// ever sending its first heartbeat could NEVER be detected as
+	// departed, by any threshold, ever: discovered live, running
+	// TestDepartureDuringVettingProducesNoRepairJobs against a provider
+	// killed within milliseconds of registering. Setting it to NOW() here
+	// is not a workaround bolted onto the query — registering is itself a
+	// real proof-of-life event (the provider daemon just made a live,
+	// signed HTTP call), so recording it as the initial heartbeat
+	// timestamp is the correct fix, and avoids ever having a NULL value in
+	// normal operation at all. Confirmed safe against every other reader
+	// of this column (file.go's countNotifiedProviders is the only other
+	// NULL-aware one, and it only ever queries providers already holding a
+	// PENDING_DELETION real chunk assignment — impossible for a
+	// freshly-registered provider, which has none yet).
 
 	var providerID uuid.UUID
 	var status string
 	err = h.db.QueryRowContext(ctx, `
 		INSERT INTO providers
 			(phone_number, ed25519_public_key, declared_storage_gb, city, region, asn,
-			 last_known_multiaddrs, razorpay_cooling_until)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			 last_known_multiaddrs, razorpay_cooling_until, razorpay_linked_account_id, last_heartbeat_ts)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
 		RETURNING provider_id, status`,
 		phoneNumber, pubKeyArr[:], req.DeclaredStorageGB, req.City, req.Region, finalASN,
-		multiaddrsJSON, razorpayCoolingUntil,
+		multiaddrsJSON, razorpayCoolingUntil, razorpayLinkedAccountID,
 	).Scan(&providerID, &status)
 	if err != nil {
 		var pqErr *pq.Error
