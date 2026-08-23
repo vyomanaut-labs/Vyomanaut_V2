@@ -130,6 +130,47 @@ const (
 // the negotiation preamble, mirroring IC §4 rule 5's framing discipline.
 const maxProtocolIDLen = 256
 
+// [Flagged and fixed — F-17E-06, discovered via live verification (M17-E
+// Phase 17.7 departure-matrix debugging, this session), not visible from a
+// code-only review of any single call site] connectTimeout and
+// negotiationTimeout bound the two phases every caller of Connect/NewStream
+// previously left completely unbounded: the raw TCP+TLS dial/handshake
+// (connectTimeout — dialAndVerify and NewStream's own dial), and the
+// plaintext protocol-negotiation preamble exchange immediately after a TLS
+// connection is established (negotiationTimeout — NewStream and
+// authenticateAndNegotiate). Every caller in this codebase (audit_dispatch.go,
+// vettingchunk/generator.go, repair/executor.go via repairTransportAdapter)
+// applies its OWN deadline to the returned Stream for the actual
+// application-level payload (e.g. computeRTO's per-provider RTO,
+// chunkUploadTimeout, repairDownloadTimeout) — but that deadline is set only
+// AFTER NewStream already returns, so none of them ever bounded how long
+// dialing, handshaking, and negotiating could themselves take. On a single
+// physical machine running seven real provider daemons plus the microservice
+// plus Postgres simultaneously (this project's live-verification harness),
+// a momentarily CPU-starved provider process (GC pause, RocksDB compaction,
+// Argon2 hashing elsewhere in the same process) could leave an inbound
+// connection dialed-but-not-yet-negotiated for an arbitrarily long time —
+// silently stalling whichever goroutine was waiting on it. Because
+// dispatchAuditCycle (audit_dispatch.go) wg.Wait()s for every assignment's
+// goroutine before the audit-dispatch loop's ticker can fire again, a single
+// stuck negotiation could delay audit progress network-wide, not just for
+// the one slow provider — a plausible contributor to intermittent "one
+// provider never reaches ACTIVE" and near-miss VETTING→ACTIVE timing
+// failures observed live this session. Both constants are deliberately
+// generous relative to how fast a TLS 1.3 handshake and a few-byte preamble
+// exchange are under healthy conditions (low milliseconds) — 10s is meant to
+// comfortably absorb real host contention on a loaded test machine while
+// still being an order of magnitude short of "wedge forever." Kept as two
+// separate named constants, not one shared value, matching this file set's
+// own established precedent (see repair/executor.go's chunkUploadTimeout vs.
+// vettingchunk/generator.go's own separately-declared constant of the same
+// name and value) for bounding distinct failure domains independently even
+// when they start out numerically equal.
+const (
+	connectTimeout     = 10 * time.Second
+	negotiationTimeout = 10 * time.Second
+)
+
 // host is the concrete, unexported Host implementation.
 type host struct {
 	privKey ed25519.PrivateKey
@@ -274,7 +315,17 @@ func (h *host) Connect(ctx context.Context, peerID PeerID, addrs []Multiaddr) er
 // operation dial.
 // dialAndVerify always dials "tcp": callers (Connect) reject any
 // addr.Network() != "tcp" before ever reaching here.
+//
+// [F-17E-06] Bounded by connectTimeout — see that constant's doc comment.
+// Without this, a peer that accepts the TCP SYN but stalls before completing
+// the TLS handshake (e.g. CPU-starved) could hang this call, and by
+// extension Connect and every caller of it, indefinitely; ctx alone never
+// carried a deadline here in practice (every real caller passes a
+// process-lifetime context, not a per-call one).
 func (h *host) dialAndVerify(ctx context.Context, peerID PeerID, hostport string) error {
+	dialCtx, cancel := context.WithTimeout(ctx, connectTimeout)
+	defer cancel()
+
 	dialer := &tls.Dialer{
 		Config: &tls.Config{
 			Certificates:          []tls.Certificate{h.cert},
@@ -283,7 +334,7 @@ func (h *host) dialAndVerify(ctx context.Context, peerID PeerID, hostport string
 			VerifyPeerCertificate: verifyPeerCertificateAgainst(peerID),
 		},
 	}
-	conn, err := dialer.DialContext(ctx, "tcp", hostport)
+	conn, err := dialer.DialContext(dialCtx, "tcp", hostport)
 	if err != nil {
 		if errors.Is(err, errPeerIDMismatchTLS) {
 			return ErrPeerIDMismatch
@@ -336,13 +387,34 @@ func (h *host) NewStream(ctx context.Context, peerID PeerID, protocolID Protocol
 		tlsCfg.SessionTicketsDisabled = true
 	}
 
+	// [F-17E-06] dialCtx bounds the dial+handshake phase (connectTimeout);
+	// see that constant's doc comment above maxProtocolIDLen. Every real
+	// caller of NewStream (audit dispatch, vetting-chunk generation, repair
+	// download/upload) passes a process-lifetime ctx with no deadline of its
+	// own, so without this, a peer that is slow to complete the handshake
+	// could hang here indefinitely.
+	dialCtx, cancel := context.WithTimeout(ctx, connectTimeout)
+	defer cancel()
+
 	dialer := &tls.Dialer{Config: tlsCfg}
-	conn, err := dialer.DialContext(ctx, "tcp", hostport)
+	conn, err := dialer.DialContext(dialCtx, "tcp", hostport)
 	if err != nil {
 		if errors.Is(err, errPeerIDMismatchTLS) {
 			return nil, ErrPeerIDMismatch
 		}
 		return nil, fmt.Errorf("p2p.NewStream: dial %s: %w", hostport, err)
+	}
+
+	// [F-17E-06] negotiationTimeout bounds the plaintext preamble
+	// write/ack-read below — a raw net.Conn Read/Write does not observe ctx
+	// cancellation on its own, so this needs its own SetDeadline rather than
+	// relying on dialCtx (which has already served its purpose by this
+	// point). Cleared before returning the stream to the caller so it does
+	// not leak into the caller's own payload-specific deadline (e.g.
+	// computeRTO's per-provider RTO, chunkUploadTimeout, repairDownloadTimeout).
+	if err := conn.SetDeadline(time.Now().Add(negotiationTimeout)); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("p2p.NewStream: set negotiation deadline: %w", err)
 	}
 
 	if err := writeNegotiationPreamble(conn, protocolID); err != nil {
@@ -357,6 +429,10 @@ func (h *host) NewStream(ctx context.Context, peerID PeerID, protocolID Protocol
 	if ack[0] != negotiationAckOK {
 		_ = conn.Close()
 		return nil, fmt.Errorf("p2p.NewStream: peer rejected protocol %s", protocolID)
+	}
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("p2p.NewStream: clear negotiation deadline: %w", err)
 	}
 
 	return &tlsStream{Conn: conn, protocol: protocolID}, nil
@@ -380,13 +456,25 @@ func (h *host) authenticateAndNegotiate(ctx context.Context, conn net.Conn, peer
 		tlsCfg.SessionTicketsDisabled = true
 	}
 
+	// [F-17E-06] Same rationale as NewStream above: bound the handshake via a
+	// child context, then bound the plaintext negotiation preamble via
+	// SetDeadline (ctx cancellation alone does not interrupt a blocking
+	// net.Conn Read/Write), clearing it before handing the stream back.
+	handshakeCtx, cancel := context.WithTimeout(ctx, connectTimeout)
+	defer cancel()
+
 	tlsConn := tls.Client(conn, tlsCfg)
-	if err := tlsConn.HandshakeContext(ctx); err != nil {
+	if err := tlsConn.HandshakeContext(handshakeCtx); err != nil {
 		_ = conn.Close()
 		if errors.Is(err, errPeerIDMismatchTLS) {
 			return nil, ErrPeerIDMismatch
 		}
 		return nil, fmt.Errorf("p2p.authenticateAndNegotiate: TLS handshake with %s: %w", peerID, err)
+	}
+
+	if err := tlsConn.SetDeadline(time.Now().Add(negotiationTimeout)); err != nil {
+		_ = tlsConn.Close()
+		return nil, fmt.Errorf("p2p.authenticateAndNegotiate: set negotiation deadline: %w", err)
 	}
 
 	if err := writeNegotiationPreamble(tlsConn, protocolID); err != nil {
@@ -401,6 +489,10 @@ func (h *host) authenticateAndNegotiate(ctx context.Context, conn net.Conn, peer
 	if ack[0] != negotiationAckOK {
 		_ = tlsConn.Close()
 		return nil, fmt.Errorf("p2p.authenticateAndNegotiate: peer rejected protocol %s", protocolID)
+	}
+	if err := tlsConn.SetDeadline(time.Time{}); err != nil {
+		_ = tlsConn.Close()
+		return nil, fmt.Errorf("p2p.authenticateAndNegotiate: clear negotiation deadline: %w", err)
 	}
 
 	return &tlsStream{Conn: tlsConn, protocol: protocolID}, nil
@@ -492,7 +584,23 @@ func (h *host) acceptLoop() {
 	}
 }
 
+// [F-17E-06] Same class of gap as the client side (NewStream,
+// authenticateAndNegotiate) but on the accept path: previously nothing
+// bounded how long serveConn would wait for an accepted connection to send
+// its negotiation preamble. acceptLoop already runs each serveConn in its
+// own goroutine, so a stuck one doesn't block other inbound connections —
+// but an accepted-and-never-negotiated connection (e.g. a half-open socket
+// left behind by a peer that crashed or departed mid-dial) would otherwise
+// hold that goroutine and file descriptor open for the life of the process.
+// Cleared before handing the stream to handler for the same reason the
+// client side clears its own deadline: handler applies its own
+// payload-specific deadline and must not inherit a stale one from here.
 func (h *host) serveConn(conn net.Conn) {
+	if err := conn.SetDeadline(time.Now().Add(negotiationTimeout)); err != nil {
+		_ = conn.Close()
+		return
+	}
+
 	protocolID, err := readNegotiationPreamble(conn)
 	if err != nil {
 		_ = conn.Close()
@@ -509,6 +617,10 @@ func (h *host) serveConn(conn net.Conn) {
 		return
 	}
 	if _, err := conn.Write([]byte{negotiationAckOK}); err != nil {
+		_ = conn.Close()
+		return
+	}
+	if err := conn.SetDeadline(time.Time{}); err != nil {
 		_ = conn.Close()
 		return
 	}
