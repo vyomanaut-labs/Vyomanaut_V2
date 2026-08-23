@@ -135,6 +135,26 @@ const (
 	markCompleteFinalWriteBackoff = 500 * time.Millisecond
 )
 
+// repairDownloadRetries / repairDownloadRetryBackoff bound a retry of the
+// ENTIRE download step (Step 1) — downloadShards itself already tries
+// every surviving holder and needs only DataShards of them to succeed,
+// but a single pass through that set gave zero resilience against a
+// purely transient condition (a holder momentarily slow or unreachable
+// under real load — multiple provider daemons, the microservice, and
+// Postgres all contending for the same machine's CPU/network stack, as
+// opposed to a holder that is durably gone, which departure detection
+// handles separately) making the WHOLE attempt fall one shard short of
+// DataShards in that specific moment. Before this fix, that failure was
+// terminal and unretried — repair_jobs.status='FAILED' is never re-read
+// (runRepairExecutorLoop's own doc comment), so one bad ~10-second window
+// permanently failed an otherwise-healthy repair. Mirrors this file's own
+// established bounded-retry-with-backoff shape (maxRepairReplacementRetries,
+// markCompleteFinalWriteRetries) rather than inventing a new pattern.
+const (
+	repairDownloadRetries      = 3
+	repairDownloadRetryBackoff = 2 * time.Second
+)
+
 // Wire-format field sizes (IC §4.4.1 Frame 1, IC §4.1 Frame 1) — named
 // rather than inlined so no raw byte-count literal appears in the framing
 // arithmetic below (this codebase's "no magic numbers" standard, mnd linter).
@@ -217,10 +237,32 @@ func ExecuteRepairJob(
 	excludeProviderIDs []uuid.UUID,
 ) error {
 	// ── 1. Download ──────────────────────────────────────────────────────────
-	shards, err := downloadShards(ctx, transport, profile, signingKey, microservicePeerID, survivingHolders)
+	// [Fixed — repair pipeline robustness, live verification] Wrapped in a
+	// bounded retry — see repairDownloadRetries' own doc comment for why:
+	// a single unlucky pass through downloadShards' own already-resilient
+	// per-holder loop (it needs only DataShards of the surviving holders
+	// to respond, not all of them) still had no recourse if that specific
+	// attempt fell one shard short, e.g. from momentary load rather than
+	// a holder that is durably gone. Discovered live: TestDepartureAfterUploadFileStillRetrievable
+	// and TestTwoConcurrentDeparturesAtEmergencyFloor both intermittently
+	// reported a repair job reaching FAILED with healthy holders
+	// remaining and no departure-detection or candidate-availability
+	// explanation — consistent with a transient download-window miss,
+	// not a structural one.
+	var shards [][]byte
+	var err error
+	for attempt := 0; attempt < repairDownloadRetries; attempt++ {
+		shards, err = downloadShards(ctx, transport, profile, signingKey, microservicePeerID, survivingHolders)
+		if err == nil {
+			break
+		}
+		if attempt < repairDownloadRetries-1 {
+			sleepOrDone(ctx, repairDownloadRetryBackoff)
+		}
+	}
 	if err != nil {
 		_ = MarkJobComplete(ctx, db, job.JobID, false)
-		return fmt.Errorf("repair.ExecuteRepairJob: download: %w", err)
+		return fmt.Errorf("repair.ExecuteRepairJob: download: exhausted %d attempts, last error: %w", repairDownloadRetries, err)
 	}
 
 	// ── 2. Reconstruct ───────────────────────────────────────────────────────
