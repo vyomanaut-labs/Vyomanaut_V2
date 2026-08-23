@@ -417,25 +417,36 @@ func (e *ReadinessEvaluator) evaluateQuorum() ReadinessCondition {
 // every evaluation cycle (ADR-029: "the assignment service MUST NOT cache
 // this value between evaluations").
 //
-// [Fixed — F-17E-01] Previously counted `razorpay_cooling_until < NOW()`
-// alone. internal/repair/assignment.go's drawTwoActiveCandidates (M11
-// audit remediation, Finding 5) — the actual gate a provider must clear to
-// be a real-shard assignment candidate — requires THREE conditions:
-// status = 'ACTIVE', razorpay_linked_account_id IS NOT NULL, AND
-// razorpay_cooling_until < NOW(). This condition counted only the third,
-// so it could (and in demo mode, before provider.go's own registration
-// fix alongside this one, always did) report every provider ready while
-// assignment found zero eligible candidates — readiness and assignment
-// asking the same real-world question two different ways, the same
-// defect shape as the ADR-071 finding. Now mirrors
-// drawTwoActiveCandidates' predicate exactly, so this condition can never
-// again report ready while assignment cannot actually proceed.
+// [Fixed — F-17E-01, corrected] The real defect was narrower than a first
+// pass at this fix assumed: razorpay_linked_account_id was never
+// populated AT ALL, for any provider in any status, because nothing in
+// the codebase ever wrote it (provider.go's own registration fix,
+// alongside this one, closes that). It was NOT that this condition needed
+// to additionally require status = 'ACTIVE'.
+//
+// Adding status = 'ACTIVE' here (an earlier revision of this fix) broke
+// ADR-071's own, deliberate two-tier design: attemptUploadExpectRejected
+// (demo_timeline_test.go, Session 16.1.1) depends on this condition
+// staying satisfiable while providers are still VETTING, not yet ACTIVE
+// — readiness (this condition, and the network overall) is INTENDED to
+// become ready around T+01:00, well before any provider reaches ACTIVE
+// around T+10:30; the SEPARATE, stricter gate that genuinely requires
+// status = 'ACTIVE' is internal/repair/assignment.go's
+// drawTwoActiveCandidates / internal/api/upload.go's
+// eligibleActiveProviderCountAtOrUnder, which this condition was never
+// meant to duplicate. Collapsing the two back together made an early
+// upload attempt succeed instead of correctly being rejected — caught
+// live by TestDemoTimeline's own attemptUploadExpectRejected regressing.
+// razorpay_linked_account_id IS NOT NULL remains: with provider.go's own
+// fix, every provider gets one at registration regardless of status, so
+// this stays satisfied at the same early timing it always was — it just
+// also correctly reflects that the column is genuinely populated now,
+// rather than permanently NULL.
 func (e *ReadinessEvaluator) evaluateRazorpayAccountsReady(ctx context.Context) (ReadinessCondition, error) {
 	var current int
 	err := e.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM providers
-		 WHERE status = 'ACTIVE'
-		   AND razorpay_linked_account_id IS NOT NULL
+		 WHERE razorpay_linked_account_id IS NOT NULL
 		   AND razorpay_cooling_until < NOW()`,
 	).Scan(&current)
 	if err != nil {
