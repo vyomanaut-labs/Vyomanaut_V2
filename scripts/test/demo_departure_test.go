@@ -259,7 +259,22 @@ func departAtMidRepair(t *testing.T, ctx context.Context, env *departEnv, mode d
 	killOrDepart(t, ctx, env, holderIndex, mode)
 	env.departedIndex = holderIndex
 
-	replacementProviderID := pollReplacementAssignment(t, ctx, env.db, chunkID, holderProviderID, 90*time.Second)
+	// [Fixed — test-harness bug, live verification] Was 90s. The
+	// dominant latency here is NOT repair execution — the repair
+	// executor loop polls every repairExecutorIdleBackoff (2s,
+	// cmd/microservice/repair_loop.go) — it is the ORIGINAL holder's
+	// OWN departure being DETECTED in the first place: up to
+	// --departure-threshold (90s override, ADR-084 D-4) plus one more
+	// DeparturePollingInterval (30s) before repair is even enqueued.
+	// 90s gave zero margin for that detection latency alone, let alone
+	// the repair execution afterward — confirmed live: this poll timed
+	// out with no row ever appearing, not because the mechanism failed,
+	// but because the window couldn't possibly contain the detection
+	// step it was implicitly assuming had already happened. 4 minutes
+	// matches this file's own established margin for the same
+	// detection latency elsewhere (pollDeparted's 3-minute budget)
+	// plus headroom for the repair itself.
+	replacementProviderID := pollReplacementAssignment(t, ctx, env.db, chunkID, holderProviderID, 4*time.Minute)
 	replacementIndex := providerIndexForID(t, ctx, env.db, replacementProviderID)
 	// Always a hard KILL for the replacement: it never had the chance to
 	// depart gracefully — it is being interrupted mid-transfer, by this
