@@ -49,7 +49,42 @@ const vettingChunkGenerationInterval = 30 * time.Second
 // and exercises the full VETTING→ACTIVE path without generating and
 // uploading tens of thousands of 256 KB chunks per provider for no
 // additional verification value.
-const vettingChunkPerCycleTarget = 3
+//
+// [Changed 3 → 1 — design council verdict, F-17E-08, M17-E Phase 17.7
+// departure-matrix debugging] internal/scoring.ResetConsecutivePasses
+// (passes.go) resets a provider's ENTIRE consecutive_audit_passes counter
+// to 0 on any single chunk's genuine FAIL/TIMEOUT — a policy that predates
+// this loop (ADR-005) and implicitly assumed one active assignment per
+// provider. With 3 independent, concurrently-challenged synthetic chunks
+// per provider, one transient failure on any ONE of the three (real host
+// contention is exactly what live verification this session showed can
+// cause this) wipes out passes already earned by the other two, tripling a
+// provider's exposure to a full reset for the same underlying per-request
+// failure rate. The council's Adversary and Systems Theorist seats agreed
+// there is no security reason 3 beats 1 here — ADR-005's actual reliability
+// signal comes from requiring VettingMinPasses CONSECUTIVE cycles over
+// TIME, not from concurrent breadth within one cycle — and the Outsider
+// seat noted this loop's own stated purpose above ("at least one real
+// assignment... to have something to challenge") never required 3 in the
+// first place. Reducing to 1 restores the 1:1 pass-per-tick model FR-026
+// and mvp.md §7.3 were originally built around (VettingMinPasses ×
+// PollingInterval), eliminating the amplification at its root with zero
+// changes to internal/scoring. Full verdict: see the "/design-council" run
+// on ResetConsecutivePasses, this session.
+//
+// Cost, paid deliberately and in full elsewhere this same session: dropping
+// from 3 passes/tick to 1 shifts VETTING→ACTIVE from duration-bound
+// (~9 minutes in the demo profile) to pass-count-bound (~12-14 minutes) —
+// see TestViabilityActiveTransitionAtTenMinutes's updated ceiling formula
+// and the pollAllProvidersActive timeout bump across scripts/test/ for the
+// companion changes this required. A deeper per-cycle-aggregation fix
+// (require all/most of a provider's chunks to agree before touching the
+// counter, preserving 3 chunks/cycle's speed) was considered and deferred —
+// internal/scoring cannot import cmd/microservice (IC §9), so that fix
+// requires restructuring dispatchAuditCycle's per-assignment concurrency
+// model to synchronize on a per-provider-per-cycle boundary, a real but
+// separate build-session's worth of work, not a hot-fix.
+const vettingChunkPerCycleTarget = 1
 
 // runVettingChunkGenerationLoop blocks until ctx is cancelled, topping up
 // synthetic vetting-chunk assignments for every VETTING provider on
