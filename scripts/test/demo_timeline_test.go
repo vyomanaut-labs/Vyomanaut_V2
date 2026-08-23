@@ -1001,7 +1001,7 @@ func TestDemoTimeline(t *testing.T) {
 	pollFirstAuditPass(t, ctx, db, 3*time.Minute)
 
 	// Assert VETTING→ACTIVE transition completes within 12 minutes.
-	pollAllProvidersActive(t, ctx, db, 12*time.Minute)
+	pollAllProvidersActive(t, ctx, db, 15*time.Minute) // [Bumped 12->15min, F-17E-08] see this file's TestViabilityActiveTransitionAtTenMinutes for the arithmetic
 
 	// Now the real upload — ADR-071's corrected T+10:30: "Real data owner
 	// shard assignments begin." Providers are ACTIVE; ADR-030's trust
@@ -1117,7 +1117,7 @@ func TestViabilityRepairSucceedsWithTwoOfFiveOffline(t *testing.T) {
 	// [Fixed — F-17E-01] see TestDemoTimeline's own identical fix note.
 	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 12*time.Minute)
 	pollFirstAuditPass(t, ctx, db, 3*time.Minute)
-	pollAllProvidersActive(t, ctx, db, 12*time.Minute)
+	pollAllProvidersActive(t, ctx, db, 15*time.Minute) // [Bumped 12->15min, F-17E-08] see this file's TestViabilityActiveTransitionAtTenMinutes for the arithmetic
 
 	fileID := uploadTestFile(t, ctx, ms, owner)
 	t.Logf("uploaded file_id=%s", fileID)
@@ -1151,24 +1151,29 @@ func TestViabilityRepairSucceedsWithTwoOfFiveOffline(t *testing.T) {
 // this session's own VERIFY contract; the expected value below is
 // corrected, not the ~10-minute one the name still refers to.
 //
-// [Finding, corrects mvp.md §7.3] mvp.md §7.3 claims "the pass count is
-// the binding condition... VettingMinDuration is never violated," modeled
-// as VettingMinPasses × PollingInterval = 5 × 2min = 10 minutes. Live
-// verification this session shows that arithmetic doesn't hold for the
-// demo profile: it assumes exactly one audit pass per PollingInterval
-// tick, but cmd/microservice/vetting_chunk_loop.go assigns each VETTING
-// provider vettingChunkPerCycleTarget=3 synthetic chunks — a fixed
-// constant, independent of any NetworkProfile field — and
-// runAuditDispatchLoop (audit_dispatch.go) challenges every active
-// assignment on every tick, so a provider with 3 active vetting chunks
-// earns 3 passes per tick, not 1
-// (internal/scoring.IncrementConsecutivePasses is called once per passing
-// chunk, from dispatchOneChallenge's own per-assignment loop — confirmed
-// by reading passes.go directly, not inferred). VettingMinPasses=5 is
-// comfortably satisfied within the first two audit-dispatch ticks after
-// first_chunk_assignment_at, in every phase alignment (worst case: 2
-// ticks × 3 passes = 6 >= 5, still short of the 5-minute duration floor).
-// Duration, not pass count, is what actually paces the transition.
+// [Superseded — design council verdict, F-17E-08, M17-E Phase 17.7
+// departure-matrix debugging] This test's previous doc comment recorded a
+// "Finding, corrects mvp.md §7.3": that mvp.md §7.3's own arithmetic
+// (VettingMinPasses × PollingInterval = 5 × 2min = 10 minutes) didn't hold
+// because vetting_chunk_loop.go assigned each VETTING provider
+// vettingChunkPerCycleTarget=3 concurrent synthetic chunks, so a provider
+// earned 3 consecutive_audit_passes increments per audit-dispatch tick,
+// not 1 — making duration (5 min), not pass count, the binding constraint
+// (2 ticks × 3 passes = 6 >= 5, comfortably inside the duration floor).
+//
+// The design council (convened on a related but distinct problem: any
+// single one of those 3 concurrent chunks failing/timing out reset the
+// WHOLE provider's counter via scoring.ResetConsecutivePasses, tripling a
+// provider's exposure to a spurious reset for the same underlying
+// per-request failure rate — see internal/scoring/passes.go and
+// cmd/microservice/audit_dispatch.go's Step 8) recommended fixing that at
+// its root: vettingChunkPerCycleTarget is now 1, not 3. That restores
+// mvp.md §7.3's ORIGINAL 1:1 pass-per-tick model — the "Finding" above no
+// longer applies; mvp.md §7.3 was right all along about the shape of the
+// arithmetic, it was this loop's later, unrelated choice of 3 concurrent
+// chunks that broke it. VettingMinPasses=5 now needs 5 separate
+// audit-dispatch ticks (not 2), which is LONGER than the 5-minute duration
+// floor — pass count, not duration, is now what paces the transition.
 //
 // [Corrected, this session — the symmetric-window model itself was wrong]
 // This assertion previously read `elapsed` against
@@ -1211,7 +1216,20 @@ func TestViabilityRepairSucceedsWithTwoOfFiveOffline(t *testing.T) {
 // isn't.
 func TestViabilityActiveTransitionAtTenMinutes(t *testing.T) {
 	db := liveDB(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	// [Fixed while bumping pollAllProvidersActive's own budget below,
+	// F-17E-08] This outer ctx used to be 15*time.Minute — identical to
+	// the poll budget passed to pollAllProvidersActive further down. That
+	// left ZERO margin for resetDemoDatabase/buildBinaries/
+	// startMicroservice/startProviders, all of which run BEFORE `start` is
+	// recorded and so eat into this ctx's clock without ever touching the
+	// poll's own separately-started one — an outer-ctx expiry during that
+	// setup window (or a slow first minute of it) would fire first,
+	// producing a confusing context-deadline-exceeded failure from deep
+	// inside a DB query rather than this test's own, more informative
+	// t.Fatalf. 18 minutes restores the same few-minutes-of-setup-headroom
+	// margin this file's other Viability tests already carry above their
+	// own poll budgets.
+	ctx, cancel := context.WithTimeout(context.Background(), 18*time.Minute)
 	defer cancel()
 	resetDemoDatabase(t, ctx, db)
 
@@ -1233,7 +1251,11 @@ func TestViabilityActiveTransitionAtTenMinutes(t *testing.T) {
 	// needs no readiness pre-check at all: pollAllProvidersActive below is
 	// both the wait and the measurement.
 	start := time.Now()
-	pollAllProvidersActive(t, ctx, db, 12*time.Minute)
+	// [Bumped 12 → 15 minutes — design council verdict, F-17E-08] See this
+	// test's own wantMax derivation below for the arithmetic; 15 minutes
+	// carries real margin (~1 minute) above the ~14-minute worst case that
+	// arithmetic produces, not a bare-minimum value.
+	pollAllProvidersActive(t, ctx, db, 15*time.Minute)
 	elapsed := time.Since(start)
 
 	// vettingChunkGenerationInterval (cmd/microservice/vetting_chunk_loop.go)
@@ -1252,15 +1274,46 @@ func TestViabilityActiveTransitionAtTenMinutes(t *testing.T) {
 	// separate OS processes starting and registering with some natural
 	// stagger, so pollAllProvidersActive's wait is bounded by whichever
 	// provider had the worst combined tick-phase alignment, not the
-	// average one.
+	// average one. Unchanged by the design-council fix below — still a
+	// per-cycle, per-provider-fleet estimate, independent of how many
+	// passes a single tick can contribute.
 	const auditCycleAndStaggerMargin = 90 * time.Second
 
+	// [Changed — design council verdict, F-17E-08, same session as the
+	// vettingChunkPerCycleTarget 3 → 1 fix (vetting_chunk_loop.go)] wantMax
+	// used to be VettingMinDuration + one PollingInterval margin, because
+	// 3 concurrent passes/tick made duration, not pass count, the binding
+	// constraint (see this test's own header comment, above, for the full
+	// history). With 1 pass/tick restored, VettingMinPasses consecutive
+	// PASSES require VettingMinPasses separate ticks in the worst case —
+	// this is now the dominant term, not VettingMinDuration. The extra
+	// "+ PollingInterval" term is the same "one tick of global-ticker phase
+	// misalignment" slack this file's header comment already establishes
+	// for the OTHER ticker (vetting-chunk generation); it's kept here for
+	// the audit-dispatch ticker specifically because dispatchAuditCycle's
+	// own per-assignment jitter (audit_dispatch.go's randomJitterDelay)
+	// means a tick's actual challenge can land anywhere in
+	// [tick_time, tick_time+PollingInterval), so the LAST needed pass can
+	// arrive up to one full extra interval later than a naive
+	// tick-counting model would suggest.
+	//
+	// Arithmetic, shown: 30s (vettingChunkGenerationInterval)
+	//   + 5 * 2m  (VettingMinPasses * PollingInterval, one pass per tick)
+	//   + 2m      (one tick of jitter/phase-misalignment slack)
+	//   + 90s     (auditCycleAndStaggerMargin)
+	//   = 14m0s.
+	// Not live-verified at time of writing — this session's own estimate,
+	// flagged as exactly that; re-derive from live data (as
+	// auditCycleAndStaggerMargin itself was) if this ceiling proves too
+	// tight or too loose in practice.
 	wantMin := config.DemoProfile.VettingMinDuration
-	wantMax := vettingChunkGenerationInterval + config.DemoProfile.VettingMinDuration +
-		config.DemoProfile.PollingInterval + auditCycleAndStaggerMargin
+	wantMax := vettingChunkGenerationInterval +
+		time.Duration(config.DemoProfile.VettingMinPasses)*config.DemoProfile.PollingInterval +
+		config.DemoProfile.PollingInterval +
+		auditCycleAndStaggerMargin
 
 	if elapsed < wantMin || elapsed > wantMax {
-		t.Errorf("VETTING→ACTIVE transition took %s, want between %s (VettingMinDuration floor, provable — see this test's doc comment) and %s (two independent global-ticker phase misalignments plus an explicit, empirically-sized processing/stagger margin — duration-bound, not pass-count-bound)",
+		t.Errorf("VETTING→ACTIVE transition took %s, want between %s (VettingMinDuration floor — a true but no longer tight lower bound now that pass count, not duration, paces the transition; see this test's doc comment) and %s (VettingMinPasses one-per-tick, plus one tick of phase-misalignment slack, plus an explicit, empirically-sized processing/stagger margin — pass-count-bound, not duration-bound, after the F-17E-08 design-council fix)",
 			elapsed, wantMin, wantMax)
 	}
 }
