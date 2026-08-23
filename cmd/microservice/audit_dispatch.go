@@ -591,13 +591,31 @@ func lookupProviderPubKey(ctx context.Context, db *sql.DB, providerID uuid.UUID)
 // bootstrapFallbackRTO is used only when scoring.PoolMedianRTO itself has
 // nothing to compute from yet (scoring.ErrNoPoolMedianAvailable — "no
 // provider has an established measurement," expected only very early in the
-// network's life, per that sentinel's own doc comment). No document in
-// scope specifies a value for this bootstrap-only edge case; 5 seconds is a
-// deliberately conservative placeholder — generous enough that a slow first
-// real response is not spuriously timed out, tightened automatically the
-// moment any provider reaches rto_sample_count >= 5 and a real pool median
-// becomes available.
-const bootstrapFallbackRTO = 5 * time.Second
+// network's life, per that sentinel's own doc comment).
+//
+// [Bumped — F-17E-07, live verification, M17-E Phase 17.7 departure-matrix
+// debugging] No document in scope specifies a value for this bootstrap-only
+// edge case. 5 seconds (this constant's original value) is exactly the
+// window during which every provider in the live-verification harness is
+// simultaneously cold-starting on one machine — 7 real provider daemons,
+// the microservice, and Postgres all competing for CPU, each doing real
+// TLS handshakes, RocksDB opens, and (for account setup) Argon2 hashing —
+// so it is also the least representative moment to assume a steady-state
+// RTT. A single provider drawing a genuinely slow (but not hung — see
+// internal/p2p/host.go's F-17E-06 fix for the unbounded-hang case this
+// does NOT cover) first response against that tight a bound reaches
+// finalizeTimeout, which unconditionally calls scoring.ResetConsecutivePasses
+// unless the address was already known-stale — wiping consecutive_audit_passes
+// back to 0. Bumped to 15s: still generous enough to tighten automatically
+// the moment any provider reaches rto_sample_count >= 5 and a real pool
+// median becomes available (same self-correcting behaviour as before), just
+// wide enough to stop the coldest-start window from being the likeliest
+// place for a spurious reset. This does not touch the RESET behaviour
+// itself — see that mechanism's own flagged, unresolved question (this
+// session's handoff) about whether a single failing chunk among a
+// provider's several concurrent vetting-chunk assignments should be able to
+// wipe out passes already earned by its siblings in the same cycle.
+const bootstrapFallbackRTO = 15 * time.Second
 
 const rtoVarianceMultiplier = 4
 
