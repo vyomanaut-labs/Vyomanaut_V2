@@ -538,7 +538,7 @@ func TestDepartureMidUploadLeavesNoHalfRegisteredFile(t *testing.T) {
 	providers := startProviders(t, ctx, db, providerPath, ms.baseURL)
 	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 12*time.Minute) // [Fixed — F-17E-01] was 60s; see TestDemoTimeline's identical fix note (demo_timeline_test.go)
 	pollFirstAuditPass(t, ctx, db, 3*time.Minute)
-	pollAllProvidersActive(t, ctx, db, 12*time.Minute)
+	pollAllProvidersActive(t, ctx, db, 15*time.Minute) // [Bumped 12->15min, F-17E-08] see demo_timeline_test.go:TestViabilityActiveTransitionAtTenMinutes for the arithmetic
 
 	env := &departEnv{db: db, ms: ms, providers: providers, providerBinPath: providerPath, owner: owner}
 	departAt(t, ctx, env, phaseMidUpload, modeKill)
@@ -647,7 +647,7 @@ func runDepartureAfterUpload(t *testing.T, mode departMode) {
 	providers := startProviders(t, ctx, db, providerPath, ms.baseURL)
 	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 12*time.Minute) // [Fixed — F-17E-01] was 60s; see TestDemoTimeline's identical fix note (demo_timeline_test.go)
 	pollFirstAuditPass(t, ctx, db, 3*time.Minute)
-	pollAllProvidersActive(t, ctx, db, 12*time.Minute)
+	pollAllProvidersActive(t, ctx, db, 15*time.Minute) // [Bumped 12->15min, F-17E-08] see demo_timeline_test.go:TestViabilityActiveTransitionAtTenMinutes for the arithmetic
 
 	fileID, masterSecret, plaintext := uploadTestFileTracked(t, ctx, ms, owner, testUploadBytes)
 	wantHash := sha256.Sum256(plaintext)
@@ -744,7 +744,7 @@ func TestReplacementProviderDepartsMidRepair(t *testing.T) {
 	providers := startProviders(t, ctx, db, providerPath, ms.baseURL)
 	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 12*time.Minute) // [Fixed — F-17E-01] was 60s; see TestDemoTimeline's identical fix note (demo_timeline_test.go)
 	pollFirstAuditPass(t, ctx, db, 3*time.Minute)
-	pollAllProvidersActive(t, ctx, db, 12*time.Minute)
+	pollAllProvidersActive(t, ctx, db, 15*time.Minute) // [Bumped 12->15min, F-17E-08] see demo_timeline_test.go:TestViabilityActiveTransitionAtTenMinutes for the arithmetic
 
 	profile := config.SelectProfile("demo")
 	fileID, masterSecret, plaintext := uploadTestFileTracked(t, ctx, ms, owner, testUploadBytes)
@@ -802,7 +802,7 @@ func TestDepartureMidRetrievalStillGathersK(t *testing.T) {
 	providers := startProviders(t, ctx, db, providerPath, ms.baseURL)
 	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 12*time.Minute) // [Fixed — F-17E-01] was 60s; see TestDemoTimeline's identical fix note (demo_timeline_test.go)
 	pollFirstAuditPass(t, ctx, db, 3*time.Minute)
-	pollAllProvidersActive(t, ctx, db, 12*time.Minute)
+	pollAllProvidersActive(t, ctx, db, 15*time.Minute) // [Bumped 12->15min, F-17E-08] see demo_timeline_test.go:TestViabilityActiveTransitionAtTenMinutes for the arithmetic
 
 	fileID, masterSecret, plaintext := uploadTestFileTracked(t, ctx, ms, owner, testUploadBytes)
 	wantHash := sha256.Sum256(plaintext)
@@ -866,7 +866,7 @@ func TestTwoConcurrentDeparturesAtEmergencyFloor(t *testing.T) {
 	providers := startProviders(t, ctx, db, providerPath, ms.baseURL)
 	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 12*time.Minute) // [Fixed — F-17E-01] was 60s; see TestDemoTimeline's identical fix note (demo_timeline_test.go)
 	pollFirstAuditPass(t, ctx, db, 3*time.Minute)
-	pollAllProvidersActive(t, ctx, db, 12*time.Minute)
+	pollAllProvidersActive(t, ctx, db, 15*time.Minute) // [Bumped 12->15min, F-17E-08] see demo_timeline_test.go:TestViabilityActiveTransitionAtTenMinutes for the arithmetic
 
 	fileID, masterSecret, plaintext := uploadTestFileTracked(t, ctx, ms, owner, testUploadBytes)
 	wantHash := sha256.Sum256(plaintext)
