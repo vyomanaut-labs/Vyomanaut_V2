@@ -139,7 +139,7 @@ func TestDemoCLIFullLifecycle(t *testing.T) {
 	env := setupCLIDemoEnv(t, 40*time.Minute)
 	providers := startProviders(t, env.ctx, env.db, env.providerPath, env.ms.baseURL)
 	_ = providers
-	pollAllProvidersActive(t, env.ctx, env.db, 12*time.Minute)
+	pollAllProvidersActive(t, env.ctx, env.db, 15*time.Minute) // [Bumped 12->15min, F-17E-08] see demo_timeline_test.go:TestViabilityActiveTransitionAtTenMinutes for the arithmetic
 
 	dataDir := t.TempDir()
 	_, _ = registerAndDepositViaCLI(t, env, dataDir, 100_000_00) // ₹100,000 in paise
@@ -247,7 +247,7 @@ func TestDemoCLIFullLifecycle(t *testing.T) {
 func TestDemoCLIRetrievedBytesIdenticalToUploaded(t *testing.T) {
 	env := setupCLIDemoEnv(t, 30*time.Minute)
 	startProviders(t, env.ctx, env.db, env.providerPath, env.ms.baseURL)
-	pollAllProvidersActive(t, env.ctx, env.db, 12*time.Minute)
+	pollAllProvidersActive(t, env.ctx, env.db, 15*time.Minute) // [Bumped 12->15min, F-17E-08] see demo_timeline_test.go:TestViabilityActiveTransitionAtTenMinutes for the arithmetic
 
 	dataDir := t.TempDir()
 	registerAndDepositViaCLI(t, env, dataDir, 100_000_00)
@@ -295,7 +295,7 @@ func TestDemoCLIRetrievedBytesIdenticalToUploaded(t *testing.T) {
 func TestDemoCLIUploadFailsBeforeDeposit(t *testing.T) {
 	env := setupCLIDemoEnv(t, 30*time.Minute)
 	startProviders(t, env.ctx, env.db, env.providerPath, env.ms.baseURL)
-	pollAllProvidersActive(t, env.ctx, env.db, 12*time.Minute)
+	pollAllProvidersActive(t, env.ctx, env.db, 15*time.Minute) // [Bumped 12->15min, F-17E-08] see demo_timeline_test.go:TestViabilityActiveTransitionAtTenMinutes for the arithmetic
 
 	dataDir := t.TempDir()
 	registerAndDepositViaCLI(t, env, dataDir, 0) // amountPaise=0: register only, no deposit
