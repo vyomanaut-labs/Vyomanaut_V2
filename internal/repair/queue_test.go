@@ -514,7 +514,36 @@ func TestDequeueNextJobConcurrentWorkersNoDoubleDequeue(t *testing.T) {
 		i := i
 		go func() {
 			defer wg.Done()
-			results[i], errs[i] = DequeueNextJob(context.Background(), db)
+			// [Fixed — live verification, -race surfaced this] SELECT ... FOR
+			// UPDATE SKIP LOCKED is a non-blocking dequeue by design: with n
+			// concurrent transactions racing n rows, it is entirely possible
+			// (and something -race's scheduling perturbation makes easier to
+			// hit, not causes) for one transaction's SELECT to run at the
+			// exact instant every remaining unclaimed row is momentarily
+			// locked by other still-uncommitted peers. That transaction
+			// correctly, harmlessly gets DequeueNextJob's documented "nil,
+			// nil" empty-queue result — even though the queue is not
+			// actually empty a few milliseconds later. This is not a
+			// double-dequeue risk (SKIP LOCKED's actual correctness
+			// property, and the one this test exists to prove, is
+			// unaffected either way) — it is exactly the race
+			// DequeueNextJob's own real, only caller
+			// (cmd/microservice/repair_loop.go's runRepairExecutorLoop)
+			// already retries on, and exactly what this file's own
+			// drainQueue helper already loops on. A single-shot attempt per
+			// goroutine was never a guarantee this pattern makes; retrying
+			// here matches how DequeueNextJob is actually meant to be
+			// called, rather than asserting a stronger single-call
+			// guarantee than SKIP LOCKED provides.
+			const maxAttempts = 20
+			const retryBackoff = 25 * time.Millisecond
+			for attempt := 0; attempt < maxAttempts; attempt++ {
+				results[i], errs[i] = DequeueNextJob(context.Background(), db)
+				if errs[i] != nil || results[i] != nil {
+					return
+				}
+				time.Sleep(retryBackoff)
+			}
 		}()
 	}
 	wg.Wait()
