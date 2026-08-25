@@ -184,6 +184,23 @@ func runSimulationForTest(t *testing.T, simCount, simASNCount int) (simDataDir s
 		simBasePort:       pickFreeLoopbackPort(t),
 		simDataDir:        simDataDir,
 		simASNCount:       simASNCount,
+		// [Added — F-17E-11 follow-up, live verification] Every one of
+		// this file's TestSimCount* subtests failed the moment F-17E-11's
+		// JWKS retry loop shipped (main.go, "microservice public key
+		// (JWKS)") — this function's own doc comment above already
+		// documented, correctly, that a fetch against unreachablePort
+		// fails fast and is non-fatal; F-17E-11 made it retry up to 30
+		// times over up to 90 seconds before falling through to the rest
+		// of startup instead, which the readiness-wait loop below (a
+		// fixed 10-second deadline, on cfg.chunkStoreDir — a LATER
+		// startup step than the JWKS fetch) has no chance of tolerating.
+		// unreachablePort will never start listening no matter how many
+		// times this retries, so every attempt past the first only costs
+		// time for this specific test; explicitly opting into a single
+		// attempt restores this function's original, documented
+		// assumption instead of asking F-17E-11's real fix to compromise
+		// on the actual problem it solves.
+		jwksFetchMaxAttempts: 1,
 	}
 	profile := config.SelectProfile(flags.mode)
 
