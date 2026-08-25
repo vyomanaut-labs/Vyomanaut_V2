@@ -127,6 +127,16 @@ type providerFlags struct {
 	// Session 16.1.1). Empty = skip registration entirely (logged, not
 	// fatal) rather than attempt and fail noisily with HTTP 401.
 	registrationBearerToken string
+
+	// jwksFetchMaxAttempts overrides defaultJWKSFetchMaxAttempts (F-17E-11,
+	// runProviderInstance's "microservice public key (JWKS)" section) when
+	// > 0. <= 0 (including this struct's zero value, so every existing
+	// providerFlags{} literal that predates this field is unaffected) means
+	// "use defaultJWKSFetchMaxAttempts". Threaded into providerInstanceConfig
+	// unchanged at both construction sites (runCmd's normal-mode path and
+	// runSimulation's per-instance loop) — see that struct's own field of
+	// the same name for why this exists.
+	jwksFetchMaxAttempts int
 }
 
 // defaultProviderDataDir returns the default --data-dir every provider
@@ -170,6 +180,7 @@ func parseProviderFlags(args []string) providerFlags {
 	fs.StringVar(&f.simDataDir, "sim-data-dir", "/tmp/vyomanaut-sim", "Root directory for simulation instance data.")
 	fs.IntVar(&f.simASNCount, "sim-asn-count", defaultSimASNCount, "Synthetic ASN count for simulation mode.")
 	fs.StringVar(&f.registrationBearerToken, "registration-bearer-token", "", "OTP-verify-issued registration bearer token for POST /api/v1/provider/register (see providerFlags.registrationBearerToken doc comment for why this is supplied externally rather than obtained by this daemon). Empty = skip registration.")
+	fs.IntVar(&f.jwksFetchMaxAttempts, "jwks-fetch-max-attempts", defaultJWKSFetchMaxAttempts, "Retry attempts for fetching the microservice's JWKS public key at startup (F-17E-11) before falling back to fail-closed (repair-download/vetting-gc verification rejected) for this process's entire lifetime. <= 0 also falls back to the same default — see providerFlags.jwksFetchMaxAttempts doc comment.")
 	simOnlyIndexFlag := fs.Int("sim-only-index", -1, "If >= 0, run only this one instance index from the --sim-count group as its own OS process, computing the exact same dataDir/port/ASN it would have under a full single-process run. -1 (default) runs every instance in this process (original --sim-count behavior). Added post-Session-16.2.1: --sim-count's goroutines-in-one-process design has no way to terminate a single simulated instance without killing all of them, which demo_timeline_test.go's departure-detection check needs (Session 16.1.1).")
 	_ = fs.Parse(args)
 	if *simOnlyIndexFlag >= 0 {
@@ -264,6 +275,19 @@ type providerInstanceConfig struct {
 	// registrationBearerToken: see providerFlags.registrationBearerToken's
 	// doc comment. Empty = registration is skipped for this instance.
 	registrationBearerToken string
+
+	// jwksFetchMaxAttempts overrides defaultJWKSFetchMaxAttempts (F-17E-11,
+	// runProviderInstance's "microservice public key (JWKS)" section) when
+	// > 0. <= 0 (including this struct's zero value, so every existing
+	// providerFlags{} literal that predates this field is unaffected) means
+	// "use defaultJWKSFetchMaxAttempts". Exists primarily for tests that
+	// construct providerFlags directly and deliberately point
+	// microserviceURL at an address nothing listens on
+	// (main_test.go's runSimulationForTest) to opt out of the real 90-
+	// second retry budget without needing to fake a working JWKS endpoint —
+	// added after that exact scenario's own 10-second readiness deadline
+	// started racing against, and losing to, F-17E-11's retry loop.
+	jwksFetchMaxAttempts int
 }
 
 // runCmd is the "run" subcommand's handler (dispatch.go) — this daemon's
@@ -329,6 +353,7 @@ func runCmd(args []string) {
 		microserviceURL:         flags.microserviceURL,
 		advertiseAddr:           flags.advertiseAddr,
 		registrationBearerToken: flags.registrationBearerToken,
+		jwksFetchMaxAttempts:    flags.jwksFetchMaxAttempts,
 	}
 	if err := runProviderInstance(ctx, profile, cfg); err != nil {
 		log.Fatalf("[STARTUP] FATAL: %v", err)
@@ -423,6 +448,7 @@ func runSimulation(ctx context.Context, flags providerFlags, profile config.Netw
 			syntheticASN:            syntheticASN,
 			advertiseAddr:           flags.advertiseAddr,
 			registrationBearerToken: flags.registrationBearerToken,
+			jwksFetchMaxAttempts:    flags.jwksFetchMaxAttempts,
 		}
 
 		wg.Add(1)
@@ -684,23 +710,59 @@ func runProviderInstance(ctx context.Context, profile config.NetworkProfile, cfg
 	// download candidates, so it needs correspondingly more of that pool
 	// to have won its own startup race, not just one specific provider.
 	//
-	// Retried up to jwksFetchMaxAttempts times, jwksFetchRetryInterval
-	// apart — comfortably longer than the ~60-70s window above, while
-	// still bounded so a genuinely, durably unreachable microservice
-	// doesn't hang provider startup indefinitely. Preserves the exact
-	// same fail-closed behavior as before (nil key, empty authorizer, a
-	// WARNING log) if every attempt is exhausted — this changes how long
-	// the daemon tries before giving up, not what "giving up" means.
+	// [Fixed a second time, same session — this fix's own first version
+	// broke TestSimCount's entire suite (all 5 subtests), caught only by
+	// actually running them, not by build/vet alone, which is exactly
+	// what build/vet cannot catch: a behavioral timing regression, not a
+	// compile error. main_test.go's runSimulationForTest documents its
+	// own, pre-existing, correct assumption in its own words:
+	// "fetchMicroservicePublicKey's failure path is a logged WARNING, not
+	// fatal ... so instances still start" — written when a single failed
+	// attempt returned in well under a second, leaving its own 10-second
+	// readiness-wait deadline (waiting on cfg.chunkStoreDir, a LATER
+	// startup step than this one) comfortably satisfied. Retrying up to
+	// defaultJWKSFetchMaxAttempts times before proceeding made every
+	// later step, including chunk-store creation, wait behind it — for
+	// exactly the "nothing is listening" case this test deliberately
+	// constructs (see pickFreeLoopbackPort's own comment there), every
+	// attempt fails fast individually but the CUMULATIVE wait past
+	// attempt 1 has no chance of ever succeeding, so retrying at all
+	// only ever costs time for this specific caller, never buys anything.
+	// cfg.jwksFetchMaxAttempts (providerInstanceConfig, threaded from
+	// providerFlags.jwksFetchMaxAttempts) exists so a caller that already
+	// knows this — as runSimulationForTest explicitly does — can opt out
+	// of the long retry budget without needing to fake a working JWKS
+	// endpoint just to make an unrelated test's timing assumption hold
+	// again. <= 0 (including every existing struct literal that predates
+	// this field and so leaves it at its zero value) means "use
+	// defaultJWKSFetchMaxAttempts" — every real caller (parseProviderFlags'
+	// own --jwks-fetch-max-attempts default, and runProviderInstance's own
+	// normal-mode construction site above) is unaffected by this fix.
+	maxJWKSAttempts := cfg.jwksFetchMaxAttempts
+	if maxJWKSAttempts <= 0 {
+		maxJWKSAttempts = defaultJWKSFetchMaxAttempts
+	}
 	var msPublicKey ed25519.PublicKey
 fetchLoop:
-	for attempt := 1; attempt <= jwksFetchMaxAttempts; attempt++ {
+	for attempt := 1; attempt <= maxJWKSAttempts; attempt++ {
 		msPublicKey, err = fetchMicroservicePublicKey(ctx, cfg.microserviceURL)
 		if err == nil {
+			// [Added — F-17E-11 follow-up] The failure path was already
+			// logged in detail; the success path logged nothing at all,
+			// making "did this instance need to retry, and how many
+			// times" invisible in every startup log unless it failed
+			// outright. Only logged past attempt 1 — attempt 1 succeeding
+			// is the common, uninteresting case and would otherwise add a
+			// line to every single provider's startup log for no
+			// diagnostic gain.
+			if attempt > 1 {
+				log.Printf("[STARTUP]%s fetched microservice public key on attempt %d/%d", logTag, attempt, maxJWKSAttempts)
+			}
 			break
 		}
-		if attempt < jwksFetchMaxAttempts {
+		if attempt < maxJWKSAttempts {
 			log.Printf("[STARTUP]%s fetch microservice public key (attempt %d/%d): %v; retrying in %s",
-				logTag, attempt, jwksFetchMaxAttempts, err, jwksFetchRetryInterval)
+				logTag, attempt, maxJWKSAttempts, err, jwksFetchRetryInterval)
 			// Labeled break, deliberately not a bare one: a bare break
 			// here would only break out of this select, not the
 			// enclosing for loop, silently turning ctx cancellation
@@ -721,7 +783,7 @@ fetchLoop:
 		// handler_repair.go/handler_vetting_gc.go's sig checks) rather than
 		// crashing the daemon — a durable microservice outage should not
 		// prevent the daemon from starting.
-		log.Printf("[STARTUP]%s WARNING: could not fetch microservice public key after %d attempts (%v); all capability/audit/repair/GC verification will fail closed for this process's entire lifetime, not just until the microservice recovers — see this block's own F-17E-11 doc comment", logTag, jwksFetchMaxAttempts, err)
+		log.Printf("[STARTUP]%s WARNING: could not fetch microservice public key after %d attempts (%v); all capability/audit/repair/GC verification will fail closed for this process's entire lifetime, not just until the microservice recovers — see this block's own F-17E-11 doc comment", logTag, maxJWKSAttempts, err)
 	}
 	var microservicePeerID p2p.PeerID
 	if msPublicKey != nil {
@@ -1213,14 +1275,19 @@ func deriveLocalProviderIDBytes(peerID p2p.PeerID) [16]byte {
 
 const providerHTTPClientTimeout = 10 * time.Second
 
-// [Added — F-17E-11] See the JWKS-fetch call site's own doc comment
-// (main(), "microservice public key (JWKS) + derived Peer ID") for the
-// full finding. 30 attempts * 3s = 90s of retry budget, comfortably
-// longer than live verification's observed ~60-70s microservice
-// [READINESS] startup window, while still bounded.
+// [Renamed from jwksFetchMaxAttempts to defaultJWKSFetchMaxAttempts —
+// F-17E-11 follow-up] Freed up the unqualified name for
+// providerFlags.jwksFetchMaxAttempts / providerInstanceConfig's own field
+// of the same short name; this constant is now specifically the fallback
+// those use when unset (<= 0), not the only value in play. See the JWKS-
+// fetch call site's own doc comment (runProviderInstance, "microservice
+// public key (JWKS) + derived Peer ID") for the full finding and the
+// override mechanism's own reasoning. 30 attempts * 3s = 90s of retry
+// budget, comfortably longer than live verification's observed ~60-70s
+// microservice [READINESS] startup window, while still bounded.
 const (
-	jwksFetchMaxAttempts   = 30
-	jwksFetchRetryInterval = 3 * time.Second
+	defaultJWKSFetchMaxAttempts = 30
+	jwksFetchRetryInterval      = 3 * time.Second
 )
 
 type jwksKeyDTO struct {
