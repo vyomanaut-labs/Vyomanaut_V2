@@ -20,6 +20,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"log"
 	"time"
 
 	localcrypto "github.com/vyomanaut-labs/Vyomanaut_V2/internal/crypto"
@@ -111,8 +112,19 @@ func (h *VettingGCHandler) handleOneFrame(s p2p.Stream) bool {
 	_ = s.SetDeadline(time.Now().Add(vettingGCFrameTimeout))
 
 	// ── (a) peer authorization, BEFORE any delete ────────────────────────
+	// [Added — live verification, M17-E Phase 17.7, same reasoning as
+	// handler_repair.go's identical fix] This handler already
+	// distinguishes freshness failures from authorization failures at the
+	// wire level (vettingGCStatusStaleRequest vs vettingGCStatusNotAuthorised
+	// below) — better than repair-download's handler, which uses one code
+	// for all three checks — but still collapses "no msPublicKey" (JWKS
+	// fetch never succeeded) and "signature doesn't verify" (a genuine
+	// key-mismatch or signing-input bug) into the same status and, until
+	// now, no log line at all. These log lines close that gap without
+	// changing the wire protocol.
 	remotePeer := s.RemotePeer()
 	if h.authorizer == nil || !h.authorizer.IsRegisteredMicroservicePeer(remotePeer) {
+		log.Printf("[VETTING-GC] rejected (not authorised): remote peer %s is not the registered microservice (authorizer populated: %v)", remotePeer, h.authorizer != nil)
 		h.writeStatusOnly(s, vettingGCStatusNotAuthorised)
 		return false
 	}
@@ -162,13 +174,21 @@ func (h *VettingGCHandler) handleOneFrame(s p2p.Stream) bool {
 	}
 
 	// ── (b) freshness (ADR-036) ────────────────────────────────────────
-	if abs(time.Now().UnixMilli()-requestTsMs) > h.freshnessWindow.Milliseconds() {
+	if delta := abs(time.Now().UnixMilli() - requestTsMs); delta > h.freshnessWindow.Milliseconds() {
+		log.Printf("[VETTING-GC] rejected (stale): request timestamp %d outside freshness window %s (now=%d, delta=%dms)",
+			requestTsMs, h.freshnessWindow, time.Now().UnixMilli(), delta)
 		h.writeStatusOnly(s, vettingGCStatusStaleRequest)
 		return false
 	}
 
 	// ── (c) verify gc_auth_sig (ADR-036) ─────────────────────────────────
-	if h.msPublicKey == nil || !h.verifyGCAuthSig(chunkIDsBytes, requestTsMs, sig) {
+	if h.msPublicKey == nil {
+		log.Printf("[VETTING-GC] rejected (not authorised): no microservice public key available — JWKS fetch never succeeded for this process's lifetime (see F-17E-11)")
+		h.writeStatusOnly(s, vettingGCStatusNotAuthorised)
+		return false
+	}
+	if !h.verifyGCAuthSig(chunkIDsBytes, requestTsMs, sig) {
+		log.Printf("[VETTING-GC] rejected (not authorised): gc_auth_sig verification failed for %d chunk(s) requestTsMs=%d", chunkCount, requestTsMs)
 		h.writeStatusOnly(s, vettingGCStatusNotAuthorised)
 		return false
 	}
