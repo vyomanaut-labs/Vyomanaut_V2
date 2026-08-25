@@ -781,10 +781,66 @@ func pollReplacementAssignment(t *testing.T, ctx context.Context, db *sql.DB, ch
 			return providerID
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("pollReplacementAssignment: no replacement chunk_assignments row appeared for chunk %x within %s: %v", chunkID, timeout, err)
+			// [Fixed — failure_reason surfaced, live verification, M17-E
+			// Phase 17.7] A bare "sql: no rows in result set" here doesn't
+			// distinguish "no repair job was ever enqueued for this chunk"
+			// (a departure-detection problem) from "one exists and is
+			// still QUEUED/IN_PROGRESS" (a timing problem) from "one
+			// exists and reached FAILED" (an execution problem, with its
+			// own failure_reason) — see formatRepairJobsForChunk.
+			t.Fatalf("pollReplacementAssignment: no replacement chunk_assignments row appeared for chunk %x within %s: %v\n%s",
+				chunkID, timeout, err, formatRepairJobsForChunk(ctx, db, chunkID))
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+// formatRepairJobsForChunk queries every repair_jobs row for chunkID (any
+// status, not just FAILED) and formats them for a t.Fatalf message. See
+// formatFailedRepairJobs (demo_timeline_test.go) for the sibling helper
+// used when repair_jobs.status = 'FAILED' is already known; this one is
+// for callers like pollReplacementAssignment that only ever observe the
+// downstream chunk_assignments side and so don't yet know whether a
+// repair_jobs row exists at all, let alone its status.
+func formatRepairJobsForChunk(ctx context.Context, db *sql.DB, chunkID []byte) string {
+	rows, err := db.QueryContext(ctx, `
+		SELECT status, trigger_type, provider_id, failure_reason, created_at, started_at, completed_at
+		FROM repair_jobs
+		WHERE chunk_id = $1
+		ORDER BY created_at`, chunkID)
+	if err != nil {
+		return fmt.Sprintf("  (failed to query repair_jobs for chunk %x: %v)", chunkID, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var sb strings.Builder
+	for rows.Next() {
+		var status, triggerType string
+		var providerID, failureReason sql.NullString
+		var createdAt time.Time
+		var startedAt, completedAt sql.NullTime
+		if err := rows.Scan(&status, &triggerType, &providerID, &failureReason, &createdAt, &startedAt, &completedAt); err != nil {
+			fmt.Fprintf(&sb, "  (scan error: %v)\n", err)
+			continue
+		}
+		provider := "(none)"
+		if providerID.Valid {
+			provider = providerID.String
+		}
+		reason := "(none)"
+		if failureReason.Valid {
+			reason = failureReason.String
+		}
+		fmt.Fprintf(&sb, "  status=%s trigger=%s provider=%s created=%s started=%v completed=%v reason=%s\n",
+			status, triggerType, provider, createdAt.Format(time.RFC3339), startedAt, completedAt, reason)
+	}
+	if err := rows.Err(); err != nil {
+		fmt.Fprintf(&sb, "  (row iteration error: %v)\n", err)
+	}
+	if sb.Len() == 0 {
+		return fmt.Sprintf("  (no repair_jobs row exists at all for chunk %x — never enqueued)", chunkID)
+	}
+	return "repair_jobs for this chunk:\n" + sb.String()
 }
 
 // retrieveTestFileTrackedAllowingError is retrieveTestFileTracked's core,
