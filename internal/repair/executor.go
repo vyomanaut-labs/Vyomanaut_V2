@@ -261,25 +261,28 @@ func ExecuteRepairJob(
 		}
 	}
 	if err != nil {
-		_ = MarkJobComplete(ctx, db, job.JobID, false)
-		return fmt.Errorf("repair.ExecuteRepairJob: download: exhausted %d attempts, last error: %w", repairDownloadRetries, err)
+		wrapped := fmt.Errorf("repair.ExecuteRepairJob: download: exhausted %d attempts, last error: %w", repairDownloadRetries, err)
+		_ = MarkJobComplete(ctx, db, job.JobID, false, wrapped.Error())
+		return wrapped
 	}
 
 	// ── 2. Reconstruct ───────────────────────────────────────────────────────
 	aontPackage, err := engine.DecodeSegment(shards)
 	if err != nil {
-		_ = MarkJobComplete(ctx, db, job.JobID, false)
-		return fmt.Errorf("repair.ExecuteRepairJob: decode: %w", err)
+		wrapped := fmt.Errorf("repair.ExecuteRepairJob: decode: %w", err)
+		_ = MarkJobComplete(ctx, db, job.JobID, false, wrapped.Error())
+		return wrapped
 	}
 	regenerated, err := engine.EncodeSegment(aontPackage)
 	if err != nil {
-		_ = MarkJobComplete(ctx, db, job.JobID, false)
-		return fmt.Errorf("repair.ExecuteRepairJob: re-encode: %w", err)
+		wrapped := fmt.Errorf("repair.ExecuteRepairJob: re-encode: %w", err)
+		_ = MarkJobComplete(ctx, db, job.JobID, false, wrapped.Error())
+		return wrapped
 	}
 
 	missingIndex, err := lookupShardIndexForChunk(ctx, db, job.ChunkID)
 	if err != nil {
-		_ = MarkJobComplete(ctx, db, job.JobID, false)
+		_ = MarkJobComplete(ctx, db, job.JobID, false, err.Error())
 		return fmt.Errorf("repair.ExecuteRepairJob: %w", err)
 	}
 	replacementShard := regenerated[missingIndex]
@@ -305,13 +308,15 @@ func ExecuteRepairJob(
 	for attempt := 0; attempt < maxRepairReplacementRetries; attempt++ {
 		candidateID, selectErr := SelectReplacementProvider(ctx, db, profile, job.SegmentID, replacementExcluded)
 		if selectErr != nil {
-			_ = MarkJobComplete(ctx, db, job.JobID, false)
-			return fmt.Errorf("repair.ExecuteRepairJob: select replacement: %w", selectErr)
+			wrapped := fmt.Errorf("repair.ExecuteRepairJob: select replacement: %w", selectErr)
+			_ = MarkJobComplete(ctx, db, job.JobID, false, wrapped.Error())
+			return wrapped
 		}
 
 		if err := preRegisterChunkAssignment(ctx, db, job.ChunkID, job.SegmentID, missingIndex, candidateID); err != nil {
-			_ = MarkJobComplete(ctx, db, job.JobID, false)
-			return fmt.Errorf("repair.ExecuteRepairJob: pre-register: %w", err)
+			wrapped := fmt.Errorf("repair.ExecuteRepairJob: pre-register: %w", err)
+			_ = MarkJobComplete(ctx, db, job.JobID, false, wrapped.Error())
+			return wrapped
 		}
 
 		token := mintCapabilityToken(signingKey, job.ChunkID, candidateID, capabilityTokenTTL)
@@ -327,23 +332,26 @@ func ExecuteRepairJob(
 			break
 		}
 		if !errors.Is(uploadErr, ErrReplacementStorageFull) {
-			_ = MarkJobComplete(ctx, db, job.JobID, false)
-			return fmt.Errorf("repair.ExecuteRepairJob: upload: %w", uploadErr)
+			wrapped := fmt.Errorf("repair.ExecuteRepairJob: upload: %w", uploadErr)
+			_ = MarkJobComplete(ctx, db, job.JobID, false, wrapped.Error())
+			return wrapped
 		}
 
 		// STORAGE_FULL: free the slot this candidate just claimed and never
 		// draw it again this job, then loop to try another candidate.
 		if cleanupErr := abandonFailedReplacementAssignment(ctx, db, job.ChunkID, candidateID); cleanupErr != nil {
-			_ = MarkJobComplete(ctx, db, job.JobID, false)
-			return fmt.Errorf("repair.ExecuteRepairJob: %w (cleaning up after STORAGE_FULL from %s)", cleanupErr, candidateID)
+			wrapped := fmt.Errorf("repair.ExecuteRepairJob: %w (cleaning up after STORAGE_FULL from %s)", cleanupErr, candidateID)
+			_ = MarkJobComplete(ctx, db, job.JobID, false, wrapped.Error())
+			return wrapped
 		}
 		replacementExcluded = append(replacementExcluded, candidateID)
 	}
 
 	if uploadErr != nil {
-		_ = MarkJobComplete(ctx, db, job.JobID, false)
-		return fmt.Errorf("repair.ExecuteRepairJob: upload: exhausted %d replacement attempts, last error: %w",
+		wrapped := fmt.Errorf("repair.ExecuteRepairJob: upload: exhausted %d replacement attempts, last error: %w",
 			maxRepairReplacementRetries, uploadErr)
+		_ = MarkJobComplete(ctx, db, job.JobID, false, wrapped.Error())
+		return wrapped
 	}
 
 	// ── 4. Confirm ───────────────────────────────────────────────────────────
@@ -369,13 +377,13 @@ func ExecuteRepairJob(
 		// "completed=0, failed=0" after its full poll window, with
 		// nothing in the microservice log to explain it, because nothing
 		// on this path ever logged or marked anything at all.
-		_ = MarkJobComplete(ctx, db, job.JobID, false)
+		_ = MarkJobComplete(ctx, db, job.JobID, false, fmt.Sprintf("activate: %v", err))
 		return fmt.Errorf("repair.ExecuteRepairJob: activate: %w", err)
 	}
 
 	// [Fixed — F-16-7] The shard IS uploaded and ACTIVE at this point — the
 	// repair itself has already succeeded. If this specific write fails,
-	// falling back to MarkJobComplete(ctx, db, job.JobID, false) — the
+	// falling back to MarkJobComplete(ctx, db, job.JobID, false, ...) — the
 	// pattern every OTHER error path in this function uses — would be
 	// wrong here specifically: it would misreport a successful repair as
 	// a failure, on a table nothing currently re-reads to retry (a FAILED
@@ -387,7 +395,7 @@ func ExecuteRepairJob(
 	// the only realistic cause, and should clear within a few attempts.
 	var markErr error
 	for attempt := 0; attempt < markCompleteFinalWriteRetries; attempt++ {
-		if markErr = MarkJobComplete(ctx, db, job.JobID, true); markErr == nil {
+		if markErr = MarkJobComplete(ctx, db, job.JobID, true, ""); markErr == nil {
 			return nil
 		}
 		if attempt < markCompleteFinalWriteRetries-1 {
