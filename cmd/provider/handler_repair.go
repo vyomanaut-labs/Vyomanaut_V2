@@ -175,7 +175,21 @@ func (h *RepairDownloadHandler) HandleStream(s p2p.Stream) {
 	// without weakening the wire protocol's own deliberate ambiguity.
 	remotePeer := s.RemotePeer()
 	if h.authorizer == nil || !h.authorizer.IsRegisteredMicroservicePeer(remotePeer) {
-		log.Printf("[REPAIR-DOWNLOAD] rejected (not authorised): remote peer %s is not the registered microservice (authorizer populated: %v)", remotePeer, h.authorizer != nil)
+		// [Extended — live verification] The first version of this line
+		// logged only the ACTUAL dialing peer, which proved the rejection
+		// happens here (Step 1) rather than at the signature or freshness
+		// check — real progress — but still could not answer the obvious
+		// next question: what did this provider EXPECT? Without both
+		// sides printed together, "not the registered microservice" is
+		// still a one-sided fact. h.microservicePeerID is the exact value
+		// derived from this process's own JWKS fetch at startup
+		// (main.go, F-17E-11), so printing both turns this from "the
+		// dialer was wrong" into a direct, unambiguous comparison:
+		// identical values would mean the authorizer's SET is stale
+		// rather than the derivation being wrong, and differing values
+		// name precisely which two keys disagree.
+		log.Printf("[REPAIR-DOWNLOAD] rejected (not authorised): remote peer %s does not match this provider's expected microservice peer %q (authorizer populated: %v)",
+			remotePeer, h.microservicePeerID, h.authorizer != nil)
 		h.writeStatusOnly(s, repairStatusNotAuthorised)
 		return
 	}

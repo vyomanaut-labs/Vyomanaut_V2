@@ -124,7 +124,12 @@ func (h *VettingGCHandler) handleOneFrame(s p2p.Stream) bool {
 	// changing the wire protocol.
 	remotePeer := s.RemotePeer()
 	if h.authorizer == nil || !h.authorizer.IsRegisteredMicroservicePeer(remotePeer) {
-		log.Printf("[VETTING-GC] rejected (not authorised): remote peer %s is not the registered microservice (authorizer populated: %v)", remotePeer, h.authorizer != nil)
+		// [Extended — live verification, same reasoning as
+		// handler_repair.go's identical line] Print BOTH the actual
+		// dialing peer and this provider's own expected value, so the
+		// two can be compared directly instead of inferred.
+		log.Printf("[VETTING-GC] rejected (not authorised): remote peer %s does not match this provider's expected microservice peer %q (authorizer populated: %v)",
+			remotePeer, h.microservicePeerID, h.authorizer != nil)
 		h.writeStatusOnly(s, vettingGCStatusNotAuthorised)
 		return false
 	}
