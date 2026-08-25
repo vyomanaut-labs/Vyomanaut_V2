@@ -919,14 +919,71 @@ func pollRepairCompleted(t *testing.T, ctx context.Context, db *sql.DB, wantComp
 		}
 		_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM repair_jobs WHERE status = 'FAILED'`).Scan(&failed)
 		if failed > 0 {
-			t.Fatalf("%d repair job(s) have status=FAILED (completed=%d, want %d) — see the microservice/provider log dump above for the actual error, not a timing issue",
-				failed, completed, wantCompleted)
+			// [Fixed — failure_reason surfaced, live verification, M17-E
+			// Phase 17.7] Every prior FAILED repair job this debugging
+			// session was diagnosable only by catching a transient
+			// log.Printf("[REPAIR] ...") line in whatever terminal capture
+			// happened to exist for that run — repeatedly, across multiple
+			// live-verification runs, that line was missing or truncated
+			// by the time it needed reading. repair_jobs.failure_reason
+			// (added this same session, MarkJobComplete's new parameter)
+			// is a durable, queryable record of exactly that text; this
+			// t.Fatalf now reads it directly rather than pointing at a log
+			// dump that has repeatedly failed to actually contain the
+			// answer.
+			t.Fatalf("%d repair job(s) have status=FAILED (completed=%d, want %d):\n%s",
+				failed, completed, wantCompleted, formatFailedRepairJobs(ctx, db))
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("fewer than %d repair jobs completed within %s (completed=%d, failed=%d)", wantCompleted, timeout, completed, failed)
 		}
 		time.Sleep(10 * time.Second)
 	}
+}
+
+// formatFailedRepairJobs queries every FAILED repair_jobs row's chunk_id,
+// trigger_type, provider_id, and failure_reason and formats them for a
+// t.Fatalf message. See pollRepairCompleted's own doc comment for why this
+// replaces "see the microservice/provider log dump above" — that dump has
+// repeatedly not actually contained the answer.
+func formatFailedRepairJobs(ctx context.Context, db *sql.DB) string {
+	rows, err := db.QueryContext(ctx, `
+		SELECT chunk_id, trigger_type, provider_id, failure_reason
+		FROM repair_jobs
+		WHERE status = 'FAILED'
+		ORDER BY created_at`)
+	if err != nil {
+		return fmt.Sprintf("  (failed to query FAILED repair_jobs for detail: %v)", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var sb strings.Builder
+	for rows.Next() {
+		var chunkID []byte
+		var triggerType string
+		var providerID sql.NullString
+		var failureReason sql.NullString
+		if err := rows.Scan(&chunkID, &triggerType, &providerID, &failureReason); err != nil {
+			fmt.Fprintf(&sb, "  (scan error: %v)\n", err)
+			continue
+		}
+		reason := "(no failure_reason recorded)"
+		if failureReason.Valid {
+			reason = failureReason.String
+		}
+		provider := "(none)"
+		if providerID.Valid {
+			provider = providerID.String
+		}
+		fmt.Fprintf(&sb, "  chunk=%x trigger=%s provider=%s reason=%s\n", chunkID, triggerType, provider, reason)
+	}
+	if err := rows.Err(); err != nil {
+		fmt.Fprintf(&sb, "  (row iteration error: %v)\n", err)
+	}
+	if sb.Len() == 0 {
+		return "  (no FAILED rows found — race between this query and the COUNT(*) above; re-run)"
+	}
+	return sb.String()
 }
 
 // ── TestDemoTimeline — Session 16.1.1 ───────────────────────────────────────
