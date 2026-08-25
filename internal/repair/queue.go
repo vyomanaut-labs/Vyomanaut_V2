@@ -389,6 +389,20 @@ WHERE provider_id = $1 AND is_vetting_chunk = TRUE`
 // repair executor (Session 9.2.1) after the replacement upload succeeds
 // (success=true) or exhausts retries (success=false).
 //
+// [Added — failureReason, live verification, M17-E Phase 17.7 departure-
+// matrix debugging] Every prior FAILED repair job in this debugging session
+// was diagnosable only by catching a transient log.Printf("[REPAIR] job %s:
+// %v", ...) line (cmd/microservice/repair_loop.go) in whatever terminal
+// capture happened to exist for that specific test run — repeatedly, that
+// line was missing or truncated by the time it needed reading, turning
+// every failure into a re-run-and-hope-the-log-survives exercise. reason is
+// ignored when success is true (COMPLETED jobs have nothing to explain) and
+// stored verbatim into the new repair_jobs.failure_reason column when
+// false, making every future failure immediately diagnosable via
+// `SELECT chunk_id, trigger_type, failure_reason FROM repair_jobs WHERE
+// status = 'FAILED'` — a durable, queryable record instead of a race
+// against log retention.
+//
 // Error semantics: if jobID's started_at is still NULL (the job was never
 // dequeued via DequeueNextJob), the repair_jobs_completed_after_started CHECK
 // constraint itself rejects the UPDATE; that database error is wrapped and
@@ -399,16 +413,20 @@ WHERE provider_id = $1 AND is_vetting_chunk = TRUE`
 // hand-maintaining both independently).
 //
 // Goroutine-safe: yes.
-func MarkJobComplete(ctx context.Context, db *sql.DB, jobID uuid.UUID, success bool) error {
+func MarkJobComplete(ctx context.Context, db *sql.DB, jobID uuid.UUID, success bool, reason string) error {
 	status := "COMPLETED"
+	var failureReason *string
 	if !success {
 		status = "FAILED"
+		if reason != "" {
+			failureReason = &reason
+		}
 	}
 	const query = `
 UPDATE repair_jobs
-SET status = $1, completed_at = NOW()
+SET status = $1, completed_at = NOW(), failure_reason = $3
 WHERE job_id = $2`
-	if _, err := db.ExecContext(ctx, query, status, jobID); err != nil {
+	if _, err := db.ExecContext(ctx, query, status, jobID, failureReason); err != nil {
 		return fmt.Errorf("repair.MarkJobComplete: %w", err)
 	}
 	return nil
