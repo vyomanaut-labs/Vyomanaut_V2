@@ -184,8 +184,9 @@ func runRepairExecutorLoop(
 
 		holders, holderIDs, err := findSurvivingHolders(ctx, db, job.SegmentID, job.ProviderID)
 		if err != nil {
-			log.Printf("[REPAIR] job %s: find surviving holders: %v", job.JobID, err)
-			_ = repair.MarkJobComplete(ctx, db, job.JobID, false)
+			reason := fmt.Sprintf("find surviving holders: %v", err)
+			log.Printf("[REPAIR] job %s: %s", job.JobID, reason)
+			_ = repair.MarkJobComplete(ctx, db, job.JobID, false, reason)
 			release()
 			continue
 		}
