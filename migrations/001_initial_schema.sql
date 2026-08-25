@@ -827,6 +827,18 @@ CREATE TABLE repair_jobs (
     completed_at            TIMESTAMPTZ,
     -- NULL until the job reaches COMPLETED or FAILED (DM §8.19).
 
+    failure_reason          TEXT,
+    -- [Added, live verification, M17-E Phase 17.7] NULL unless status =
+    -- 'FAILED'. The wrapped Go error text MarkJobComplete's caller
+    -- (internal/repair/executor.go, every ExecuteRepairJob failure
+    -- branch) was already producing on every failure path anyway, now
+    -- persisted here instead of only ever reaching a transient
+    -- log.Printf line (cmd/microservice/repair_loop.go) that repeated
+    -- live-verification sessions found missing or truncated by the
+    -- time it needed reading. Deliberately unconstrained TEXT, not an
+    -- enum: these are free-form fmt.Errorf chains, not a fixed
+    -- vocabulary.
+
     -- ── Constraints ──────────────────────────────────────────────────────────
     CONSTRAINT repair_jobs_priority_matches_trigger CHECK (
         (trigger_type = 'EMERGENCY_FLOOR' AND priority = 'EMERGENCY')

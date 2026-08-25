@@ -1028,6 +1028,18 @@ CREATE TYPE otp_purpose AS ENUM (
 		"    completed_at            TIMESTAMPTZ,\n"+
 		"    -- NULL until the job reaches COMPLETED or FAILED (DM §8.19).\n"+
 		"\n"+
+		"    failure_reason          TEXT,\n"+
+		"    -- [Added, live verification, M17-E Phase 17.7] NULL unless status =\n"+
+		"    -- 'FAILED'. The wrapped Go error text MarkJobComplete's caller\n"+
+		"    -- (internal/repair/executor.go, every ExecuteRepairJob failure\n"+
+		"    -- branch) was already producing on every failure path anyway, now\n"+
+		"    -- persisted here instead of only ever reaching a transient\n"+
+		"    -- log.Printf line (cmd/microservice/repair_loop.go) that repeated\n"+
+		"    -- live-verification sessions found missing or truncated by the\n"+
+		"    -- time it needed reading. Deliberately unconstrained TEXT, not an\n"+
+		"    -- enum: these are free-form fmt.Errorf chains, not a fixed\n"+
+		"    -- vocabulary.\n"+
+		"\n"+
 		"    -- ── Constraints ──────────────────────────────────────────────────────────\n"+
 		"    CONSTRAINT repair_jobs_priority_matches_trigger CHECK (\n"+
 		"        (trigger_type = 'EMERGENCY_FLOOR' AND priority = 'EMERGENCY')\n"+
