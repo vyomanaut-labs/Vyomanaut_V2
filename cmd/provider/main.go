@@ -654,15 +654,74 @@ func runProviderInstance(ctx context.Context, profile config.NetworkProfile, cfg
 	}
 
 	// ── microservice public key (JWKS) + derived Peer ID ────────────────
-	msPublicKey, err := fetchMicroservicePublicKey(ctx, cfg.microserviceURL)
+	//
+	// [Fixed — F-17E-11, live verification, M17-E Phase 17.7 departure-
+	// matrix debugging] This was a single, un-retried HTTP call. Its own
+	// comment already correctly diagnosed the failure mode ("a transient
+	// microservice outage at startup should not prevent the daemon from
+	// starting") but the code that followed didn't actually retry —
+	// "and retrying" was aspirational, not implemented. The consequence is
+	// much larger than a delayed capability check: MicroserviceAuthorizer
+	// (handler_repair.go) is seeded ONCE, at startup, from this exact
+	// value (main.go: "authorizer.Set([]p2p.PeerID{microservicePeerID})"
+	// below, skipped entirely when this returns empty) and is never
+	// refreshed afterwards. A provider that loses this one race — plausible
+	// and apparently common, since main.go starts provider processes
+	// concurrently with the microservice, which live verification shows
+	// takes roughly 60-70s to report [READINESS] ready=true — has its
+	// repair-download and vetting-gc authorization permanently, silently
+	// fail-closed for its entire process lifetime, with every future
+	// legitimate request from the real microservice rejected as
+	// NOT_AUTHORISED (0x02). This was invisible until repair_jobs.
+	// failure_reason (this same session) started surfacing
+	// downloadShards' actual per-holder error text in test output — every
+	// prior repair failure in this codebase's live-verification history
+	// was diagnosed as generic timeout/contention because nothing
+	// distinguished "every holder rejected as not authorised" from "every
+	// holder was merely slow." TestViabilityRepairSucceedsWithTwoOfFiveOffline
+	// is exactly the shape of test most likely to expose this: two
+	// concurrent repairs draw on most of the remaining provider pool as
+	// download candidates, so it needs correspondingly more of that pool
+	// to have won its own startup race, not just one specific provider.
+	//
+	// Retried up to jwksFetchMaxAttempts times, jwksFetchRetryInterval
+	// apart — comfortably longer than the ~60-70s window above, while
+	// still bounded so a genuinely, durably unreachable microservice
+	// doesn't hang provider startup indefinitely. Preserves the exact
+	// same fail-closed behavior as before (nil key, empty authorizer, a
+	// WARNING log) if every attempt is exhausted — this changes how long
+	// the daemon tries before giving up, not what "giving up" means.
+	var msPublicKey ed25519.PublicKey
+fetchLoop:
+	for attempt := 1; attempt <= jwksFetchMaxAttempts; attempt++ {
+		msPublicKey, err = fetchMicroservicePublicKey(ctx, cfg.microserviceURL)
+		if err == nil {
+			break
+		}
+		if attempt < jwksFetchMaxAttempts {
+			log.Printf("[STARTUP]%s fetch microservice public key (attempt %d/%d): %v; retrying in %s",
+				logTag, attempt, jwksFetchMaxAttempts, err, jwksFetchRetryInterval)
+			// Labeled break, deliberately not a bare one: a bare break
+			// here would only break out of this select, not the
+			// enclosing for loop, silently turning ctx cancellation
+			// into "wait the rest of the interval, then try once more"
+			// instead of "stop now."
+			select {
+			case <-ctx.Done():
+				err = ctx.Err()
+				break fetchLoop
+			case <-time.After(jwksFetchRetryInterval):
+			}
+		}
+	}
 	if err != nil {
 		// Fail-closed, not fatal: every handler treats a nil/absent
 		// msPublicKey as "reject everything requiring verification"
 		// (handler_upload.go's verifyCapabilityTokenFrame,
 		// handler_repair.go/handler_vetting_gc.go's sig checks) rather than
-		// crashing the daemon — a transient microservice outage at startup
-		// should not prevent the daemon from starting and retrying.
-		log.Printf("[STARTUP]%s WARNING: could not fetch microservice public key (%v); all capability/audit/repair/GC verification will fail closed until this succeeds", logTag, err)
+		// crashing the daemon — a durable microservice outage should not
+		// prevent the daemon from starting.
+		log.Printf("[STARTUP]%s WARNING: could not fetch microservice public key after %d attempts (%v); all capability/audit/repair/GC verification will fail closed for this process's entire lifetime, not just until the microservice recovers — see this block's own F-17E-11 doc comment", logTag, jwksFetchMaxAttempts, err)
 	}
 	var microservicePeerID p2p.PeerID
 	if msPublicKey != nil {
@@ -1153,6 +1212,16 @@ func deriveLocalProviderIDBytes(peerID p2p.PeerID) [16]byte {
 // ── microservice JWKS fetch ────────────────────────────────────────────
 
 const providerHTTPClientTimeout = 10 * time.Second
+
+// [Added — F-17E-11] See the JWKS-fetch call site's own doc comment
+// (main(), "microservice public key (JWKS) + derived Peer ID") for the
+// full finding. 30 attempts * 3s = 90s of retry budget, comfortably
+// longer than live verification's observed ~60-70s microservice
+// [READINESS] startup window, while still bounded.
+const (
+	jwksFetchMaxAttempts   = 30
+	jwksFetchRetryInterval = 3 * time.Second
+)
 
 type jwksKeyDTO struct {
 	Kty string `json:"kty"`
