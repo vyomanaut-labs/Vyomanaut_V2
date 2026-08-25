@@ -715,7 +715,7 @@ func TestMarkJobCompleteSuccess(t *testing.T) {
 	verify := openVerifyDB(t)
 	jobID := enqueueAndDequeueOne(t, db)
 
-	if err := MarkJobComplete(context.Background(), db, jobID, true); err != nil {
+	if err := MarkJobComplete(context.Background(), db, jobID, true, ""); err != nil {
 		t.Fatalf("MarkJobComplete(success=true): %v", err)
 	}
 
@@ -738,14 +738,20 @@ func TestMarkJobCompleteFailure(t *testing.T) {
 	verify := openVerifyDB(t)
 	jobID := enqueueAndDequeueOne(t, db)
 
-	if err := MarkJobComplete(context.Background(), db, jobID, false); err != nil {
+	// [Extended — failure_reason, live verification, M17-E Phase 17.7]
+	// Asserts the new column directly, not just status/completed_at — this
+	// is the exact persistence path that replaces catching a transient
+	// log.Printf("[REPAIR] ...") line with a durable, queryable record.
+	const wantReason = "download: exhausted 3 attempts, last error: dial tcp: connection refused"
+	if err := MarkJobComplete(context.Background(), db, jobID, false, wantReason); err != nil {
 		t.Fatalf("MarkJobComplete(success=false): %v", err)
 	}
 
 	var status string
 	var completedAt sql.NullTime
-	if err := verify.QueryRow(`SELECT status, completed_at FROM repair_jobs WHERE job_id = $1`, jobID).
-		Scan(&status, &completedAt); err != nil {
+	var failureReason sql.NullString
+	if err := verify.QueryRow(`SELECT status, completed_at, failure_reason FROM repair_jobs WHERE job_id = $1`, jobID).
+		Scan(&status, &completedAt, &failureReason); err != nil {
 		t.Fatalf("query: %v", err)
 	}
 	if status != "FAILED" {
@@ -753,6 +759,9 @@ func TestMarkJobCompleteFailure(t *testing.T) {
 	}
 	if !completedAt.Valid {
 		t.Error("completed_at is NULL, want set")
+	}
+	if !failureReason.Valid || failureReason.String != wantReason {
+		t.Errorf("failure_reason = %+v, want %q", failureReason, wantReason)
 	}
 }
 
@@ -773,7 +782,7 @@ func TestMarkJobCompleteRejectsUnstartedJob(t *testing.T) {
 	}
 
 	// started_at is still NULL — never dequeued.
-	if err := MarkJobComplete(context.Background(), db, jobID, true); err == nil {
+	if err := MarkJobComplete(context.Background(), db, jobID, true, ""); err == nil {
 		t.Error("MarkJobComplete on an unstarted (QUEUED) job returned nil error, " +
 			"want the repair_jobs_completed_after_started CHECK to reject it")
 	}
