@@ -33,6 +33,7 @@ import (
 	"crypto/ed25519"
 	"encoding/binary"
 	"errors"
+	"log"
 	"sync"
 	"time"
 
@@ -156,8 +157,25 @@ func (h *RepairDownloadHandler) HandleStream(s p2p.Stream) {
 	_ = s.SetDeadline(time.Now().Add(repairDownloadTimeout))
 
 	// ── Step 1: peer authorization, BEFORE any lookup ───────────────────
+	//
+	// [Added — live verification, M17-E Phase 17.7] All three checks below
+	// (this one, Step 2's signature check, and the freshness check) write
+	// the identical repairStatusNotAuthorised (0x02) to the caller, by
+	// design (ADR-036: don't help an attacker distinguish "wrong peer"
+	// from "bad signature" from "stale request" over the wire). But that
+	// means repair_jobs.failure_reason (this same session) can only ever
+	// show "status 0x02" for a rejected download, from every holder,
+	// indistinguishably — repeatedly, across multiple live-verification
+	// runs, that was not enough to tell which of these three checks was
+	// actually failing. These log lines are the provider-side half of that
+	// same fix: each one is distinct, and provider logs are already
+	// captured and dumped in full on test failure
+	// (demo_timeline_test.go:680's "provider N log" dump), so the very
+	// next failure will show exactly which check rejected the request,
+	// without weakening the wire protocol's own deliberate ambiguity.
 	remotePeer := s.RemotePeer()
 	if h.authorizer == nil || !h.authorizer.IsRegisteredMicroservicePeer(remotePeer) {
+		log.Printf("[REPAIR-DOWNLOAD] rejected (not authorised): remote peer %s is not the registered microservice (authorizer populated: %v)", remotePeer, h.authorizer != nil)
 		h.writeStatusOnly(s, repairStatusNotAuthorised)
 		return
 	}
@@ -185,13 +203,29 @@ func (h *RepairDownloadHandler) HandleStream(s p2p.Stream) {
 	copy(sig[:], payload[sigOffset:sigOffset+repairAuthSigSize])
 
 	// ── Step 2: verify repair_auth_sig ───────────────────────────────────
-	if h.msPublicKey == nil || !h.verifyRepairAuthSig(chunkID, requestTsMs, sig) {
+	// [Added — live verification, same reasoning as Step 1's log line]
+	// Split into two distinct log lines, not one: "msPublicKey is nil"
+	// (JWKS fetch never succeeded for this process — F-17E-11's own
+	// failure mode) is a completely different bug class from "msPublicKey
+	// is present but the signature itself doesn't verify" (a genuine
+	// key-mismatch or signing-input bug) — collapsing them into one log
+	// line would reintroduce the exact ambiguity this fix exists to
+	// remove.
+	if h.msPublicKey == nil {
+		log.Printf("[REPAIR-DOWNLOAD] rejected (not authorised): no microservice public key available — JWKS fetch never succeeded for this process's lifetime (see F-17E-11)")
+		h.writeStatusOnly(s, repairStatusNotAuthorised)
+		return
+	}
+	if !h.verifyRepairAuthSig(chunkID, requestTsMs, sig) {
+		log.Printf("[REPAIR-DOWNLOAD] rejected (not authorised): repair_auth_sig verification failed for chunk=%x requestTsMs=%d microservicePeerID=%s", chunkID, requestTsMs, h.microservicePeerID)
 		h.writeStatusOnly(s, repairStatusNotAuthorised)
 		return
 	}
 
 	// ── ADR-036 addendum (between steps 2 and 3): freshness check ────────
-	if abs(time.Now().UnixMilli()-requestTsMs) > h.freshnessWindow.Milliseconds() {
+	if delta := abs(time.Now().UnixMilli() - requestTsMs); delta > h.freshnessWindow.Milliseconds() {
+		log.Printf("[REPAIR-DOWNLOAD] rejected (not authorised): request timestamp %d outside freshness window %s (now=%d, delta=%dms)",
+			requestTsMs, h.freshnessWindow, time.Now().UnixMilli(), delta)
 		h.writeStatusOnly(s, repairStatusNotAuthorised)
 		return
 	}
