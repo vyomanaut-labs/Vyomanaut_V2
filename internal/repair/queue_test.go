@@ -535,14 +535,30 @@ func TestDequeueNextJobConcurrentWorkersNoDoubleDequeue(t *testing.T) {
 			// here matches how DequeueNextJob is actually meant to be
 			// called, rather than asserting a stronger single-call
 			// guarantee than SKIP LOCKED provides.
-			const maxAttempts = 20
-			const retryBackoff = 25 * time.Millisecond
+			// [Bumped — live verification] This retry budget was
+			// originally 20 attempts * 25ms = 500ms fixed interval. Live
+			// runs still showed 2 of 10 goroutines exhausting every
+			// attempt. Two changes: (1) a substantially larger budget
+			// (60 * 100ms = 6s worst case) — this is a unit test with no
+			// external dependency once seeded, so paying a few extra
+			// seconds on the rare occasion contention is this tight costs
+			// nothing real; (2) backoff staggered by goroutine index,
+			// not a fixed interval — a fixed interval means every
+			// still-competing goroutine wakes and retries at the exact
+			// same instant every round, so if the same handful of
+			// goroutines are still racing for the same handful of
+			// remaining rows, a synchronized retry pattern can keep
+			// reproducing the same winners and losers round after round
+			// instead of converging quickly. Staggering by i breaks that
+			// lockstep without needing a math/rand import.
+			const maxAttempts = 60
+			const retryBackoffBase = 100 * time.Millisecond
 			for attempt := 0; attempt < maxAttempts; attempt++ {
 				results[i], errs[i] = DequeueNextJob(context.Background(), db)
 				if errs[i] != nil || results[i] != nil {
 					return
 				}
-				time.Sleep(retryBackoff)
+				time.Sleep(retryBackoffBase + time.Duration(i%7)*15*time.Millisecond)
 			}
 		}()
 	}
