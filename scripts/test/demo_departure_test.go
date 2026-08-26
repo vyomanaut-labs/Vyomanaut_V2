@@ -527,7 +527,7 @@ func TestDepartureDuringVettingProducesNoRepairJobs(t *testing.T) {
 // close (this file's own package header, and task item 4's own note).
 func TestDepartureMidUploadLeavesNoHalfRegisteredFile(t *testing.T) {
 	db := liveDB(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute) // [Bumped 20->30min, F-17E-17] widened alongside pollAllProvidersActive's own 15->25min bump just below -- see that call's comment for why
 	defer cancel()
 	resetDemoDatabase(t, ctx, db)
 
@@ -538,7 +538,7 @@ func TestDepartureMidUploadLeavesNoHalfRegisteredFile(t *testing.T) {
 	providers := startProviders(t, ctx, db, providerPath, ms.baseURL)
 	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 12*time.Minute) // [Fixed — F-17E-01] was 60s; see TestDemoTimeline's identical fix note (demo_timeline_test.go)
 	pollFirstAuditPass(t, ctx, db, 3*time.Minute)
-	pollAllProvidersActive(t, ctx, db, 15*time.Minute) // [Bumped 12->15min, F-17E-08] see demo_timeline_test.go:TestViabilityActiveTransitionAtTenMinutes for the arithmetic
+	pollAllProvidersActive(t, ctx, db, 25*time.Minute) // [Bumped 15->25min, F-17E-17] this session's clean_demo_tests_3/_4 runs showed 6/7 and 5/7 near-misses at 15 minutes under sustained multi-hour load, at THIS call site and demo_timeline_test.go's -- the same pattern already fixed once in demo_cli_test.go (F-17E-15) but not caught here at the time; the enclosing test's own outer ctx was widened to match, preserving its existing post-poll work margin (see that ctx line's own comment)
 
 	env := &departEnv{db: db, ms: ms, providers: providers, providerBinPath: providerPath, owner: owner}
 	departAt(t, ctx, env, phaseMidUpload, modeKill)
@@ -636,7 +636,7 @@ const demoDataShards = 3
 // apart from each other.
 func runDepartureAfterUpload(t *testing.T, mode departMode) {
 	db := liveDB(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute) // [Bumped 20->30min, F-17E-17] widened alongside pollAllProvidersActive's own 15->25min bump just below -- see that call's comment for why
 	defer cancel()
 	resetDemoDatabase(t, ctx, db)
 
@@ -647,7 +647,7 @@ func runDepartureAfterUpload(t *testing.T, mode departMode) {
 	providers := startProviders(t, ctx, db, providerPath, ms.baseURL)
 	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 12*time.Minute) // [Fixed — F-17E-01] was 60s; see TestDemoTimeline's identical fix note (demo_timeline_test.go)
 	pollFirstAuditPass(t, ctx, db, 3*time.Minute)
-	pollAllProvidersActive(t, ctx, db, 15*time.Minute) // [Bumped 12->15min, F-17E-08] see demo_timeline_test.go:TestViabilityActiveTransitionAtTenMinutes for the arithmetic
+	pollAllProvidersActive(t, ctx, db, 25*time.Minute) // [Bumped 15->25min, F-17E-17] this session's clean_demo_tests_3/_4 runs showed 6/7 and 5/7 near-misses at 15 minutes under sustained multi-hour load, at THIS call site and demo_timeline_test.go's -- the same pattern already fixed once in demo_cli_test.go (F-17E-15) but not caught here at the time; the enclosing test's own outer ctx was widened to match, preserving its existing post-poll work margin (see that ctx line's own comment)
 
 	fileID, masterSecret, plaintext := uploadTestFileTracked(t, ctx, ms, owner, testUploadBytes)
 	wantHash := sha256.Sum256(plaintext)
@@ -740,7 +740,7 @@ func TestReqD07FileRetrievableAfterProviderLossAndRepair(t *testing.T) {
 // accepted as a resolved Demo-track limitation.
 func TestReplacementProviderDepartsMidRepair(t *testing.T) {
 	db := liveDB(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Minute) // [Bumped 25->35min, F-17E-17] widened alongside pollAllProvidersActive's own 15->25min bump just below -- see that call's comment for why
 	defer cancel()
 	resetDemoDatabase(t, ctx, db)
 
@@ -751,7 +751,7 @@ func TestReplacementProviderDepartsMidRepair(t *testing.T) {
 	providers := startProviders(t, ctx, db, providerPath, ms.baseURL)
 	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 12*time.Minute) // [Fixed — F-17E-01] was 60s; see TestDemoTimeline's identical fix note (demo_timeline_test.go)
 	pollFirstAuditPass(t, ctx, db, 3*time.Minute)
-	pollAllProvidersActive(t, ctx, db, 15*time.Minute) // [Bumped 12->15min, F-17E-08] see demo_timeline_test.go:TestViabilityActiveTransitionAtTenMinutes for the arithmetic
+	pollAllProvidersActive(t, ctx, db, 25*time.Minute) // [Bumped 15->25min, F-17E-17] this session's clean_demo_tests_3/_4 runs showed 6/7 and 5/7 near-misses at 15 minutes under sustained multi-hour load, at THIS call site and demo_timeline_test.go's -- the same pattern already fixed once in demo_cli_test.go (F-17E-15) but not caught here at the time; the enclosing test's own outer ctx was widened to match, preserving its existing post-poll work margin (see that ctx line's own comment)
 
 	profile := config.SelectProfile("demo")
 	fileID, masterSecret, plaintext := uploadTestFileTracked(t, ctx, ms, owner, testUploadBytes)
@@ -798,7 +798,7 @@ func TestReplacementProviderDepartsMidRepair(t *testing.T) {
 // byte-identical content.
 func TestDepartureMidRetrievalStillGathersK(t *testing.T) {
 	db := liveDB(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute) // [Bumped 20->30min, F-17E-17] widened alongside pollAllProvidersActive's own 15->25min bump just below -- see that call's comment for why
 	defer cancel()
 	resetDemoDatabase(t, ctx, db)
 
@@ -809,7 +809,7 @@ func TestDepartureMidRetrievalStillGathersK(t *testing.T) {
 	providers := startProviders(t, ctx, db, providerPath, ms.baseURL)
 	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 12*time.Minute) // [Fixed — F-17E-01] was 60s; see TestDemoTimeline's identical fix note (demo_timeline_test.go)
 	pollFirstAuditPass(t, ctx, db, 3*time.Minute)
-	pollAllProvidersActive(t, ctx, db, 15*time.Minute) // [Bumped 12->15min, F-17E-08] see demo_timeline_test.go:TestViabilityActiveTransitionAtTenMinutes for the arithmetic
+	pollAllProvidersActive(t, ctx, db, 25*time.Minute) // [Bumped 15->25min, F-17E-17] this session's clean_demo_tests_3/_4 runs showed 6/7 and 5/7 near-misses at 15 minutes under sustained multi-hour load, at THIS call site and demo_timeline_test.go's -- the same pattern already fixed once in demo_cli_test.go (F-17E-15) but not caught here at the time; the enclosing test's own outer ctx was widened to match, preserving its existing post-poll work margin (see that ctx line's own comment)
 
 	fileID, masterSecret, plaintext := uploadTestFileTracked(t, ctx, ms, owner, testUploadBytes)
 	wantHash := sha256.Sum256(plaintext)
@@ -862,7 +862,7 @@ func TestDepartureMidRetrievalStillGathersK(t *testing.T) {
 // test.
 func TestTwoConcurrentDeparturesAtEmergencyFloor(t *testing.T) {
 	db := liveDB(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Minute) // [Bumped 30->40min, F-17E-17] widened alongside pollAllProvidersActive's own 15->25min bump just below -- see that call's comment for why
 	defer cancel()
 	resetDemoDatabase(t, ctx, db)
 
@@ -873,7 +873,7 @@ func TestTwoConcurrentDeparturesAtEmergencyFloor(t *testing.T) {
 	providers := startProviders(t, ctx, db, providerPath, ms.baseURL)
 	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 12*time.Minute) // [Fixed — F-17E-01] was 60s; see TestDemoTimeline's identical fix note (demo_timeline_test.go)
 	pollFirstAuditPass(t, ctx, db, 3*time.Minute)
-	pollAllProvidersActive(t, ctx, db, 15*time.Minute) // [Bumped 12->15min, F-17E-08] see demo_timeline_test.go:TestViabilityActiveTransitionAtTenMinutes for the arithmetic
+	pollAllProvidersActive(t, ctx, db, 25*time.Minute) // [Bumped 15->25min, F-17E-17] this session's clean_demo_tests_3/_4 runs showed 6/7 and 5/7 near-misses at 15 minutes under sustained multi-hour load, at THIS call site and demo_timeline_test.go's -- the same pattern already fixed once in demo_cli_test.go (F-17E-15) but not caught here at the time; the enclosing test's own outer ctx was widened to match, preserving its existing post-poll work margin (see that ctx line's own comment)
 
 	fileID, masterSecret, plaintext := uploadTestFileTracked(t, ctx, ms, owner, testUploadBytes)
 	wantHash := sha256.Sum256(plaintext)
