@@ -331,16 +331,30 @@ func ExecuteRepairJob(
 			replacementProviderID = candidateID
 			break
 		}
-		if !errors.Is(uploadErr, ErrReplacementStorageFull) {
+		// [Added, design council verdict on TestReplacementProviderDepartsMidRepair]
+		// ErrReplacementUnreachable joins ErrReplacementStorageFull as the
+		// second — and, deliberately, only the second — retryable upload
+		// failure: the candidate was never actually reached, so trying a
+		// different one risks nothing about replacementShard itself,
+		// exactly like the STORAGE_FULL case just below. Any OTHER upload
+		// error (a considered wire-level rejection, not a connection
+		// failure) still falls through to the hard failure below —
+		// blindly retrying a response the candidate actually gave could
+		// mask a genuine data- or encode-side bug instead of a simple
+		// unreachable-candidate case. See errors.go's own doc comment on
+		// ErrReplacementUnreachable for why this narrows, but does not
+		// close, the gap TestReplacementProviderDepartsMidRepair found.
+		if !errors.Is(uploadErr, ErrReplacementStorageFull) && !errors.Is(uploadErr, ErrReplacementUnreachable) {
 			wrapped := fmt.Errorf("repair.ExecuteRepairJob: upload: %w", uploadErr)
 			_ = MarkJobComplete(ctx, db, job.JobID, false, wrapped.Error())
 			return wrapped
 		}
 
-		// STORAGE_FULL: free the slot this candidate just claimed and never
-		// draw it again this job, then loop to try another candidate.
+		// Unreachable or STORAGE_FULL: free the slot this candidate just
+		// claimed and never draw it again this job, then loop to try
+		// another candidate.
 		if cleanupErr := abandonFailedReplacementAssignment(ctx, db, job.ChunkID, candidateID); cleanupErr != nil {
-			wrapped := fmt.Errorf("repair.ExecuteRepairJob: %w (cleaning up after STORAGE_FULL from %s)", cleanupErr, candidateID)
+			wrapped := fmt.Errorf("repair.ExecuteRepairJob: %w (cleaning up after failed candidate %s)", cleanupErr, candidateID)
 			_ = MarkJobComplete(ctx, db, job.JobID, false, wrapped.Error())
 			return wrapped
 		}
@@ -695,12 +709,12 @@ func uploadShard(
 ) error {
 	stream, err := transport.NewStream(ctx, replacementPeerID, chunkUploadProtocolID)
 	if err != nil {
-		return fmt.Errorf("open chunk-upload stream: %w", err)
+		return fmt.Errorf("open chunk-upload stream: %w: %w", ErrReplacementUnreachable, err)
 	}
 	defer func() { _ = stream.Close() }()
 
 	if err := stream.SetDeadline(time.Now().Add(chunkUploadTimeout)); err != nil {
-		return fmt.Errorf("set chunk-upload deadline: %w", err)
+		return fmt.Errorf("set chunk-upload deadline: %w: %w", ErrReplacementUnreachable, err)
 	}
 
 	// Frame 1 — UploadRequest: length(4) || chunk_id(32) || shard_index(4) || capability_token(72) || chunk_data(262144).
@@ -716,17 +730,17 @@ func uploadShard(
 	offset += capabilityTokenSize
 	copy(frame1[offset:], shardData)
 	if _, err := stream.Write(frame1); err != nil {
-		return fmt.Errorf("write UploadRequest: %w", err)
+		return fmt.Errorf("write UploadRequest: %w: %w", ErrReplacementUnreachable, err)
 	}
 
 	var lengthBuf [4]byte
 	if _, err := io.ReadFull(stream, lengthBuf[:]); err != nil {
-		return fmt.Errorf("read UploadResponse length: %w", err)
+		return fmt.Errorf("read UploadResponse length: %w: %w", ErrReplacementUnreachable, err)
 	}
 	length := binary.BigEndian.Uint32(lengthBuf[:])
 	body := make([]byte, length)
 	if _, err := io.ReadFull(stream, body); err != nil {
-		return fmt.Errorf("read UploadResponse body: %w", err)
+		return fmt.Errorf("read UploadResponse body: %w: %w", ErrReplacementUnreachable, err)
 	}
 	if len(body) < 1 {
 		return fmt.Errorf("UploadResponse: empty body")

@@ -734,6 +734,159 @@ func TestRepairExecutorRetriesOnStorageFullThenSucceeds(t *testing.T) {
 	}
 }
 
+// TestRepairExecutorRetriesOnUnreachableCandidateThenSucceeds is the
+// ErrReplacementUnreachable sibling of TestRepairExecutorRetriesOnStorageFullThenSucceeds
+// (design council verdict on TestReplacementProviderDepartsMidRepair, live
+// evidence: a chunk-upload stream reset by a replacement killed mid-transfer).
+// A candidate that cannot be reached at all — transport.NewStream itself
+// failing, never a wire response — must be retried exactly like a
+// STORAGE_FULL candidate: abandon its slot, try another, do not fail the
+// whole job on one unlucky draw.
+func TestRepairExecutorRetriesOnUnreachableCandidateThenSucceeds(t *testing.T) {
+	db := openTestDB(t)
+	verify := openVerifyDB(t)
+	exclude := allActiveProviderIDs(t, verify)
+
+	const missingIndex = 2
+	profile, engine, job, holders := setupFullPipelineFixture(t, db, missingIndex)
+	shardsByPeer := map[string][]byte{}
+	for _, h := range holders {
+		shardsByPeer[h.PeerID] = randShardDataStable(h.ShardIndex)
+	}
+
+	var mu sync.Mutex
+	var unreachableCandidate string // first peer we see on the upload protocol; connection fails exactly once
+	var uploadAttempts []string
+
+	transport := &mockTransport{
+		fn: func(peerID, protocolID string) (RepairStream, error) {
+			switch protocolID {
+			case repairDownloadProtocolID:
+				return &mockStream{resp: bytes.NewReader(encodeRepairDownloadResponse(repairDownloadStatusOK, shardsByPeer[peerID]))}, nil
+			case chunkUploadProtocolID:
+				mu.Lock()
+				defer mu.Unlock()
+				uploadAttempts = append(uploadAttempts, peerID)
+				if unreachableCandidate == "" {
+					unreachableCandidate = peerID
+					// Simulates exactly what killing a replacement
+					// mid-transfer produced live: transport.NewStream
+					// itself fails, never a wire response.
+					return nil, fmt.Errorf("read tcp: connection reset by peer")
+				}
+				return &mockStream{resp: bytes.NewReader(encodeUploadResponse(uploadStatusOK))}, nil
+			default:
+				return nil, fmt.Errorf("unexpected protocol %q", protocolID)
+			}
+		},
+	}
+
+	signingKey := genTestSigningKey(t)
+	if err := ExecuteRepairJob(context.Background(), db, profile, transport, engine, signingKey, "microservice-peer",
+		job, holders, exclude); err != nil {
+		t.Fatalf("ExecuteRepairJob: %v (one unreachable candidate must not fail the job)", err)
+	}
+
+	mu.Lock()
+	attempts := append([]string(nil), uploadAttempts...)
+	mu.Unlock()
+	if len(attempts) < 2 {
+		t.Fatalf("expected at least 2 upload attempts (one unreachable, one success), got %d: %v", len(attempts), attempts)
+	}
+
+	unreachableCandidateID, err := uuid.Parse(unreachableCandidate)
+	if err != nil {
+		t.Fatalf("parse unreachableCandidate peer ID as UUID: %v", err)
+	}
+
+	// The abandoned candidate's REPAIRING row must have been soft-deleted —
+	// otherwise it would permanently block this shard slot.
+	var abandonedStatus string
+	if err := verify.QueryRow(`SELECT status FROM chunk_assignments WHERE chunk_id = $1 AND provider_id = $2`,
+		job.ChunkID[:], unreachableCandidateID).Scan(&abandonedStatus); err != nil {
+		t.Fatalf("query abandoned candidate's row: %v", err)
+	}
+	if abandonedStatus != "DELETED" {
+		t.Errorf("abandoned candidate's chunk_assignments.status = %q, want DELETED", abandonedStatus)
+	}
+
+	var finalStatus string
+	var finalProviderID uuid.UUID
+	if err := verify.QueryRow(`SELECT status, provider_id FROM chunk_assignments WHERE chunk_id = $1 AND status = 'ACTIVE'`,
+		job.ChunkID[:]).Scan(&finalStatus, &finalProviderID); err != nil {
+		t.Fatalf("query final ACTIVE assignment: %v", err)
+	}
+	if finalProviderID == unreachableCandidateID {
+		t.Error("final ACTIVE assignment is still on the candidate that was unreachable")
+	}
+
+	var jobStatus string
+	if err := verify.QueryRow(`SELECT status FROM repair_jobs WHERE job_id = $1`, job.JobID).Scan(&jobStatus); err != nil {
+		t.Fatalf("query repair_jobs: %v", err)
+	}
+	if jobStatus != "COMPLETED" {
+		t.Errorf("repair_jobs.status = %q, want COMPLETED", jobStatus)
+	}
+}
+
+// TestRepairExecutorFailsAfterExhaustingUnreachableRetries is the
+// ErrReplacementUnreachable sibling of
+// TestRepairExecutorFailsAfterExhaustingStorageFullRetries: if EVERY
+// candidate is unreachable, ExecuteRepairJob must still give up after
+// exactly maxRepairReplacementRetries attempts, mark the job FAILED, and
+// wrap ErrReplacementUnreachable — the bounded retry mitigates, it does not
+// guarantee (see errors.go's own doc comment on ErrReplacementUnreachable
+// for why the residual gap is tracked as an open LTS research question).
+func TestRepairExecutorFailsAfterExhaustingUnreachableRetries(t *testing.T) {
+	db := openTestDB(t)
+	verify := openVerifyDB(t)
+	exclude := allActiveProviderIDs(t, verify)
+
+	const missingIndex = 1
+	profile, engine, job, holders := setupFullPipelineFixture(t, db, missingIndex)
+	shardsByPeer := map[string][]byte{}
+	for _, h := range holders {
+		shardsByPeer[h.PeerID] = randShardDataStable(h.ShardIndex)
+	}
+
+	var uploadAttempts int32
+	transport := &mockTransport{
+		fn: func(peerID, protocolID string) (RepairStream, error) {
+			switch protocolID {
+			case repairDownloadProtocolID:
+				return &mockStream{resp: bytes.NewReader(encodeRepairDownloadResponse(repairDownloadStatusOK, shardsByPeer[peerID]))}, nil
+			case chunkUploadProtocolID:
+				atomic.AddInt32(&uploadAttempts, 1)
+				return nil, fmt.Errorf("read tcp: connection reset by peer")
+			default:
+				return nil, fmt.Errorf("unexpected protocol %q", protocolID)
+			}
+		},
+	}
+
+	signingKey := genTestSigningKey(t)
+	err := ExecuteRepairJob(context.Background(), db, profile, transport, engine, signingKey, "microservice-peer",
+		job, holders, exclude)
+	if err == nil {
+		t.Fatal("ExecuteRepairJob succeeded despite every candidate being unreachable, want an error")
+	}
+	if !errors.Is(err, ErrReplacementUnreachable) {
+		t.Errorf("got %v, want an error wrapping ErrReplacementUnreachable", err)
+	}
+
+	if got := atomic.LoadInt32(&uploadAttempts); got != maxRepairReplacementRetries {
+		t.Errorf("upload attempts = %d, want exactly %d (the bounded retry budget)", got, maxRepairReplacementRetries)
+	}
+
+	var jobStatus string
+	if err := verify.QueryRow(`SELECT status FROM repair_jobs WHERE job_id = $1`, job.JobID).Scan(&jobStatus); err != nil {
+		t.Fatalf("query repair_jobs: %v", err)
+	}
+	if jobStatus != "FAILED" {
+		t.Errorf("repair_jobs.status = %q, want FAILED", jobStatus)
+	}
+}
+
 // TestRepairExecutorFailsAfterExhaustingStorageFullRetries verifies that
 // when EVERY candidate reports STORAGE_FULL, ExecuteRepairJob gives up after
 // exactly maxRepairReplacementRetries attempts, marks the job FAILED, wraps
