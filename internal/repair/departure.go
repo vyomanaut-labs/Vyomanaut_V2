@@ -295,9 +295,21 @@ func EnqueueRepairForRealChunks(ctx context.Context, db *sql.DB, profile config.
 		// audit/threshold-monitoring subsystem, out of scope here).
 		// profile.TotalShards-1 is used as a documented placeholder — one
 		// shard (this departing provider's) just went dark; if other
-		// shards for the same segment are ALSO already missing, a
-		// subsequent threshold/emergency scan is expected to catch that
-		// independently via its own, more accurate count.
+		// shards for the same segment are ALSO already missing, that is
+		// NOT currently caught independently. [Corrected, design council
+		// verdict on TestReplacementProviderDepartsMidRepair] This
+		// comment previously claimed "a subsequent threshold/emergency
+		// scan is expected to catch that independently via its own, more
+		// accurate count" — no such scan exists anywhere in this
+		// codebase; repair enqueueing is purely event-driven off a
+		// specific provider's departure (this function, its
+		// TriggerAnnouncedDeparture sibling in internal/api/provider.go,
+		// and the admin endpoint), with nothing that periodically
+		// re-examines a chunk's true replica count regardless of cause.
+		// The gap this false assumption papered over is now a tracked,
+		// open LTS research finding, not an unstated assumption — see
+		// Vyomanaut_Research for the finding this session's design
+		// council produced.
 		if err := EnqueueJob(ctx, db, profile, chunkID, a.segmentID, &providerID,
 			triggerType, profile.TotalShards-1); err != nil {
 			return fmt.Errorf("EnqueueJob for chunk: %w", err)
