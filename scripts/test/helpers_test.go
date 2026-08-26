@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -38,6 +39,217 @@ import (
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/erasure"
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/p2p"
 )
+
+// pollContextAlive fails the test immediately, with an unambiguous
+// diagnosis, the moment a poll loop's PARENT ctx has already expired or
+// been canceled. [F-17E-12] Every poll* helper in this package computes
+// its own local `deadline := time.Now().Add(timeout)` from a `timeout`
+// parameter that is entirely independent of `ctx`'s own (often much
+// shorter, and fixed at the calling test's start) deadline. Once ctx
+// dies -- most commonly because an earlier step in the same test (e.g.
+// pollReadiness, pollAllProvidersActive) consumed more of the test's
+// outer context.WithTimeout budget than the remaining steps have room
+// for -- db.QueryRowContext(ctx, ...) and http.NewRequestWithContext(ctx,
+// ...) both fail immediately on every subsequent iteration. Without this
+// check, that failure is indistinguishable from "condition not yet true"
+// to the loop, which just sleeps and retries -- uselessly, since every
+// following query fails the same way -- until ITS OWN local `timeout`
+// elapses, which can be many minutes later than when ctx actually died.
+// That gap has twice this session been long enough, summed across a
+// test's several sequential polls, to run the whole test past the
+// external `go test -timeout` watchdog -- the one failure mode that
+// skips t.Cleanup entirely and leaks the test's spawned
+// microservice/provider child processes (see this session's handoff,
+// section 3). Calling this at the top of every poll iteration turns
+// that silent, slow-motion budget exhaustion into an immediate,
+// correctly-attributed t.Fatalf instead.
+func pollContextAlive(t *testing.T, ctx context.Context, what string) {
+	t.Helper()
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("%s: the calling test's own context ended before the condition was met (%v) -- this is a test-budget problem (an earlier step in this test consumed more of its outer context.WithTimeout than later steps had room for), not evidence the condition itself would never have become true; widen the test's outer ctx or shorten an earlier step's poll budget", what, err)
+	}
+}
+
+// TestMain reaps daemons orphaned by an earlier, uncleanly-terminated
+// invocation of this same test binary before running any test in this
+// one. See reapOrphanedDaemons and the F-17E-14 note just below it for
+// why this is necessary and what it guards against.
+func TestMain(m *testing.M) {
+	reapOrphanedDaemons()
+	os.Exit(m.Run())
+}
+
+// ---- cross-invocation daemon registry -----------------------------------
+//
+// [F-17E-14] startMicroservice/startMicroserviceWithFlags/startProviders
+// spawn real, long-lived daemon processes whose t.Cleanup is the only
+// thing that ever kills them. t.Cleanup does not run when go test's own
+// -timeout watchdog fires (an unhandled panic on a goroutine that is not
+// the test's own goroutine, confirmed live this session) or when someone
+// Ctrl-Cs a stuck run. Either way the daemon is orphaned: it keeps
+// running its own background loops (departure detection, repair
+// dispatch, vetting GC) indefinitely, and this harness always recreates
+// the *same* fixed-name vyomanaut_test database on the same fixed port
+// for reproducibility -- so the orphan's own *sql.DB pool simply
+// reconnects the moment the next `docker compose up` brings Postgres
+// back, and it starts racing every subsequent, unrelated test's own
+// legitimate microservice for the same repair_jobs rows. That exact race
+// is confirmed (clean_demo_tests_2.txt, this session) to be the cause of
+// every "0x02 NOT_AUTHORISED" repair failure investigated so far: 4
+// distinct microservice peer IDs were rejected as unauthorised across
+// that run, and none of the 4 ever printed a legitimate
+// [STARTUP]/advertising line anywhere in that run's own log -- they
+// predated it entirely.
+//
+// This registry survives across separate `go test` invocations (unlike
+// t.TempDir(), which Go deletes when each test ends): every spawned
+// daemon is appended here the moment it starts, and TestMain reaps
+// whatever a *previous*, uncleanly-terminated invocation left behind
+// before this invocation starts any new one of its own. A PID alone is
+// not a safe kill target (PIDs recycle) -- each entry also records the
+// daemon's exact, randomly-named t.TempDir() binary path, and reap
+// re-verifies that a live process at the recorded PID still has that
+// *exact* path as its command line (via `ps -o args=`) before killing
+// it, so a coincidental PID reuse by an unrelated process can't be
+// mistaken for one of ours.
+//
+// Scope: only the two real daemons (microservice, provider) are tracked.
+// cmd/client invocations (startInteractiveClient, runClientJSON) are
+// short-lived one-shot or interactive processes with no background
+// loops and no registered P2P identity for a provider to ever accept or
+// reject -- an orphaned one just sits idle, harmless, and out of scope
+// for the bug this registry exists to prevent.
+var (
+	daemonRegistryPath = filepath.Join(os.TempDir(), "vyomanaut-integration-daemons.registry")
+	daemonRegistryMu   sync.Mutex
+)
+
+type registeredDaemon struct {
+	PID     int    `json:"pid"`
+	BinPath string `json:"bin_path"`
+	Kind    string `json:"kind"`
+}
+
+// registerDaemon durably records a just-started daemon so a future
+// invocation's TestMain can find and kill it if this invocation's own
+// t.Cleanup never gets the chance to. Called immediately after a
+// successful cmd.Start(), before anything else that could fail.
+func registerDaemon(pid int, binPath, kind string) {
+	daemonRegistryMu.Lock()
+	defer daemonRegistryMu.Unlock()
+	f, err := os.OpenFile(daemonRegistryPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		// Best-effort: a registry write failure must never fail the
+		// actual test or block starting the daemon it's trying to guard.
+		fmt.Printf("[F-17E-14] warning: could not open daemon registry %s: %v\n", daemonRegistryPath, err)
+		return
+	}
+	defer f.Close()
+	line, err := json.Marshal(registeredDaemon{PID: pid, BinPath: binPath, Kind: kind})
+	if err != nil {
+		return
+	}
+	_, _ = f.Write(append(line, '\n'))
+}
+
+// deregisterDaemon removes a daemon's entry once it has actually been
+// killed (either by this invocation's own cleanup, or by reap finding it
+// still alive from a previous one), so the registry doesn't grow
+// unboundedly across a long, healthy session.
+func deregisterDaemon(pid int) {
+	daemonRegistryMu.Lock()
+	defer daemonRegistryMu.Unlock()
+	raw, err := os.ReadFile(daemonRegistryPath)
+	if err != nil {
+		return // nothing to rewrite -- common case, file doesn't exist yet
+	}
+	var kept []string
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if line == "" {
+			continue
+		}
+		var d registeredDaemon
+		if err := json.Unmarshal([]byte(line), &d); err != nil {
+			continue // drop unparsable lines rather than fail the whole registry
+		}
+		if d.PID != pid {
+			kept = append(kept, line)
+		}
+	}
+	content := ""
+	if len(kept) > 0 {
+		content = strings.Join(kept, "\n") + "\n"
+	}
+	_ = os.WriteFile(daemonRegistryPath, []byte(content), 0o644)
+}
+
+// processStillMatches reports whether pid is currently a live process
+// whose command line (argv[0], via `ps -o args=`) is exactly binPath --
+// the identity check that makes reaping a possibly-recycled PID safe.
+func processStillMatches(pid int, binPath string) bool {
+	if pid <= 0 {
+		return false
+	}
+	if err := syscall.Kill(pid, 0); err != nil {
+		return false // no such process (already dead), or no permission
+	}
+	out, err := exec.Command("ps", "-o", "args=", "-p", fmt.Sprintf("%d", pid)).Output()
+	if err != nil {
+		return false
+	}
+	args := strings.TrimSpace(string(out))
+	return args == binPath || strings.HasPrefix(args, binPath+" ")
+}
+
+// reapOrphanedDaemons runs once, from TestMain, before this invocation
+// starts any daemon of its own. It kills anything a previous, uncleanly-
+// terminated invocation left behind, printing exactly what it killed so
+// this is never a silent, unverifiable mechanism -- if it fires, you'll
+// see it in go test -v's own output.
+func reapOrphanedDaemons() {
+	daemonRegistryMu.Lock()
+	defer daemonRegistryMu.Unlock()
+	raw, err := os.ReadFile(daemonRegistryPath)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if line == "" {
+			continue
+		}
+		var d registeredDaemon
+		if err := json.Unmarshal([]byte(line), &d); err != nil {
+			continue
+		}
+		if processStillMatches(d.PID, d.BinPath) {
+			fmt.Printf("[F-17E-14] reaping orphaned %s from an earlier, uncleanly-terminated test run: pid=%d bin=%s\n", d.Kind, d.PID, d.BinPath)
+			_ = syscall.Kill(-d.PID, syscall.SIGKILL) // whole process group first (see Setpgid at spawn time)
+			_ = syscall.Kill(d.PID, syscall.SIGKILL)  // fallback in case it wasn't its own group leader
+		}
+	}
+	// Whatever was in the registry has now either been freshly killed
+	// above or was already dead -- either way this invocation starts
+	// with a clean slate.
+	_ = os.Remove(daemonRegistryPath)
+}
+
+// killDaemonProcessGroup is what every daemon's t.Cleanup calls instead
+// of cmd.Process.Kill() directly: it kills the whole process group (see
+// Setpgid in startMicroservice/startMicroserviceWithFlags/startProviders)
+// and always deregisters, whether or not the kill itself found anything
+// still alive to kill, so a daemon that already exited on its own
+// doesn't leave a stale registry entry behind for a future run to trip
+// over.
+func killDaemonProcessGroup(cmd *exec.Cmd) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	pid := cmd.Process.Pid
+	_ = syscall.Kill(-pid, syscall.SIGKILL)
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	_ = cmd.Wait()
+	deregisterDaemon(pid)
+}
 
 // buildClientBinary builds cmd/client, mirroring buildBinaries' own
 // pattern exactly (same repo-root discovery, same t.TempDir() output
@@ -439,6 +651,7 @@ func startMicroserviceWithFlags(t *testing.T, ctx context.Context, binPath strin
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 
 	cmd := exec.CommandContext(ctx, binPath, extraArgs...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // F-17E-14: see startMicroservice's own note (demo_timeline_test.go)
 	cmd.Env = append(os.Environ(),
 		"VYOMANAUT_MODE=demo",
 		"PGHOST="+envOr("PGHOST", "localhost"),
@@ -470,9 +683,9 @@ func startMicroserviceWithFlags(t *testing.T, ctx context.Context, binPath strin
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start microservice: %v", err)
 	}
+	registerDaemon(cmd.Process.Pid, binPath, "microservice") // F-17E-14
 	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		killDaemonProcessGroup(cmd)
 		_ = logFile.Close()
 		if t.Failed() {
 			if content, readErr := os.ReadFile(logPath); readErr == nil {
@@ -731,6 +944,7 @@ func pollProviderRegistered(t *testing.T, ctx context.Context, db *sql.DB, index
 	phone := fmt.Sprintf("+91987653%04d", index)
 	deadline := time.Now().Add(timeout)
 	for {
+		pollContextAlive(t, ctx, "pollProviderRegistered")
 		var providerID uuid.UUID
 		err := db.QueryRowContext(ctx, `SELECT provider_id FROM providers WHERE phone_number = $1`, phone).Scan(&providerID)
 		if err == nil {
@@ -772,6 +986,7 @@ func pollReplacementAssignment(t *testing.T, ctx context.Context, db *sql.DB, ch
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
+		pollContextAlive(t, ctx, "pollReplacementAssignment")
 		var providerID uuid.UUID
 		err := db.QueryRowContext(ctx, `
 			SELECT provider_id FROM chunk_assignments

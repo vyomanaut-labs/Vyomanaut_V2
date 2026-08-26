@@ -84,6 +84,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -317,6 +318,7 @@ func startMicroservice(t *testing.T, ctx context.Context, binPath string) *liveM
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 
 	cmd := exec.CommandContext(ctx, binPath)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // F-17E-14: own process group, so a leaked daemon's own children (if any) die with it
 	cmd.Env = append(os.Environ(),
 		"VYOMANAUT_MODE=demo",
 		"PGHOST="+envOr("PGHOST", "localhost"),
@@ -356,9 +358,9 @@ func startMicroservice(t *testing.T, ctx context.Context, binPath string) *liveM
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start microservice: %v", err)
 	}
+	registerDaemon(cmd.Process.Pid, binPath, "microservice") // F-17E-14
 	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		killDaemonProcessGroup(cmd)
 		_ = logFile.Close()
 		if t.Failed() {
 			if content, readErr := os.ReadFile(logPath); readErr == nil {
@@ -653,6 +655,7 @@ func startProviders(t *testing.T, ctx context.Context, db *sql.DB, providerBinPa
 			fmt.Sprintf("--sim-base-port=%d", simBasePort),
 			"--registration-bearer-token="+token,
 		)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // F-17E-14: see startMicroservice's own note
 		logPath := filepath.Join(logDir, fmt.Sprintf("provider-%d.log", i))
 		logFile, err := os.Create(logPath)
 		if err != nil {
@@ -663,6 +666,7 @@ func startProviders(t *testing.T, ctx context.Context, db *sql.DB, providerBinPa
 		if err := cmd.Start(); err != nil {
 			t.Fatalf("start provider %d: %v", i, err)
 		}
+		registerDaemon(cmd.Process.Pid, providerBinPath, "provider") // F-17E-14
 		lp.cmds[i] = cmd
 		lp.logPaths[i] = logPath
 	}
@@ -670,8 +674,7 @@ func startProviders(t *testing.T, ctx context.Context, db *sql.DB, providerBinPa
 	t.Cleanup(func() {
 		for _, cmd := range lp.cmds {
 			if cmd != nil && cmd.Process != nil {
-				_ = cmd.Process.Kill()
-				_ = cmd.Wait()
+				killDaemonProcessGroup(cmd)
 			}
 		}
 		if t.Failed() {
@@ -701,6 +704,7 @@ func (lp *liveProviders) killProvider(t *testing.T, index int) {
 		t.Fatalf("kill provider %d: %v", index, err)
 	}
 	_ = cmd.Wait()
+	deregisterDaemon(cmd.Process.Pid) // F-17E-14: this provider is deliberately, successfully dead -- not a future run's problem to reap
 	lp.cmds[index] = nil
 }
 
@@ -739,6 +743,7 @@ func pollReadiness(t *testing.T, ctx context.Context, baseURL, adminAPIKey strin
 	deadline := time.Now().Add(timeout)
 	var last readinessResponse
 	for {
+		pollContextAlive(t, ctx, "pollReadiness")
 		httpReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/v1/admin/readiness", nil)
 		httpReq.Header.Set("X-Admin-API-Key", adminAPIKey)
 		resp, err := http.DefaultClient.Do(httpReq)
@@ -818,6 +823,7 @@ func pollFirstAuditPass(t *testing.T, ctx context.Context, db *sql.DB, timeout t
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
+		pollContextAlive(t, ctx, "pollFirstAuditPass")
 		var count int
 		err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM providers WHERE consecutive_audit_passes >= 1`).Scan(&count)
 		if err == nil && count > 0 {
@@ -834,6 +840,7 @@ func pollAllProvidersActive(t *testing.T, ctx context.Context, db *sql.DB, timeo
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
+		pollContextAlive(t, ctx, "pollAllProvidersActive")
 		var activeCount int
 		err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM providers WHERE status = 'ACTIVE'`).Scan(&activeCount)
 		if err == nil && activeCount == testSimCount {
@@ -854,6 +861,7 @@ func pollGCDelivered(t *testing.T, ctx context.Context, db *sql.DB, timeout time
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
+		pollContextAlive(t, ctx, "pollGCDelivered")
 		var lingering int
 		err := db.QueryRowContext(ctx, `
 SELECT COUNT(*) FROM chunk_assignments ca
@@ -877,6 +885,7 @@ func pollDeparted(t *testing.T, ctx context.Context, db *sql.DB, wantCount int, 
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
+		pollContextAlive(t, ctx, "pollDeparted")
 		var count int
 		err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM providers WHERE status = 'DEPARTED'`).Scan(&count)
 		if err == nil && count >= wantCount {
@@ -912,6 +921,7 @@ func pollRepairCompleted(t *testing.T, ctx context.Context, db *sql.DB, wantComp
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
+		pollContextAlive(t, ctx, "pollRepairCompleted")
 		var completed, failed int
 		_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM repair_jobs WHERE status = 'COMPLETED'`).Scan(&completed)
 		if completed >= wantCompleted {
