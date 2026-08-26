@@ -720,17 +720,24 @@ func TestReqD07FileRetrievableAfterProviderLossAndRepair(t *testing.T) {
 // against repair.RepairPromotionTimeout(profile) (3 minutes in demo)
 // rather than an arbitrary wait, per task item 1's own requirement.
 //
-// [Flag, read directly from internal/repair/executor.go, not inferred]
-// ExecuteRepairJob's own replacement-retry loop only retries on
-// ErrReplacementStorageFull (the M9 review's "Optional Fix A"); any OTHER
-// uploadShard failure — including a plain network failure from a
-// SIGKILLed replacement, which is exactly what this test causes — calls
-// MarkJobComplete(ctx, db, job.JobID, false) and returns immediately, with
-// no further retry attempted on that code path. Whether "the job must be
-// re-queued to a new replacement" (task item 1) is actually true today, or
-// is this session's own second finding (after Session 17.7.2's E-2), is
-// exactly what this test determines — the assertion below is not weakened
-// either way.
+// [Resolved, design council verdict, this session] This test's own doc
+// comment previously flagged, directly from the code rather than
+// inferred, that ExecuteRepairJob's replacement-retry loop only retried
+// ErrReplacementStorageFull, and that whether "the job must be re-queued
+// to a new replacement" was actually true was exactly what running this
+// test would determine. It determined: no — live evidence was a chunk-
+// upload stream reset by the killed replacement, MarkJobComplete(false)
+// called immediately, no retry. A design council convened on that
+// finding; the verdict added a second retryable sentinel,
+// ErrReplacementUnreachable, covering exactly this connection-level
+// failure shape (internal/repair/errors.go has the full reasoning,
+// including why a wire-level rejection code deliberately still is NOT
+// retried). This test's own assertion was never weakened either way, per
+// its original design — it now exercises the narrowed, but explicitly
+// NOT closed, version of the gap it found: the council's verdict is
+// tracked as an open LTS research finding (the bounded retry mitigates,
+// it does not guarantee against repeated compounding failures), not
+// accepted as a resolved Demo-track limitation.
 func TestReplacementProviderDepartsMidRepair(t *testing.T) {
 	db := liveDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
