@@ -118,9 +118,9 @@ func run(args []string, out, errOut io.Writer) int {
 		// the CLI (flagged in that session's own report).
 		return dispatchWatch(rest, out, errOut)
 	case "audit":
-		return notYetImplemented(errOut, "audit", "17.6.3")
+		return dispatchAudit(rest, out, errOut)
 	case "payout":
-		return notYetImplemented(errOut, "payout", "17.6.3")
+		return dispatchPayout(rest, out, errOut)
 	default:
 		printUsage(errOut)
 		return exitUsage

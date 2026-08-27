@@ -3,7 +3,6 @@
 // Tests:
 //   - TestUnknownSubcommandExitsUsage
 //   - TestNoArgsPrintsUsage
-//   - TestNotYetBuiltSubcommandsReturnHonestPlaceholder
 //   - TestAdminAPIKeyFlagWinsOverEnv
 package main
 
@@ -32,27 +31,13 @@ func TestNoArgsPrintsUsage(t *testing.T) {
 	}
 }
 
-// TestNotYetBuiltSubcommandsReturnHonestPlaceholder confirms audit/payout
-// — named in ADR-084 §D-1 but not built until Session 17.6.3 — are routed
-// to a real, disclosed placeholder rather than falling through to the
-// unknown-subcommand branch (which would look identical to a typo, not a
-// not-yet-built feature). "watch" was in this list prior to Session
-// 17.6.2; it is real now (watch.go) and gets its own tests in
-// dispatch_test.go's neighbours instead.
-func TestNotYetBuiltSubcommandsReturnHonestPlaceholder(t *testing.T) {
-	for _, sub := range []string{"audit", "payout"} {
-		t.Run(sub, func(t *testing.T) {
-			var out, errOut bytes.Buffer
-			code := run([]string{sub}, &out, &errOut)
-			if code == exitUsage {
-				t.Errorf("run([%s]) exit code = %d (usage error), want a distinct not-yet-implemented code", sub, code)
-			}
-			if !strings.Contains(errOut.String(), "not yet implemented") {
-				t.Errorf("run([%s]) stderr = %q, want it to say not yet implemented", sub, errOut.String())
-			}
-		})
-	}
-}
+// TestNotYetBuiltSubcommandsReturnHonestPlaceholder is retired as of
+// Session 17.6.3: "watch" left this list in Session 17.6.2, and "audit"/
+// "payout" — this session's own deliverables — are real now (audit.go,
+// payout.go) and get their own tests in audit_test.go/payout_test.go
+// instead. Session 17.6.1's notYetImplemented helper remains in
+// dispatch.go for ADR-084 §D-1 names not yet built by a future milestone,
+// but no subcommand currently routes to it.
 
 // TestAdminAPIKeyFlagWinsOverEnv confirms resolveAdminAPIKey's precedence
 // (the flag always wins over VYOMANAUT_ADMIN_API_KEY when both are given)
