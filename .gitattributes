@@ -1,0 +1,50 @@
+# .gitattributes — Vyomanaut V2
+#
+# Added during the cross-platform hardening pass following M17-E Session
+# 17.8.1, before this repo was first checked out on Windows and a Linux
+# VM alongside its existing Mac checkout. Without this file, Git's
+# platform-dependent autocrlf behavior can silently convert scripts/demo/
+# *.sh's line endings to CRLF on a Windows checkout — which then fails
+# cryptically under WSL/Git-Bash ("$'\r': command not found", or the
+# shebang line failing to resolve at all) — or, in the other direction,
+# convert *.ps1 files to LF-only, which some older Windows tooling still
+# mishandles. Pinning every text type's line ending explicitly, rather
+# than relying on each contributor's own Git config, is the fix.
+#
+# [REF: build_M17E.md Phase 17.8; cross-platform hardening pass following
+# Session 17.8.1]
+
+# Default: normalize everything Git considers text to LF in the
+# repository, checked out as LF unless overridden below.
+* text=auto eol=lf
+
+# Shell scripts — must stay LF; a CRLF shebang line fails to resolve on
+# every POSIX shell (bash, sh, WSL, Git Bash, macOS, Linux).
+*.sh    text eol=lf
+
+# PowerShell scripts — CRLF is PowerShell's own native convention and
+# what Windows-native editors (VS Code on Windows, ISE, Notepad) default
+# to; kept distinct from the LF default deliberately, not an oversight.
+*.ps1   text eol=crlf
+
+# Go source, SQL migrations, YAML/JSON config, and Markdown docs — always
+# LF, regardless of which machine last edited them. golangci-lint and
+# gofmt are also line-ending-sensitive in ways that make mixed endings a
+# needless source of diff noise across this project's three-machine fleet.
+*.go    text eol=lf
+*.sql   text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.mod   text eol=lf
+*.sum   text eol=lf
+
+# Binary — never touched by line-ending normalization regardless of
+# extension-based guessing.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.zip   binary
+*.exe   binary
