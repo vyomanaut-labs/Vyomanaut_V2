@@ -194,6 +194,108 @@ func computeReleaseForProvider(ctx context.Context, db, primaryDB *sql.DB, provi
 	return nil
 }
 
+// ProviderReleasePreview is one candidate provider's contribution to a
+// PreviewMonthlyRelease result — computed by the identical
+// score-multiplier/balance path computeReleaseForProvider itself uses, but
+// never calling ReleaseEscrow or markReleaseComputed.
+//
+// RemainderBP is the sub-paise fraction (out of basisPointsDivisor) that
+// integer division truncates from BalancePaise*MultiplierBP when computing
+// ReleasePaise — genuinely worth less than one paise, and never itself
+// separately tracked as money anywhere in the ledger, but shown explicitly
+// per Session 17.6.3's own task text ("the remainder must be shown, not
+// silently dropped"). The reconciling identity this value satisfies,
+// always, by construction, is:
+//
+//	BalancePaise*MultiplierBP == ReleasePaise*basisPointsDivisor + RemainderBP
+//
+// ScoreStale mirrors isScoreStale's own 60-minute freshness check (DM §7).
+// computeReleaseForProvider skips a stale-score provider entirely before
+// any real money moves; this preview does the opposite — it still computes
+// and shows the figure, flagged, because nothing here writes anything a
+// stale score could corrupt. Silently omitting a provider from a preview
+// table is the same "silently dropped" failure mode Session 17.6.3's task
+// text warns against, just at the row level instead of the paise level.
+type ProviderReleasePreview struct {
+	ProviderID     uuid.UUID
+	BalancePaise   int64
+	MultiplierBP   int64
+	ReleasePaise   int64
+	RemainderBP    int64
+	ScoreStale     bool
+}
+
+// PreviewMonthlyRelease is the read-only counterpart to ComputeMonthlyRelease,
+// added for M17-E's `operator payout` admin endpoint (ADR-084 Design Council
+// Addendum A — see internal/api/admin.go's AdminPayoutPreviewHandler for the
+// full framing of why a read-only preview, not a mutating trigger, is the
+// only safe way to show this on cmd/operator, which has no database
+// connection of its own, I-DEMO-1).
+//
+// It walks the identical pendingReleaseCandidates -> score lookup ->
+// releaseMultiplierBasisPoints -> providerBalance path
+// computeReleaseForProvider itself uses, so the number displayed on the
+// operator console can never drift from the real release algorithm — but it
+// calls neither ReleaseEscrow nor markReleaseComputed, so it cannot race the
+// real ticker-driven engine (RunReleaseComputationLoop): it writes nothing
+// for that engine to race against.
+//
+// [Flagged, deliberate] uses scoring.GetScore (replica-tolerant), not
+// scoring.GetScoreFromPrimary — DM §7's CRITICAL freshness note governs
+// actual payment decisions, and internal/api's RouterConfig carries only one
+// *sql.DB (cfg.DB), with no primary-only connection threaded through this
+// package at all. A stale-score preview number is surfaced via ScoreStale
+// below, never hidden; no money moves off this path regardless, so a
+// replica-routed read cannot misapply a real payment the way DM §7 warns
+// against for the mutating path.
+//
+// Every candidate is evaluated independently: one candidate's lookup
+// failure does not abort the batch; all errors are joined and returned
+// together, matching ComputeMonthlyRelease's own discipline.
+func PreviewMonthlyRelease(ctx context.Context, db *sql.DB) ([]ProviderReleasePreview, error) {
+	candidates, err := pendingReleaseCandidates(ctx, db)
+	if err != nil {
+		return nil, fmt.Errorf("payment.PreviewMonthlyRelease: %w", err)
+	}
+
+	var out []ProviderReleasePreview
+	var errs []error
+	for _, c := range candidates {
+		score, err := scoring.GetScore(ctx, db, c.providerID)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("provider %s: get score: %w", c.providerID, err))
+			continue
+		}
+
+		multiplierBP := releaseMultiplierBasisPoints(score.Score30dBasisPoints())
+		if score.DualWindowFlag {
+			if m7 := releaseMultiplierBasisPoints(score.Score7dBasisPoints()); m7 < multiplierBP {
+				multiplierBP = m7
+			}
+		}
+
+		balancePaise, err := providerBalance(ctx, db, c.providerID)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("provider %s: get balance: %w", c.providerID, err))
+			continue
+		}
+
+		numerator := balancePaise * multiplierBP
+		releasePaise := numerator / basisPointsDivisor
+		remainderBP := numerator - releasePaise*basisPointsDivisor
+
+		out = append(out, ProviderReleasePreview{
+			ProviderID:   c.providerID,
+			BalancePaise: balancePaise,
+			MultiplierBP: multiplierBP,
+			ReleasePaise: releasePaise,
+			RemainderBP:  remainderBP,
+			ScoreStale:   isScoreStale(score.ScoresAsOf),
+		})
+	}
+	return out, errors.Join(errs...)
+}
+
 func markReleaseComputed(ctx context.Context, db *sql.DB, auditPeriodID uuid.UUID) error {
 	_, err := db.ExecContext(ctx, `UPDATE audit_periods SET release_computed = TRUE WHERE id = $1`, auditPeriodID)
 	if err != nil {
