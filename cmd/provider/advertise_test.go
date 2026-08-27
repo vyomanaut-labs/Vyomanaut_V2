@@ -16,6 +16,79 @@ func TestAdvertiseResolution(t *testing.T) {
 	t.Run("TestAdvertiseAddrExplicitSkipsAutodetection", TestAdvertiseAddrExplicitSkipsAutodetection)
 	t.Run("TestAdvertiseAddrExplicitStripsPortComponent", TestAdvertiseAddrExplicitStripsPortComponent)
 	t.Run("TestRegistrationAndHeartbeatShareOneAdvertisedAddress", TestRegistrationAndHeartbeatShareOneAdvertisedAddress)
+	t.Run("TestAdvertiseAddrSkipsDockerDefaultBridgeSubnet", TestAdvertiseAddrSkipsDockerDefaultBridgeSubnet)
+	t.Run("TestAdvertiseAddrRefusesWhenOnlyDockerBridgeAvailable", TestAdvertiseAddrRefusesWhenOnlyDockerBridgeAvailable)
+	t.Run("TestIsSuspectVirtualInterfaceName", TestIsSuspectVirtualInterfaceName)
+}
+
+// TestAdvertiseAddrSkipsDockerDefaultBridgeSubnet verifies
+// firstNonLoopbackIPv4 treats Docker's own default bridge subnet
+// (172.17.0.0/16) the same as loopback/link-local — skipped in favor of a
+// later, genuinely routable address. [F-17E-20]
+func TestAdvertiseAddrSkipsDockerDefaultBridgeSubnet(t *testing.T) {
+	addrs := []net.Addr{
+		&net.IPNet{IP: net.ParseIP("127.0.0.1").To4(), Mask: net.CIDRMask(8, 32)},
+		&net.IPNet{IP: net.ParseIP("172.17.0.2").To4(), Mask: net.CIDRMask(16, 32)}, // docker0's typical first-container address
+		&net.IPNet{IP: net.ParseIP("192.168.1.42").To4(), Mask: net.CIDRMask(24, 32)},
+	}
+	got, ok := firstNonLoopbackIPv4(addrs)
+	if !ok {
+		t.Fatalf("firstNonLoopbackIPv4(%v) = (_, false), want a match", addrs)
+	}
+	if got != "192.168.1.42" {
+		t.Fatalf("firstNonLoopbackIPv4(%v) = %q, want %q (172.17.0.2 should have been skipped as Docker's default bridge)", addrs, got, "192.168.1.42")
+	}
+}
+
+// TestAdvertiseAddrRefusesWhenOnlyDockerBridgeAvailable verifies that if
+// the ONLY candidate is inside Docker's default bridge subnet,
+// firstNonLoopbackIPv4 reports no match at all — never a false-confidence
+// address a volunteer on another machine could not actually reach.
+// [F-17E-20]
+func TestAdvertiseAddrRefusesWhenOnlyDockerBridgeAvailable(t *testing.T) {
+	addrs := []net.Addr{
+		&net.IPNet{IP: net.ParseIP("172.17.0.2").To4(), Mask: net.CIDRMask(16, 32)},
+	}
+	if _, ok := firstNonLoopbackIPv4(addrs); ok {
+		t.Fatalf("firstNonLoopbackIPv4(%v) = (_, true), want (_, false) — 172.17.0.2 is Docker's own default bridge subnet", addrs)
+	}
+}
+
+// TestIsSuspectVirtualInterfaceName is a table test over every interface
+// name pattern this project has actually observed across its own
+// cross-platform test fleet (Mac, Windows, and a Linux VMware guest, all
+// running Docker Desktop or VMware), plus a handful of ordinary real
+// interface names that must NOT be flagged. [F-17E-20]
+func TestIsSuspectVirtualInterfaceName(t *testing.T) {
+	suspect := []string{
+		"docker0",
+		"br-3f8a9c2b1d4e",
+		"veth3f8a9c2",
+		"vmnet1",
+		"vmnet8",
+		"vboxnet0",
+		"vEthernet (Default Switch)",
+		"vEthernet (WSL)",
+	}
+	for _, name := range suspect {
+		if !isSuspectVirtualInterfaceName(name) {
+			t.Errorf("isSuspectVirtualInterfaceName(%q) = false, want true", name)
+		}
+	}
+
+	real := []string{
+		"en0",
+		"eth0",
+		"Wi-Fi",
+		"Ethernet",
+		"wlan0",
+		"eno1",
+	}
+	for _, name := range real {
+		if isSuspectVirtualInterfaceName(name) {
+			t.Errorf("isSuspectVirtualInterfaceName(%q) = true, want false (this is a real interface name)", name)
+		}
+	}
 }
 
 // TestAdvertiseAddrPrefersNonLoopbackIPv4 verifies firstNonLoopbackIPv4
