@@ -99,10 +99,10 @@ func renderPayout(out io.Writer, resp payoutPreviewResponseBody, jsonOutput bool
 	if jsonOutput {
 		type payoutJSONResult struct {
 			payoutPreviewResponseBody
-			TotalReleasePaise  int64 `json:"total_release_paise"`
-			TotalRemainderBP   int64 `json:"total_remainder_bp"`
-			TotalNumeratorBP   int64 `json:"total_numerator_bp"`
-			ReconciledExactly  bool  `json:"reconciled_exactly"`
+			TotalReleasePaise int64 `json:"total_release_paise"`
+			TotalRemainderBP  int64 `json:"total_remainder_bp"`
+			TotalNumeratorBP  int64 `json:"total_numerator_bp"`
+			ReconciledExactly bool  `json:"reconciled_exactly"`
 		}
 		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")

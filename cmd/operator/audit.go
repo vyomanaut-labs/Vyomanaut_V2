@@ -39,6 +39,8 @@ import (
 	"io"
 )
 
+const auditArgCount = 2
+
 // auditReceiptStatusPending is the one truthful status this command can
 // ever render: a freshly-dispatched challenge's audit_receipts row is
 // always PENDING (audit.WriteReceiptPhase1), and this codebase has no path
@@ -61,7 +63,7 @@ func dispatchAudit(args []string, out, errOut io.Writer) int {
 	}
 
 	rest := fs.Args()
-	if len(rest) != 2 {
+	if len(rest) != auditArgCount {
 		fprintln(errOut, "usage: operator audit <provider_id> <chunk_id> [flags]")
 		return exitUsage
 	}

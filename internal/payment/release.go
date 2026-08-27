@@ -217,12 +217,12 @@ func computeReleaseForProvider(ctx context.Context, db, primaryDB *sql.DB, provi
 // table is the same "silently dropped" failure mode Session 17.6.3's task
 // text warns against, just at the row level instead of the paise level.
 type ProviderReleasePreview struct {
-	ProviderID     uuid.UUID
-	BalancePaise   int64
-	MultiplierBP   int64
-	ReleasePaise   int64
-	RemainderBP    int64
-	ScoreStale     bool
+	ProviderID   uuid.UUID
+	BalancePaise int64
+	MultiplierBP int64
+	ReleasePaise int64
+	RemainderBP  int64
+	ScoreStale   bool
 }
 
 // PreviewMonthlyRelease is the read-only counterpart to ComputeMonthlyRelease,

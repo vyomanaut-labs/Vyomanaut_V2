@@ -132,7 +132,8 @@ func run(args []string, out, errOut io.Writer) int {
 // honest-placeholder judgment router.go's stub501 already establishes for
 // not-yet-built server endpoints, applied here to not-yet-built CLI
 // subcommands instead of a route that silently doesn't exist.
-func notYetImplemented(errOut io.Writer, name, session string) int {
-	fprintf(errOut, "vyomanaut operator %s: not yet implemented (Session %s)\n", name, session)
-	return 1
-}
+// Commented out to avoid unused errors by golangci-lint
+// func notYetImplemented(errOut io.Writer, name, session string) int {
+// 	fprintf(errOut, "vyomanaut operator %s: not yet implemented (Session %s)\n", name, session)
+// 	return 1
+// }
