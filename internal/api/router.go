@@ -239,10 +239,17 @@ func NewRouter(cfg RouterConfig) *http.ServeMux {
 	auditStatsHandler := NewAuditStatsHandler(cfg.DB)
 	vettingStatusHandler := NewVettingStatusHandler(cfg.DB)
 	vettingGCRetryHandler := NewVettingGCRetryHandler(cfg.DB)
-	// M17-E Session 17.6.1, ADR-084 §D-2a: the one new admin endpoint this
-	// milestone authorises — cmd/operator's `shards <file_id>` command is
+	// M17-E Session 17.6.1, ADR-084 §D-2a: the one new admin endpoint that
+	// milestone authorised — cmd/operator's `shards <file_id>` command is
 	// its only intended caller.
 	shardsHandler := NewAdminFileShardsHandler(cfg.DB, cfg.Profile)
+	// M17-E Session 17.6.3, ADR-084 Design Council Addendum A: a second,
+	// deliberately reviewed exception to that session's own
+	// NO_ADDITIONAL_ROUTES gate — see admin.go's own header note on this
+	// handler for the full framing (why a read-only preview, not a
+	// mutating trigger). cmd/operator's `payout` command is its only
+	// intended caller.
+	payoutPreviewHandler := NewAdminPayoutPreviewHandler(cfg.DB)
 
 	mux.Handle("GET /api/v1/admin/repair/queue", admin(repairQueueHandler.HandleQueue))              // getRepairQueue
 	mux.Handle("POST /api/v1/admin/repair/trigger", admin(manualRepairTriggerHandler.HandleTrigger)) // triggerRepair
@@ -251,6 +258,7 @@ func NewRouter(cfg RouterConfig) *http.ServeMux {
 	mux.Handle("GET /api/v1/admin/vetting/status", admin(vettingStatusHandler.HandleStatus))         // getVettingStatus
 	mux.Handle("POST /api/v1/admin/vetting/gc/retry", admin(vettingGCRetryHandler.HandleRetry))      // retryVettingGC
 	mux.Handle("GET /api/v1/admin/file/{file_id}/shards", admin(shardsHandler.HandleShards))         // getFileShards
+	mux.Handle("GET /api/v1/admin/payout/preview", admin(payoutPreviewHandler.HandlePreview))        // getPayoutPreview (M17-E 17.6.3, ADR-084 addendum A)
 
 	// ── Webhook: signature auth (IC §7), confirmed absent from OAS by design ──
 	mux.HandleFunc("POST /webhooks/razorpay", stub501)
