@@ -76,6 +76,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -83,6 +84,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/payment"
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/repair"
 )
 
@@ -1210,6 +1212,108 @@ func (h *AdminFileShardsHandler) HandleShards(w http.ResponseWriter, r *http.Req
 		OriginalSizeBytes:     originalSizeBytes,
 		DisplayNameCiphertext: hexPtrOrNil(displayNameCiphertext),
 		Shards:                shards,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// M17-E Session 17.6.3 — GET /api/v1/admin/payout/preview
+// (ADR-084 Design Council Addendum A, "operator payout data source")
+//
+// This is the one endpoint the Session 17.6.3 design council authorised as
+// a deliberate, reviewed exception to that session's own NO_ADDITIONAL_ROUTES
+// gate — see the addendum for the full framing. Its existence is narrowly
+// justified: no other AdminApiKey endpoint exposes any per-provider escrow
+// figure (adminProviderItem carries none), cmd/operator has no database
+// connection of its own to read one directly (I-DEMO-1), and the real
+// charge/release engines only ever run from their own background tickers
+// (charge.go, release.go) — an admin-triggerable re-run of that engine would
+// race the ticker and risk a double-charge/double-release, which the
+// council's Adversary seat flagged as strictly worse than a missing panel.
+//
+// This handler is therefore read-only by construction: it calls
+// payment.PreviewMonthlyRelease, the release-side release-multiplier
+// computation the session's own task text quotes verbatim
+// (releasePaise = balancePaise * multiplierBP / 10000), which touches no
+// idempotency key and issues no INSERT/UPDATE anywhere (see that function's
+// own doc comment). It cannot race the ticker because it never writes
+// anything for the ticker to race against.
+//
+// Pagination: the Scale Advocate seat flagged that summing every current
+// release candidate in one synchronous request is a demo-scale-only
+// pattern — fine at 5-7 providers, not something to promote unexamined into
+// the LTS track. [UNDERIVED, ADR-077 assumption-debt convention] no limit is
+// enforced here yet; a prod-track revisit needs the same limit/cursor shape
+// listAdminProviders already carries.
+// ═══════════════════════════════════════════════════════════════════════
+
+// adminPayoutPreviewProviderItem's ReleasePaise*10000 + RemainderBP always
+// equals BalancePaise*MultiplierBP exactly — the sub-paise reconciliation
+// identity payment.PreviewMonthlyRelease guarantees by construction; see
+// that function's own doc comment. ScoreStale is surfaced, never used to
+// hide the row (this session's task text: "the remainder must be shown,
+// not silently dropped" applies at the row level too).
+type adminPayoutPreviewProviderItem struct {
+	ProviderID   uuid.UUID `json:"provider_id"`
+	BalancePaise int64     `json:"balance_paise"`
+	MultiplierBP int64     `json:"multiplier_bp"`
+	ReleasePaise int64     `json:"release_paise"`
+	RemainderBP  int64     `json:"remainder_bp"`
+	ScoreStale   bool      `json:"score_stale"`
+}
+
+type adminPayoutPreviewResponseBody struct {
+	BillingPeriod string                           `json:"billing_period"`
+	Providers     []adminPayoutPreviewProviderItem `json:"providers"`
+}
+
+// AdminPayoutPreviewHandler serves GET /api/v1/admin/payout/preview.
+type AdminPayoutPreviewHandler struct {
+	db *sql.DB
+}
+
+func NewAdminPayoutPreviewHandler(db *sql.DB) *AdminPayoutPreviewHandler {
+	return &AdminPayoutPreviewHandler{db: db}
+}
+
+func (h *AdminPayoutPreviewHandler) HandlePreview(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	previews, err := payment.PreviewMonthlyRelease(ctx, h.db)
+	if err != nil {
+		slog.Error("AdminPayoutPreviewHandler.HandlePreview: preview failed", "error", err)
+		WriteError(w, http.StatusInternalServerError, ErrInternal, "payout preview failed", nil, "", nil)
+		return
+	}
+
+	// Deterministic order, same convention splitByLargestRemainder itself
+	// uses for its own provider_id-ascending iteration (ADR-061 Open
+	// constraints) — pendingReleaseCandidates' own SQL carries no ORDER BY.
+	sort.Slice(previews, func(i, j int) bool {
+		return previews[i].ProviderID.String() < previews[j].ProviderID.String()
+	})
+
+	providers := make([]adminPayoutPreviewProviderItem, 0, len(previews))
+	for _, p := range previews {
+		providers = append(providers, adminPayoutPreviewProviderItem{
+			ProviderID:   p.ProviderID,
+			BalancePaise: p.BalancePaise,
+			MultiplierBP: p.MultiplierBP,
+			ReleasePaise: p.ReleasePaise,
+			RemainderBP:  p.RemainderBP,
+			ScoreStale:   p.ScoreStale,
+		})
+	}
+
+	resp := adminPayoutPreviewResponseBody{
+		// Display-only label — PreviewMonthlyRelease's own candidate query
+		// (pendingReleaseCandidates) filters by release_computed = FALSE, not
+		// by any billing-period string, so this never affects which rows
+		// come back.
+		BillingPeriod: time.Now().UTC().Format("2006-01"),
+		Providers:     providers,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
