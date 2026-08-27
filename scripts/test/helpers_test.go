@@ -27,7 +27,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -184,21 +183,16 @@ func deregisterDaemon(pid int) {
 }
 
 // processStillMatches reports whether pid is currently a live process
-// whose command line (argv[0], via `ps -o args=`) is exactly binPath --
-// the identity check that makes reaping a possibly-recycled PID safe.
+// whose command line is exactly binPath — the identity check that makes
+// reaping a possibly-recycled PID safe. The actual liveness+identity
+// mechanism is platform-specific (daemon_process_unix.go /
+// daemon_process_windows.go); this wrapper only owns the shared
+// pid <= 0 guard.
 func processStillMatches(pid int, binPath string) bool {
 	if pid <= 0 {
 		return false
 	}
-	if err := syscall.Kill(pid, 0); err != nil {
-		return false // no such process (already dead), or no permission
-	}
-	out, err := exec.Command("ps", "-o", "args=", "-p", fmt.Sprintf("%d", pid)).Output()
-	if err != nil {
-		return false
-	}
-	args := strings.TrimSpace(string(out))
-	return args == binPath || strings.HasPrefix(args, binPath+" ")
+	return processMatchesOS(pid, binPath)
 }
 
 // reapOrphanedDaemons runs once, from TestMain, before this invocation
@@ -223,8 +217,7 @@ func reapOrphanedDaemons() {
 		}
 		if processStillMatches(d.PID, d.BinPath) {
 			fmt.Printf("[F-17E-14] reaping orphaned %s from an earlier, uncleanly-terminated test run: pid=%d bin=%s\n", d.Kind, d.PID, d.BinPath)
-			_ = syscall.Kill(-d.PID, syscall.SIGKILL) // whole process group first (see Setpgid at spawn time)
-			_ = syscall.Kill(d.PID, syscall.SIGKILL)  // fallback in case it wasn't its own group leader
+			killProcessGroupOS(d.PID) // whole process tree (see setNewProcessGroup at spawn time)
 		}
 	}
 	// Whatever was in the registry has now either been freshly killed
@@ -234,19 +227,18 @@ func reapOrphanedDaemons() {
 }
 
 // killDaemonProcessGroup is what every daemon's t.Cleanup calls instead
-// of cmd.Process.Kill() directly: it kills the whole process group (see
-// Setpgid in startMicroservice/startMicroserviceWithFlags/startProviders)
-// and always deregisters, whether or not the kill itself found anything
-// still alive to kill, so a daemon that already exited on its own
-// doesn't leave a stale registry entry behind for a future run to trip
-// over.
+// of cmd.Process.Kill() directly: it kills the whole process tree (see
+// setNewProcessGroup in startMicroservice/startMicroserviceWithFlags/
+// startProviders) and always deregisters, whether or not the kill itself
+// found anything still alive to kill, so a daemon that already exited on
+// its own doesn't leave a stale registry entry behind for a future run to
+// trip over.
 func killDaemonProcessGroup(cmd *exec.Cmd) {
 	if cmd == nil || cmd.Process == nil {
 		return
 	}
 	pid := cmd.Process.Pid
-	_ = syscall.Kill(-pid, syscall.SIGKILL)
-	_ = syscall.Kill(pid, syscall.SIGKILL)
+	killProcessGroupOS(pid)
 	_ = cmd.Wait()
 	deregisterDaemon(pid)
 }
@@ -651,7 +643,7 @@ func startMicroserviceWithFlags(t *testing.T, ctx context.Context, binPath strin
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 
 	cmd := exec.CommandContext(ctx, binPath, extraArgs...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // F-17E-14: see startMicroservice's own note (demo_timeline_test.go)
+	setNewProcessGroup(cmd) // F-17E-14: see startMicroservice's own note (demo_timeline_test.go)
 	cmd.Env = append(os.Environ(),
 		"VYOMANAUT_MODE=demo",
 		"PGHOST="+envOr("PGHOST", "localhost"),

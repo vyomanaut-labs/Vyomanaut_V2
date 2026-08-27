@@ -84,7 +84,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -318,7 +317,7 @@ func startMicroservice(t *testing.T, ctx context.Context, binPath string) *liveM
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 
 	cmd := exec.CommandContext(ctx, binPath)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // F-17E-14: own process group, so a leaked daemon's own children (if any) die with it
+	setNewProcessGroup(cmd) // F-17E-14: own process group/tree, so a leaked daemon's own children (if any) die with it
 	cmd.Env = append(os.Environ(),
 		"VYOMANAUT_MODE=demo",
 		"PGHOST="+envOr("PGHOST", "localhost"),
@@ -655,7 +654,7 @@ func startProviders(t *testing.T, ctx context.Context, db *sql.DB, providerBinPa
 			fmt.Sprintf("--sim-base-port=%d", simBasePort),
 			"--registration-bearer-token="+token,
 		)
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // F-17E-14: see startMicroservice's own note
+		setNewProcessGroup(cmd) // F-17E-14: see startMicroservice's own note
 		logPath := filepath.Join(logDir, fmt.Sprintf("provider-%d.log", i))
 		logFile, err := os.Create(logPath)
 		if err != nil {
