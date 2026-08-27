@@ -1,0 +1,478 @@
+Script started on Wed Aug 26 23:02:41 2026
+aryan@Aloks-MacBook-Air Vyomanaut_V2 % pkill -x microservice 2>/dev/null
+                pkill -x provider 2>/dev/null
+                sleep 1
+sleep 1x provider 2>/dev/nullnull
+aryan@Aloks-MacBook-Air Vyomanaut_V2 % docker compose -f deployments/dev/docker-compose.yml down -v
+                docker compose -f deployments/dev/docker-compose.yml up -d postgresdocker compose -f deployments/dev/docker-compose.yml down -v
+[+] down 0/1
+ ⠋ Container dev-postgres-1 Stopping                             0.0s
+[+] down 0/1
+ ⠙ Container dev-postgres-1 Stopping                             0.1s
+[+] down 0/1
+ ⠹ Container dev-postgres-1 Stopping                             0.2s
+[+] down 0/1
+ ⠸ Container dev-postgres-1 Stopping                             0.3s
+[+] down 0/1
+ ⠼ Container dev-postgres-1 Stopping                             0.4s
+[+] down 0/1
+ ⠴ Container dev-postgres-1 Removing                             0.5s
+[+] down 0/1
+ ⠦ Container dev-postgres-1 Removing                             0.6s
+[+] down 0/1
+ ⠧ Container dev-postgres-1 Removing                             0.7s
+[+] down 1/2
+ ✔ Container dev-postgres-1 Removed                              0.8s
+ ⠋ Network dev_default      Removing                             0.0s
+[+] down 1/2
+ ✔ Container dev-postgres-1 Removed                              0.8s
+ ⠋ Network dev_default      Removing                             0.1s
+[+] down 1/2
+ ✔ Container dev-postgres-1 Removed                              0.8s
+ ⠙ Network dev_default      Removing                             0.2s
+[+] down 2/2
+ ✔ Container dev-postgres-1 Removed                              0.8s
+ ✔ Network dev_default      Removed                              0.2s
+[+] up 1/2
+ ✔ Network dev_default      Created                              0.0s
+ ⠋ Container dev-postgres-1 Creating                             0.0s
+[+] up 1/2
+ ✔ Network dev_default      Created                              0.0s
+ ⠙ Container dev-postgres-1 Creating                             0.1s
+[+] up 1/2
+ ✔ Network dev_default      Created                              0.0s
+ ⠹ Container dev-postgres-1 Starting                             0.2s
+[+] up 1/2
+ ✔ Network dev_default      Created                              0.0s
+ ⠸ Container dev-postgres-1 Starting                             0.3s
+[+] up 2/2
+ ✔ Network dev_default      Created                              0.0s
+ ✔ Container dev-postgres-1 Started                              0.4s
+aryan@Aloks-MacBook-Air Vyomanaut_V2 % >....                         
+                export CGO_LDFLAGS="-L$HOME/rocksdb/lib -L$(brew --prefix)/lib -L$(brew --prefix snappy)/lib \
+                  -Wl,-rpath,$HOME/rocksdb/lib -Wl,-rpath,$(brew --prefix)/lib -Wl,-rpath,$(brew --prefix snappy)/lib \
+                  -lrocksdb -lstdc++ -lm -lz -lbz2 -lsnappy -llz4 -lzstd"
+                export DYLD_LIBRARY_PATH="$HOME/rocksdb/lib:$(brew --prefix)/lib:$(brew --prefix snappy)/lib:$DYLD_LIBRARY_PATH"
+                export DYLD_LIBRARY_PATH="$HOME/rocksdb/lib:$(brew --prefix)/lib:$(brew --prefix snappy)/lib:$DYLD_LIBRARY_PATH"
+CREATE DATABASE
+CREATE EXTENSION
+CREATE EXTENSION
+DO
+DO
+CREATE TYPE
+CREATE TYPE
+CREATE TYPE
+CREATE TYPE
+CREATE TYPE
+CREATE TYPE
+CREATE TYPE
+CREATE TYPE
+CREATE TYPE
+CREATE TYPE
+CREATE TABLE
+COMMENT
+COMMENT
+CREATE TABLE
+COMMENT
+CREATE TABLE
+CREATE INDEX
+COMMENT
+CREATE TABLE
+COMMENT
+CREATE TABLE
+COMMENT
+COMMENT
+COMMENT
+CREATE TABLE
+COMMENT
+CREATE TABLE
+CREATE INDEX
+CREATE VIEW
+COMMENT
+COMMENT
+COMMENT
+COMMENT
+COMMENT
+CREATE TABLE
+COMMENT
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+COMMENT
+CREATE FUNCTION
+COMMENT
+COMMENT
+COMMENT
+CREATE TABLE
+COMMENT
+COMMENT
+CREATE TABLE
+COMMENT
+COMMENT
+CREATE TABLE
+CREATE INDEX
+COMMENT
+COMMENT
+COMMENT
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+ALTER TABLE
+ALTER TABLE
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+ALTER TABLE
+ALTER TABLE
+CREATE POLICY
+CREATE POLICY
+ALTER TABLE
+ALTER TABLE
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+ALTER TABLE
+ALTER TABLE
+CREATE POLICY
+CREATE POLICY
+SELECT 0
+CREATE INDEX
+SELECT 0
+CREATE INDEX
+SELECT 0
+CREATE INDEX
+SELECT 0
+CREATE INDEX
+GRANT
+GRANT
+GRANT
+GRANT
+GRANT
+GRANT
+GRANT
+GRANT
+GRANT
+GRANT
+GRANT
+GRANT
+GRANT
+GRANT
+GRANT
+GRANT
+GRANT
+GRANT
+GRANT
+ALTER ROLE
+ALTER ROLE
+aryan@Aloks-MacBook-Air Vyomanaut_V2 %          go vet ./...         
+                go build ./...
+                golangci-lint run
+go test -race -count=1 -p 1 ./...unt=1 -p 1 ./...         go vet ./...
+# github.com/vyomanaut-labs/Vyomanaut_V2/cmd/provider
+ld: warning: duplicate -rpath '/Users/aryan/rocksdb/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/opt/snappy/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/lib' ignored
+ld: warning: duplicate -rpath '/Users/aryan/rocksdb/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/opt/snappy/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/lib' ignored
+ld: warning: ignoring duplicate libraries: '-lbz2', '-lc++', '-llz4', '-lm', '-lrocksdb', '-lsnappy', '-lz', '-lzstd'
+# github.com/vyomanaut-labs/Vyomanaut_V2/cmd/microservice
+ld: warning: duplicate -rpath '/Users/aryan/rocksdb/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/opt/snappy/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/lib' ignored
+ld: warning: duplicate -rpath '/Users/aryan/rocksdb/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/opt/snappy/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/lib' ignored
+ld: warning: ignoring duplicate libraries: '-lbz2', '-lc++', '-llz4', '-lm', '-lrocksdb', '-lsnappy', '-lz', '-lzstd'
+0 issues.
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/cmd/client	2.122s
+# github.com/vyomanaut-labs/Vyomanaut_V2/cmd/microservice.test
+ld: warning: duplicate -rpath '/Users/aryan/rocksdb/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/opt/snappy/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/lib' ignored
+ld: warning: duplicate -rpath '/Users/aryan/rocksdb/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/opt/snappy/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/lib' ignored
+ld: warning: ignoring duplicate libraries: '-lbz2', '-lc++', '-llz4', '-lm', '-lrocksdb', '-lsnappy', '-lz', '-lzstd'
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/cmd/microservice	2.247s
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/cmd/operator	1.704s
+# github.com/vyomanaut-labs/Vyomanaut_V2/cmd/provider.test
+ld: warning: duplicate -rpath '/Users/aryan/rocksdb/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/opt/snappy/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/lib' ignored
+ld: warning: duplicate -rpath '/Users/aryan/rocksdb/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/opt/snappy/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/lib' ignored
+ld: warning: ignoring duplicate libraries: '-lbz2', '-lc++', '-llz4', '-lm', '-lrocksdb', '-lsnappy', '-lz', '-lzstd'
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/cmd/provider	5.617s
+# github.com/vyomanaut-labs/Vyomanaut_V2/internal/api.test
+ld: warning: duplicate -rpath '/Users/aryan/rocksdb/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/opt/snappy/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/lib' ignored
+ld: warning: ignoring duplicate libraries: '-lbz2', '-lc++', '-llz4', '-lm', '-lrocksdb', '-lsnappy', '-lz', '-lzstd'
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/internal/api	5.924s
+# github.com/vyomanaut-labs/Vyomanaut_V2/internal/audit.test
+ld: warning: duplicate -rpath '/Users/aryan/rocksdb/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/opt/snappy/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/lib' ignored
+ld: warning: ignoring duplicate libraries: '-lbz2', '-lc++', '-llz4', '-lm', '-lrocksdb', '-lsnappy', '-lz', '-lzstd'
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/internal/audit	2.842s
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/internal/client/account	2.882s
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/internal/client/manage	1.686s
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/internal/client/retrieve	2.425s
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/internal/client/upload	3.294s
+?   	github.com/vyomanaut-labs/Vyomanaut_V2/internal/cluster	[no test files]
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/internal/config	1.584s
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/internal/crypto	3.849s
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/internal/erasure	7.680s
+# github.com/vyomanaut-labs/Vyomanaut_V2/internal/metrics.test
+ld: warning: duplicate -rpath '/Users/aryan/rocksdb/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/opt/snappy/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/lib' ignored
+ld: warning: ignoring duplicate libraries: '-lbz2', '-lc++', '-llz4', '-lm', '-lrocksdb', '-lsnappy', '-lz', '-lzstd'
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/internal/metrics	1.791s
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/internal/p2p	2.683s
+# github.com/vyomanaut-labs/Vyomanaut_V2/internal/payment.test
+ld: warning: duplicate -rpath '/Users/aryan/rocksdb/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/opt/snappy/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/lib' ignored
+ld: warning: ignoring duplicate libraries: '-lbz2', '-lc++', '-llz4', '-lm', '-lrocksdb', '-lsnappy', '-lz', '-lzstd'
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/internal/payment	3.425s
+# github.com/vyomanaut-labs/Vyomanaut_V2/internal/repair.test
+ld: warning: duplicate -rpath '/Users/aryan/rocksdb/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/opt/snappy/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/lib' ignored
+ld: warning: ignoring duplicate libraries: '-lbz2', '-lc++', '-llz4', '-lm', '-lrocksdb', '-lsnappy', '-lz', '-lzstd'
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/internal/repair	3.668s
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/internal/scoring	2.879s
+?   	github.com/vyomanaut-labs/Vyomanaut_V2/internal/secrets	[no test files]
+# github.com/vyomanaut-labs/Vyomanaut_V2/internal/storage.test
+ld: warning: duplicate -rpath '/Users/aryan/rocksdb/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/opt/snappy/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/lib' ignored
+ld: warning: ignoring duplicate libraries: '-lbz2', '-lc++', '-llz4', '-lm', '-lrocksdb', '-lsnappy', '-lz', '-lzstd'
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/internal/storage	3.299s
+# github.com/vyomanaut-labs/Vyomanaut_V2/internal/vettingchunk.test
+ld: warning: duplicate -rpath '/Users/aryan/rocksdb/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/opt/snappy/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/lib' ignored
+ld: warning: ignoring duplicate libraries: '-lbz2', '-lc++', '-llz4', '-lm', '-lrocksdb', '-lsnappy', '-lz', '-lzstd'
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/internal/vettingchunk	1.856s
+?   	github.com/vyomanaut-labs/Vyomanaut_V2/migrations	[no test files]
+aryan@Aloks-MacBook-Air Vyomanaut_V2 % >....                         
+                go test -tags integration -v -run '^TestReplacementProviderDepartsMidRepair$' ./scripts/test/ -timeout 45m
+                date
+                go test -tags integration -v -run '^TestDepartureMidRetrievalStillGathersK$' ./scripts/test/ -timeout 40m
+                date
+                go test -tags integration -v -run '^TestTwoConcurrentDeparturesAtEmergencyFloor$' ./scripts/test/ -timeout 50m
+date            go test -tags integration -v -run '^TestTwoConcurrentDeparturesAtEmergencyFloor$' ./scripts/test/ -timeout 50m
+Wed Aug 26 23:22:39 IST 2026
+STEP 5 — M16 DEMO TIMELINE + VIABILITY TESTS
+# github.com/vyomanaut-labs/Vyomanaut_V2/scripts/test.test
+ld: warning: duplicate -rpath '/Users/aryan/rocksdb/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/opt/snappy/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/lib' ignored
+ld: warning: ignoring duplicate libraries: '-lbz2', '-lc++', '-llz4', '-lm', '-lrocksdb', '-lsnappy', '-lz', '-lzstd'
+=== RUN   TestDemoTimeline
+2026/08/26 23:23:53 [STARTUP] Vyomanaut — mode=DEMO — do not use for real data
+2026/08/26 23:23:53 [STARTUP] NetworkProfile: {DataShards:3 ParityShards:2 TotalShards:5 ShardSize:262144 LazyRepairR0:1 MinActiveProviders:5 MinDistinctASNs:5 MinMetroRegions:1 MinRelayNodes:0 MinCooledAccounts:5 ASNCapFraction:0.2 HeartbeatInterval:30s HeartbeatJitter:5s PollingInterval:2m0s DeparturePollingInterval:30s DHTRepublishInterval:2m0s DHTExpiryDuration:4m0s DepartureThreshold:10m0s PromisedDowntimeMaximum:10m0s AuditPeriodDuration:2m0s EscrowHoldWindow:1m0s VettingHoldWindow:2m0s PendingReceiptGCAge:5m0s RepairPromotionTimeout:3m0s ScoreWindowShort:2m0s ScoreWindowMedium:6m0s ScoreWindowLong:20m0s DualWindowDrop:0.2 VettingMinPasses:5 VettingMinDuration:5m0s VettingCapFraction:0.1 Argon2Time:1 Argon2Memory:4096 Argon2Threads:1 RequireSecretsManager:false RequireQuorum:false AllowLivePayments:false PaymentMode:mock SkipMnemonicConfirm:true RazorpayCoolingPeriod:0s IsDemoMode:true ReleaseComputationInterval:2m0s ChargeComputationInterval:1m30s AuthRequestFreshnessWindow:2m0s GCRetryBackoff:[10s 30s 2m0s] Mode:demo BackgroundViewRefreshInterval:5s StorageRatePaisePerGBPerMonth:100}
+2026/08/26 23:43:24 [STARTUP] Vyomanaut — mode=DEMO — do not use for real data
+2026/08/26 23:43:24 [STARTUP] NetworkProfile: {DataShards:3 ParityShards:2 TotalShards:5 ShardSize:262144 LazyRepairR0:1 MinActiveProviders:5 MinDistinctASNs:5 MinMetroRegions:1 MinRelayNodes:0 MinCooledAccounts:5 ASNCapFraction:0.2 HeartbeatInterval:30s HeartbeatJitter:5s PollingInterval:2m0s DeparturePollingInterval:30s DHTRepublishInterval:2m0s DHTExpiryDuration:4m0s DepartureThreshold:10m0s PromisedDowntimeMaximum:10m0s AuditPeriodDuration:2m0s EscrowHoldWindow:1m0s VettingHoldWindow:2m0s PendingReceiptGCAge:5m0s RepairPromotionTimeout:3m0s ScoreWindowShort:2m0s ScoreWindowMedium:6m0s ScoreWindowLong:20m0s DualWindowDrop:0.2 VettingMinPasses:5 VettingMinDuration:5m0s VettingCapFraction:0.1 Argon2Time:1 Argon2Memory:4096 Argon2Threads:1 RequireSecretsManager:false RequireQuorum:false AllowLivePayments:false PaymentMode:mock SkipMnemonicConfirm:true RazorpayCoolingPeriod:0s IsDemoMode:true ReleaseComputationInterval:2m0s ChargeComputationInterval:1m30s AuthRequestFreshnessWindow:2m0s GCRetryBackoff:[10s 30s 2m0s] Mode:demo BackgroundViewRefreshInterval:5s StorageRatePaisePerGBPerMonth:100}
+    demo_timeline_test.go:1077: uploaded file_id=01a03f46-e0e6-7474-b5e0-00331931b9d0
+--- PASS: TestDemoTimeline (1870.75s)
+PASS
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/scripts/test	1871.824s
+Wed Aug 26 23:53:55 IST 2026
+# github.com/vyomanaut-labs/Vyomanaut_V2/scripts/test.test
+ld: warning: duplicate -rpath '/Users/aryan/rocksdb/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/opt/snappy/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/lib' ignored
+ld: warning: ignoring duplicate libraries: '-lbz2', '-lc++', '-llz4', '-lm', '-lrocksdb', '-lsnappy', '-lz', '-lzstd'
+=== RUN   TestViabilityASNCapMatchesRunningDemoProfile
+--- PASS: TestViabilityASNCapMatchesRunningDemoProfile (64.85s)
+=== RUN   TestViabilityRepairSucceedsWithTwoOfFiveOffline
+2026/08/27 00:06:44 [STARTUP] Vyomanaut — mode=DEMO — do not use for real data
+2026/08/27 00:06:44 [STARTUP] NetworkProfile: {DataShards:3 ParityShards:2 TotalShards:5 ShardSize:262144 LazyRepairR0:1 MinActiveProviders:5 MinDistinctASNs:5 MinMetroRegions:1 MinRelayNodes:0 MinCooledAccounts:5 ASNCapFraction:0.2 HeartbeatInterval:30s HeartbeatJitter:5s PollingInterval:2m0s DeparturePollingInterval:30s DHTRepublishInterval:2m0s DHTExpiryDuration:4m0s DepartureThreshold:10m0s PromisedDowntimeMaximum:10m0s AuditPeriodDuration:2m0s EscrowHoldWindow:1m0s VettingHoldWindow:2m0s PendingReceiptGCAge:5m0s RepairPromotionTimeout:3m0s ScoreWindowShort:2m0s ScoreWindowMedium:6m0s ScoreWindowLong:20m0s DualWindowDrop:0.2 VettingMinPasses:5 VettingMinDuration:5m0s VettingCapFraction:0.1 Argon2Time:1 Argon2Memory:4096 Argon2Threads:1 RequireSecretsManager:false RequireQuorum:false AllowLivePayments:false PaymentMode:mock SkipMnemonicConfirm:true RazorpayCoolingPeriod:0s IsDemoMode:true ReleaseComputationInterval:2m0s ChargeComputationInterval:1m30s AuthRequestFreshnessWindow:2m0s GCRetryBackoff:[10s 30s 2m0s] Mode:demo BackgroundViewRefreshInterval:5s StorageRatePaisePerGBPerMonth:100}
+    demo_timeline_test.go:1190: uploaded file_id=01a03f5c-3ba5-7259-9061-cd7ac9715202
+--- PASS: TestViabilityRepairSucceedsWithTwoOfFiveOffline (1301.63s)
+=== RUN   TestViabilityActiveTransitionAtTenMinutes
+--- PASS: TestViabilityActiveTransitionAtTenMinutes (723.92s)
+=== RUN   TestViabilityDuplicateWebhookProducesExactlyOneEscrowRow
+--- PASS: TestViabilityDuplicateWebhookProducesExactlyOneEscrowRow (7.33s)
+PASS
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/scripts/test	2098.600s
+Thu Aug 27 00:28:56 IST 2026
+# github.com/vyomanaut-labs/Vyomanaut_V2/scripts/test.test
+ld: warning: duplicate -rpath '/Users/aryan/rocksdb/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/opt/snappy/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/lib' ignored
+ld: warning: ignoring duplicate libraries: '-lbz2', '-lc++', '-llz4', '-lm', '-lrocksdb', '-lsnappy', '-lz', '-lzstd'
+=== RUN   TestViabilityActiveTransitionAtTenMinutes
+--- PASS: TestViabilityActiveTransitionAtTenMinutes (711.62s)
+PASS
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/scripts/test	712.636s
+Thu Aug 27 00:40:49 IST 2026
+STEP 6 — CLI-BINARY-DRIVEN PROOF (M17)
+# github.com/vyomanaut-labs/Vyomanaut_V2/scripts/test.test
+ld: warning: duplicate -rpath '/Users/aryan/rocksdb/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/opt/snappy/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/lib' ignored
+ld: warning: ignoring duplicate libraries: '-lbz2', '-lc++', '-llz4', '-lm', '-lrocksdb', '-lsnappy', '-lz', '-lzstd'
+=== RUN   TestDemoCLIFullLifecycle
+    demo_cli_test.go:169: uploaded file_id=01a03f86-921e-7985-9dab-ccc2e276f066
+--- PASS: TestDemoCLIFullLifecycle (726.59s)
+=== RUN   TestDemoCLIRetrievedBytesIdenticalToUploaded
+--- PASS: TestDemoCLIRetrievedBytesIdenticalToUploaded (716.14s)
+=== RUN   TestDemoCLIUploadFailsBeforeDeposit
+--- PASS: TestDemoCLIUploadFailsBeforeDeposit (730.65s)
+=== RUN   TestDemoCLIReadinessReportsDemoMode
+--- PASS: TestDemoCLIReadinessReportsDemoMode (6.84s)
+PASS
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/scripts/test	2182.332s
+Thu Aug 27 01:17:13 IST 2026
+# github.com/vyomanaut-labs/Vyomanaut_V2/scripts/test.test
+ld: warning: duplicate -rpath '/Users/aryan/rocksdb/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/opt/snappy/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/lib' ignored
+ld: warning: ignoring duplicate libraries: '-lbz2', '-lc++', '-llz4', '-lm', '-lrocksdb', '-lsnappy', '-lz', '-lzstd'
+=== RUN   TestDepartureMidUploadLeavesNoHalfRegisteredFile
+2026/08/27 01:29:12 [STARTUP] Vyomanaut — mode=DEMO — do not use for real data
+2026/08/27 01:29:12 [STARTUP] NetworkProfile: {DataShards:3 ParityShards:2 TotalShards:5 ShardSize:262144 LazyRepairR0:1 MinActiveProviders:5 MinDistinctASNs:5 MinMetroRegions:1 MinRelayNodes:0 MinCooledAccounts:5 ASNCapFraction:0.2 HeartbeatInterval:30s HeartbeatJitter:5s PollingInterval:2m0s DeparturePollingInterval:30s DHTRepublishInterval:2m0s DHTExpiryDuration:4m0s DepartureThreshold:10m0s PromisedDowntimeMaximum:10m0s AuditPeriodDuration:2m0s EscrowHoldWindow:1m0s VettingHoldWindow:2m0s PendingReceiptGCAge:5m0s RepairPromotionTimeout:3m0s ScoreWindowShort:2m0s ScoreWindowMedium:6m0s ScoreWindowLong:20m0s DualWindowDrop:0.2 VettingMinPasses:5 VettingMinDuration:5m0s VettingCapFraction:0.1 Argon2Time:1 Argon2Memory:4096 Argon2Threads:1 RequireSecretsManager:false RequireQuorum:false AllowLivePayments:false PaymentMode:mock SkipMnemonicConfirm:true RazorpayCoolingPeriod:0s IsDemoMode:true ReleaseComputationInterval:2m0s ChargeComputationInterval:1m30s AuthRequestFreshnessWindow:2m0s GCRetryBackoff:[10s 30s 2m0s] Mode:demo BackgroundViewRefreshInterval:5s StorageRatePaisePerGBPerMonth:100}
+2026/08/27 01:29:12 [STARTUP] Vyomanaut — mode=DEMO — do not use for real data
+2026/08/27 01:29:12 [STARTUP] NetworkProfile: {DataShards:3 ParityShards:2 TotalShards:5 ShardSize:262144 LazyRepairR0:1 MinActiveProviders:5 MinDistinctASNs:5 MinMetroRegions:1 MinRelayNodes:0 MinCooledAccounts:5 ASNCapFraction:0.2 HeartbeatInterval:30s HeartbeatJitter:5s PollingInterval:2m0s DeparturePollingInterval:30s DHTRepublishInterval:2m0s DHTExpiryDuration:4m0s DepartureThreshold:10m0s PromisedDowntimeMaximum:10m0s AuditPeriodDuration:2m0s EscrowHoldWindow:1m0s VettingHoldWindow:2m0s PendingReceiptGCAge:5m0s RepairPromotionTimeout:3m0s ScoreWindowShort:2m0s ScoreWindowMedium:6m0s ScoreWindowLong:20m0s DualWindowDrop:0.2 VettingMinPasses:5 VettingMinDuration:5m0s VettingCapFraction:0.1 Argon2Time:1 Argon2Memory:4096 Argon2Threads:1 RequireSecretsManager:false RequireQuorum:false AllowLivePayments:false PaymentMode:mock SkipMnemonicConfirm:true RazorpayCoolingPeriod:0s IsDemoMode:true ReleaseComputationInterval:2m0s ChargeComputationInterval:1m30s AuthRequestFreshnessWindow:2m0s GCRetryBackoff:[10s 30s 2m0s] Mode:demo BackgroundViewRefreshInterval:5s StorageRatePaisePerGBPerMonth:100}
+    demo_departure_test.go:546: mid-upload departure: killed provider index=4, file_id=01a03fa7-bd1d-700b-81ae-1cde29a4bcc8, upload error=upload: UploadFile: upload: transferAll: client: upload incomplete; session state saved for resume: upload: uploadOneShard: connect to provider 2e15b011-007f-440b-9f5c-05f56b3474e6: p2p: all provided multiaddrs failed to connect: p2p.Connect: dial 192.168.124.131:54516: dial tcp 192.168.124.131:54516: connect: connection refused
+    demo_departure_test.go:561: file 01a03fa7-bd1d-700b-81ae-1cde29a4bcc8: registered=false (pointer_ciphertext length=0)
+--- PASS: TestDepartureMidUploadLeavesNoHalfRegisteredFile (717.38s)
+PASS
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/scripts/test	718.049s
+Thu Aug 27 01:29:12 IST 2026
+# github.com/vyomanaut-labs/Vyomanaut_V2/scripts/test.test
+ld: warning: duplicate -rpath '/Users/aryan/rocksdb/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/opt/snappy/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/lib' ignored
+ld: warning: ignoring duplicate libraries: '-lbz2', '-lc++', '-llz4', '-lm', '-lrocksdb', '-lsnappy', '-lz', '-lzstd'
+=== RUN   TestReqD07FileRetrievableAfterProviderLossAndRepair
+2026/08/27 01:40:49 [STARTUP] Vyomanaut — mode=DEMO — do not use for real data
+2026/08/27 01:40:49 [STARTUP] NetworkProfile: {DataShards:3 ParityShards:2 TotalShards:5 ShardSize:262144 LazyRepairR0:1 MinActiveProviders:5 MinDistinctASNs:5 MinMetroRegions:1 MinRelayNodes:0 MinCooledAccounts:5 ASNCapFraction:0.2 HeartbeatInterval:30s HeartbeatJitter:5s PollingInterval:2m0s DeparturePollingInterval:30s DHTRepublishInterval:2m0s DHTExpiryDuration:4m0s DepartureThreshold:10m0s PromisedDowntimeMaximum:10m0s AuditPeriodDuration:2m0s EscrowHoldWindow:1m0s VettingHoldWindow:2m0s PendingReceiptGCAge:5m0s RepairPromotionTimeout:3m0s ScoreWindowShort:2m0s ScoreWindowMedium:6m0s ScoreWindowLong:20m0s DualWindowDrop:0.2 VettingMinPasses:5 VettingMinDuration:5m0s VettingCapFraction:0.1 Argon2Time:1 Argon2Memory:4096 Argon2Threads:1 RequireSecretsManager:false RequireQuorum:false AllowLivePayments:false PaymentMode:mock SkipMnemonicConfirm:true RazorpayCoolingPeriod:0s IsDemoMode:true ReleaseComputationInterval:2m0s ChargeComputationInterval:1m30s AuthRequestFreshnessWindow:2m0s GCRetryBackoff:[10s 30s 2m0s] Mode:demo BackgroundViewRefreshInterval:5s StorageRatePaisePerGBPerMonth:100}
+    demo_departure_test.go:654: uploaded file_id=01a03fb2-5e90-7ae1-a579-0a437aa66c87 (1000000 bytes)
+    demo_departure_test.go:661: departed provider index=0 (mode=KILL)
+2026/08/27 01:42:29 [STARTUP] Vyomanaut — mode=DEMO — do not use for real data
+2026/08/27 01:42:29 [STARTUP] NetworkProfile: {DataShards:3 ParityShards:2 TotalShards:5 ShardSize:262144 LazyRepairR0:1 MinActiveProviders:5 MinDistinctASNs:5 MinMetroRegions:1 MinRelayNodes:0 MinCooledAccounts:5 ASNCapFraction:0.2 HeartbeatInterval:30s HeartbeatJitter:5s PollingInterval:2m0s DeparturePollingInterval:30s DHTRepublishInterval:2m0s DHTExpiryDuration:4m0s DepartureThreshold:10m0s PromisedDowntimeMaximum:10m0s AuditPeriodDuration:2m0s EscrowHoldWindow:1m0s VettingHoldWindow:2m0s PendingReceiptGCAge:5m0s RepairPromotionTimeout:3m0s ScoreWindowShort:2m0s ScoreWindowMedium:6m0s ScoreWindowLong:20m0s DualWindowDrop:0.2 VettingMinPasses:5 VettingMinDuration:5m0s VettingCapFraction:0.1 Argon2Time:1 Argon2Memory:4096 Argon2Threads:1 RequireSecretsManager:false RequireQuorum:false AllowLivePayments:false PaymentMode:mock SkipMnemonicConfirm:true RazorpayCoolingPeriod:0s IsDemoMode:true ReleaseComputationInterval:2m0s ChargeComputationInterval:1m30s AuthRequestFreshnessWindow:2m0s GCRetryBackoff:[10s 30s 2m0s] Mode:demo BackgroundViewRefreshInterval:5s StorageRatePaisePerGBPerMonth:100}
+--- PASS: TestReqD07FileRetrievableAfterProviderLossAndRepair (793.54s)
+PASS
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/scripts/test	794.719s
+Thu Aug 27 01:42:29 IST 2026
+# github.com/vyomanaut-labs/Vyomanaut_V2/scripts/test.test
+ld: warning: duplicate -rpath '/Users/aryan/rocksdb/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/opt/snappy/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/lib' ignored
+ld: warning: ignoring duplicate libraries: '-lbz2', '-lc++', '-llz4', '-lm', '-lrocksdb', '-lsnappy', '-lz', '-lzstd'
+=== RUN   TestDepartureAfterUploadFileStillRetrievable
+2026/08/27 01:54:14 [STARTUP] Vyomanaut — mode=DEMO — do not use for real data
+2026/08/27 01:54:14 [STARTUP] NetworkProfile: {DataShards:3 ParityShards:2 TotalShards:5 ShardSize:262144 LazyRepairR0:1 MinActiveProviders:5 MinDistinctASNs:5 MinMetroRegions:1 MinRelayNodes:0 MinCooledAccounts:5 ASNCapFraction:0.2 HeartbeatInterval:30s HeartbeatJitter:5s PollingInterval:2m0s DeparturePollingInterval:30s DHTRepublishInterval:2m0s DHTExpiryDuration:4m0s DepartureThreshold:10m0s PromisedDowntimeMaximum:10m0s AuditPeriodDuration:2m0s EscrowHoldWindow:1m0s VettingHoldWindow:2m0s PendingReceiptGCAge:5m0s RepairPromotionTimeout:3m0s ScoreWindowShort:2m0s ScoreWindowMedium:6m0s ScoreWindowLong:20m0s DualWindowDrop:0.2 VettingMinPasses:5 VettingMinDuration:5m0s VettingCapFraction:0.1 Argon2Time:1 Argon2Memory:4096 Argon2Threads:1 RequireSecretsManager:false RequireQuorum:false AllowLivePayments:false PaymentMode:mock SkipMnemonicConfirm:true RazorpayCoolingPeriod:0s IsDemoMode:true ReleaseComputationInterval:2m0s ChargeComputationInterval:1m30s AuthRequestFreshnessWindow:2m0s GCRetryBackoff:[10s 30s 2m0s] Mode:demo BackgroundViewRefreshInterval:5s StorageRatePaisePerGBPerMonth:100}
+    demo_departure_test.go:654: uploaded file_id=01a03fbe-a82b-7680-a3d7-dafe97c56c32 (1000000 bytes)
+    demo_departure_test.go:661: departed provider index=0 (mode=KILL)
+2026/08/27 01:55:44 [STARTUP] Vyomanaut — mode=DEMO — do not use for real data
+2026/08/27 01:55:44 [STARTUP] NetworkProfile: {DataShards:3 ParityShards:2 TotalShards:5 ShardSize:262144 LazyRepairR0:1 MinActiveProviders:5 MinDistinctASNs:5 MinMetroRegions:1 MinRelayNodes:0 MinCooledAccounts:5 ASNCapFraction:0.2 HeartbeatInterval:30s HeartbeatJitter:5s PollingInterval:2m0s DeparturePollingInterval:30s DHTRepublishInterval:2m0s DHTExpiryDuration:4m0s DepartureThreshold:10m0s PromisedDowntimeMaximum:10m0s AuditPeriodDuration:2m0s EscrowHoldWindow:1m0s VettingHoldWindow:2m0s PendingReceiptGCAge:5m0s RepairPromotionTimeout:3m0s ScoreWindowShort:2m0s ScoreWindowMedium:6m0s ScoreWindowLong:20m0s DualWindowDrop:0.2 VettingMinPasses:5 VettingMinDuration:5m0s VettingCapFraction:0.1 Argon2Time:1 Argon2Memory:4096 Argon2Threads:1 RequireSecretsManager:false RequireQuorum:false AllowLivePayments:false PaymentMode:mock SkipMnemonicConfirm:true RazorpayCoolingPeriod:0s IsDemoMode:true ReleaseComputationInterval:2m0s ChargeComputationInterval:1m30s AuthRequestFreshnessWindow:2m0s GCRetryBackoff:[10s 30s 2m0s] Mode:demo BackgroundViewRefreshInterval:5s StorageRatePaisePerGBPerMonth:100}
+--- PASS: TestDepartureAfterUploadFileStillRetrievable (792.45s)
+PASS
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/scripts/test	793.336s
+Thu Aug 27 01:55:44 IST 2026
+# github.com/vyomanaut-labs/Vyomanaut_V2/scripts/test.test
+ld: warning: duplicate -rpath '/Users/aryan/rocksdb/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/opt/snappy/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/lib' ignored
+ld: warning: ignoring duplicate libraries: '-lbz2', '-lc++', '-llz4', '-lm', '-lrocksdb', '-lsnappy', '-lz', '-lzstd'
+=== RUN   TestDepartureAfterUploadFileStillRetrievableGraceful
+2026/08/27 02:07:45 [STARTUP] Vyomanaut — mode=DEMO — do not use for real data
+2026/08/27 02:07:45 [STARTUP] NetworkProfile: {DataShards:3 ParityShards:2 TotalShards:5 ShardSize:262144 LazyRepairR0:1 MinActiveProviders:5 MinDistinctASNs:5 MinMetroRegions:1 MinRelayNodes:0 MinCooledAccounts:5 ASNCapFraction:0.2 HeartbeatInterval:30s HeartbeatJitter:5s PollingInterval:2m0s DeparturePollingInterval:30s DHTRepublishInterval:2m0s DHTExpiryDuration:4m0s DepartureThreshold:10m0s PromisedDowntimeMaximum:10m0s AuditPeriodDuration:2m0s EscrowHoldWindow:1m0s VettingHoldWindow:2m0s PendingReceiptGCAge:5m0s RepairPromotionTimeout:3m0s ScoreWindowShort:2m0s ScoreWindowMedium:6m0s ScoreWindowLong:20m0s DualWindowDrop:0.2 VettingMinPasses:5 VettingMinDuration:5m0s VettingCapFraction:0.1 Argon2Time:1 Argon2Memory:4096 Argon2Threads:1 RequireSecretsManager:false RequireQuorum:false AllowLivePayments:false PaymentMode:mock SkipMnemonicConfirm:true RazorpayCoolingPeriod:0s IsDemoMode:true ReleaseComputationInterval:2m0s ChargeComputationInterval:1m30s AuthRequestFreshnessWindow:2m0s GCRetryBackoff:[10s 30s 2m0s] Mode:demo BackgroundViewRefreshInterval:5s StorageRatePaisePerGBPerMonth:100}
+    demo_departure_test.go:654: uploaded file_id=01a03fcb-05cd-78e1-a5e1-d120e8ce8e7e (1000000 bytes)
+    demo_departure_test.go:661: departed provider index=2 (mode=DEPART)
+2026/08/27 02:07:55 [STARTUP] Vyomanaut — mode=DEMO — do not use for real data
+2026/08/27 02:07:55 [STARTUP] NetworkProfile: {DataShards:3 ParityShards:2 TotalShards:5 ShardSize:262144 LazyRepairR0:1 MinActiveProviders:5 MinDistinctASNs:5 MinMetroRegions:1 MinRelayNodes:0 MinCooledAccounts:5 ASNCapFraction:0.2 HeartbeatInterval:30s HeartbeatJitter:5s PollingInterval:2m0s DeparturePollingInterval:30s DHTRepublishInterval:2m0s DHTExpiryDuration:4m0s DepartureThreshold:10m0s PromisedDowntimeMaximum:10m0s AuditPeriodDuration:2m0s EscrowHoldWindow:1m0s VettingHoldWindow:2m0s PendingReceiptGCAge:5m0s RepairPromotionTimeout:3m0s ScoreWindowShort:2m0s ScoreWindowMedium:6m0s ScoreWindowLong:20m0s DualWindowDrop:0.2 VettingMinPasses:5 VettingMinDuration:5m0s VettingCapFraction:0.1 Argon2Time:1 Argon2Memory:4096 Argon2Threads:1 RequireSecretsManager:false RequireQuorum:false AllowLivePayments:false PaymentMode:mock SkipMnemonicConfirm:true RazorpayCoolingPeriod:0s IsDemoMode:true ReleaseComputationInterval:2m0s ChargeComputationInterval:1m30s AuthRequestFreshnessWindow:2m0s GCRetryBackoff:[10s 30s 2m0s] Mode:demo BackgroundViewRefreshInterval:5s StorageRatePaisePerGBPerMonth:100}
+--- PASS: TestDepartureAfterUploadFileStillRetrievableGraceful (727.68s)
+PASS
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/scripts/test	728.512s
+Thu Aug 27 02:07:55 IST 2026
+STEP 7 — HIGH-RISK DEPARTURE / REPAIR / RETRIEVAL TESTS
+# github.com/vyomanaut-labs/Vyomanaut_V2/scripts/test.test
+ld: warning: duplicate -rpath '/Users/aryan/rocksdb/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/opt/snappy/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/lib' ignored
+ld: warning: ignoring duplicate libraries: '-lbz2', '-lc++', '-llz4', '-lm', '-lrocksdb', '-lsnappy', '-lz', '-lzstd'
+=== RUN   TestReplacementProviderDepartsMidRepair
+2026/08/27 02:19:55 [STARTUP] Vyomanaut — mode=DEMO — do not use for real data
+2026/08/27 02:19:55 [STARTUP] NetworkProfile: {DataShards:3 ParityShards:2 TotalShards:5 ShardSize:262144 LazyRepairR0:1 MinActiveProviders:5 MinDistinctASNs:5 MinMetroRegions:1 MinRelayNodes:0 MinCooledAccounts:5 ASNCapFraction:0.2 HeartbeatInterval:30s HeartbeatJitter:5s PollingInterval:2m0s DeparturePollingInterval:30s DHTRepublishInterval:2m0s DHTExpiryDuration:4m0s DepartureThreshold:10m0s PromisedDowntimeMaximum:10m0s AuditPeriodDuration:2m0s EscrowHoldWindow:1m0s VettingHoldWindow:2m0s PendingReceiptGCAge:5m0s RepairPromotionTimeout:3m0s ScoreWindowShort:2m0s ScoreWindowMedium:6m0s ScoreWindowLong:20m0s DualWindowDrop:0.2 VettingMinPasses:5 VettingMinDuration:5m0s VettingCapFraction:0.1 Argon2Time:1 Argon2Memory:4096 Argon2Threads:1 RequireSecretsManager:false RequireQuorum:false AllowLivePayments:false PaymentMode:mock SkipMnemonicConfirm:true RazorpayCoolingPeriod:0s IsDemoMode:true ReleaseComputationInterval:2m0s ChargeComputationInterval:1m30s AuthRequestFreshnessWindow:2m0s GCRetryBackoff:[10s 30s 2m0s] Mode:demo BackgroundViewRefreshInterval:5s StorageRatePaisePerGBPerMonth:100}
+2026/08/27 02:19:55 [STARTUP] Vyomanaut — mode=DEMO — do not use for real data
+2026/08/27 02:19:55 [STARTUP] NetworkProfile: {DataShards:3 ParityShards:2 TotalShards:5 ShardSize:262144 LazyRepairR0:1 MinActiveProviders:5 MinDistinctASNs:5 MinMetroRegions:1 MinRelayNodes:0 MinCooledAccounts:5 ASNCapFraction:0.2 HeartbeatInterval:30s HeartbeatJitter:5s PollingInterval:2m0s DeparturePollingInterval:30s DHTRepublishInterval:2m0s DHTExpiryDuration:4m0s DepartureThreshold:10m0s PromisedDowntimeMaximum:10m0s AuditPeriodDuration:2m0s EscrowHoldWindow:1m0s VettingHoldWindow:2m0s PendingReceiptGCAge:5m0s RepairPromotionTimeout:3m0s ScoreWindowShort:2m0s ScoreWindowMedium:6m0s ScoreWindowLong:20m0s DualWindowDrop:0.2 VettingMinPasses:5 VettingMinDuration:5m0s VettingCapFraction:0.1 Argon2Time:1 Argon2Memory:4096 Argon2Threads:1 RequireSecretsManager:false RequireQuorum:false AllowLivePayments:false PaymentMode:mock SkipMnemonicConfirm:true RazorpayCoolingPeriod:0s IsDemoMode:true ReleaseComputationInterval:2m0s ChargeComputationInterval:1m30s AuthRequestFreshnessWindow:2m0s GCRetryBackoff:[10s 30s 2m0s] Mode:demo BackgroundViewRefreshInterval:5s StorageRatePaisePerGBPerMonth:100}
+    demo_departure_test.go:759: uploaded file_id=01a03fd6-2c61-7e5b-8db4-7b6d7ee4d35d
+    demo_departure_test.go:766: departed original holder index=1; replacement killed mid-transfer index=6
+2026/08/27 02:21:44 [STARTUP] Vyomanaut — mode=DEMO — do not use for real data
+2026/08/27 02:21:44 [STARTUP] NetworkProfile: {DataShards:3 ParityShards:2 TotalShards:5 ShardSize:262144 LazyRepairR0:1 MinActiveProviders:5 MinDistinctASNs:5 MinMetroRegions:1 MinRelayNodes:0 MinCooledAccounts:5 ASNCapFraction:0.2 HeartbeatInterval:30s HeartbeatJitter:5s PollingInterval:2m0s DeparturePollingInterval:30s DHTRepublishInterval:2m0s DHTExpiryDuration:4m0s DepartureThreshold:10m0s PromisedDowntimeMaximum:10m0s AuditPeriodDuration:2m0s EscrowHoldWindow:1m0s VettingHoldWindow:2m0s PendingReceiptGCAge:5m0s RepairPromotionTimeout:3m0s ScoreWindowShort:2m0s ScoreWindowMedium:6m0s ScoreWindowLong:20m0s DualWindowDrop:0.2 VettingMinPasses:5 VettingMinDuration:5m0s VettingCapFraction:0.1 Argon2Time:1 Argon2Memory:4096 Argon2Threads:1 RequireSecretsManager:false RequireQuorum:false AllowLivePayments:false PaymentMode:mock SkipMnemonicConfirm:true RazorpayCoolingPeriod:0s IsDemoMode:true ReleaseComputationInterval:2m0s ChargeComputationInterval:1m30s AuthRequestFreshnessWindow:2m0s GCRetryBackoff:[10s 30s 2m0s] Mode:demo BackgroundViewRefreshInterval:5s StorageRatePaisePerGBPerMonth:100}
+--- PASS: TestReplacementProviderDepartsMidRepair (825.77s)
+PASS
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/scripts/test	826.754s
+Thu Aug 27 02:21:44 IST 2026
+# github.com/vyomanaut-labs/Vyomanaut_V2/scripts/test.test
+ld: warning: duplicate -rpath '/Users/aryan/rocksdb/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/opt/snappy/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/lib' ignored
+ld: warning: ignoring duplicate libraries: '-lbz2', '-lc++', '-llz4', '-lm', '-lrocksdb', '-lsnappy', '-lz', '-lzstd'
+=== RUN   TestDepartureMidRetrievalStillGathersK
+2026/08/27 02:33:23 [STARTUP] Vyomanaut — mode=DEMO — do not use for real data
+2026/08/27 02:33:23 [STARTUP] NetworkProfile: {DataShards:3 ParityShards:2 TotalShards:5 ShardSize:262144 LazyRepairR0:1 MinActiveProviders:5 MinDistinctASNs:5 MinMetroRegions:1 MinRelayNodes:0 MinCooledAccounts:5 ASNCapFraction:0.2 HeartbeatInterval:30s HeartbeatJitter:5s PollingInterval:2m0s DeparturePollingInterval:30s DHTRepublishInterval:2m0s DHTExpiryDuration:4m0s DepartureThreshold:10m0s PromisedDowntimeMaximum:10m0s AuditPeriodDuration:2m0s EscrowHoldWindow:1m0s VettingHoldWindow:2m0s PendingReceiptGCAge:5m0s RepairPromotionTimeout:3m0s ScoreWindowShort:2m0s ScoreWindowMedium:6m0s ScoreWindowLong:20m0s DualWindowDrop:0.2 VettingMinPasses:5 VettingMinDuration:5m0s VettingCapFraction:0.1 Argon2Time:1 Argon2Memory:4096 Argon2Threads:1 RequireSecretsManager:false RequireQuorum:false AllowLivePayments:false PaymentMode:mock SkipMnemonicConfirm:true RazorpayCoolingPeriod:0s IsDemoMode:true ReleaseComputationInterval:2m0s ChargeComputationInterval:1m30s AuthRequestFreshnessWindow:2m0s GCRetryBackoff:[10s 30s 2m0s] Mode:demo BackgroundViewRefreshInterval:5s StorageRatePaisePerGBPerMonth:100}
+    demo_departure_test.go:816: uploaded file_id=01a03fe2-812a-7d0b-9418-11072a4bc781
+2026/08/27 02:33:24 [STARTUP] Vyomanaut — mode=DEMO — do not use for real data
+2026/08/27 02:33:24 [STARTUP] NetworkProfile: {DataShards:3 ParityShards:2 TotalShards:5 ShardSize:262144 LazyRepairR0:1 MinActiveProviders:5 MinDistinctASNs:5 MinMetroRegions:1 MinRelayNodes:0 MinCooledAccounts:5 ASNCapFraction:0.2 HeartbeatInterval:30s HeartbeatJitter:5s PollingInterval:2m0s DeparturePollingInterval:30s DHTRepublishInterval:2m0s DHTExpiryDuration:4m0s DepartureThreshold:10m0s PromisedDowntimeMaximum:10m0s AuditPeriodDuration:2m0s EscrowHoldWindow:1m0s VettingHoldWindow:2m0s PendingReceiptGCAge:5m0s RepairPromotionTimeout:3m0s ScoreWindowShort:2m0s ScoreWindowMedium:6m0s ScoreWindowLong:20m0s DualWindowDrop:0.2 VettingMinPasses:5 VettingMinDuration:5m0s VettingCapFraction:0.1 Argon2Time:1 Argon2Memory:4096 Argon2Threads:1 RequireSecretsManager:false RequireQuorum:false AllowLivePayments:false PaymentMode:mock SkipMnemonicConfirm:true RazorpayCoolingPeriod:0s IsDemoMode:true ReleaseComputationInterval:2m0s ChargeComputationInterval:1m30s AuthRequestFreshnessWindow:2m0s GCRetryBackoff:[10s 30s 2m0s] Mode:demo BackgroundViewRefreshInterval:5s StorageRatePaisePerGBPerMonth:100}
+2026/08/27 02:33:24 [STARTUP] Vyomanaut — mode=DEMO — do not use for real data
+2026/08/27 02:33:24 [STARTUP] NetworkProfile: {DataShards:3 ParityShards:2 TotalShards:5 ShardSize:262144 LazyRepairR0:1 MinActiveProviders:5 MinDistinctASNs:5 MinMetroRegions:1 MinRelayNodes:0 MinCooledAccounts:5 ASNCapFraction:0.2 HeartbeatInterval:30s HeartbeatJitter:5s PollingInterval:2m0s DeparturePollingInterval:30s DHTRepublishInterval:2m0s DHTExpiryDuration:4m0s DepartureThreshold:10m0s PromisedDowntimeMaximum:10m0s AuditPeriodDuration:2m0s EscrowHoldWindow:1m0s VettingHoldWindow:2m0s PendingReceiptGCAge:5m0s RepairPromotionTimeout:3m0s ScoreWindowShort:2m0s ScoreWindowMedium:6m0s ScoreWindowLong:20m0s DualWindowDrop:0.2 VettingMinPasses:5 VettingMinDuration:5m0s VettingCapFraction:0.1 Argon2Time:1 Argon2Memory:4096 Argon2Threads:1 RequireSecretsManager:false RequireQuorum:false AllowLivePayments:false PaymentMode:mock SkipMnemonicConfirm:true RazorpayCoolingPeriod:0s IsDemoMode:true ReleaseComputationInterval:2m0s ChargeComputationInterval:1m30s AuthRequestFreshnessWindow:2m0s GCRetryBackoff:[10s 30s 2m0s] Mode:demo BackgroundViewRefreshInterval:5s StorageRatePaisePerGBPerMonth:100}
+    demo_departure_test.go:823: departed holder index=0 mid-retrieve; retrieve error=<nil>
+--- PASS: TestDepartureMidRetrievalStillGathersK (697.34s)
+PASS
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/scripts/test	698.344s
+Thu Aug 27 02:33:24 IST 2026
+# github.com/vyomanaut-labs/Vyomanaut_V2/scripts/test.test
+ld: warning: duplicate -rpath '/Users/aryan/rocksdb/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/opt/snappy/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/lib' ignored
+ld: warning: ignoring duplicate libraries: '-lbz2', '-lc++', '-llz4', '-lm', '-lrocksdb', '-lsnappy', '-lz', '-lzstd'
+=== RUN   TestTwoConcurrentDeparturesAtEmergencyFloor
+2026/08/27 02:45:29 [STARTUP] Vyomanaut — mode=DEMO — do not use for real data
+2026/08/27 02:45:29 [STARTUP] NetworkProfile: {DataShards:3 ParityShards:2 TotalShards:5 ShardSize:262144 LazyRepairR0:1 MinActiveProviders:5 MinDistinctASNs:5 MinMetroRegions:1 MinRelayNodes:0 MinCooledAccounts:5 ASNCapFraction:0.2 HeartbeatInterval:30s HeartbeatJitter:5s PollingInterval:2m0s DeparturePollingInterval:30s DHTRepublishInterval:2m0s DHTExpiryDuration:4m0s DepartureThreshold:10m0s PromisedDowntimeMaximum:10m0s AuditPeriodDuration:2m0s EscrowHoldWindow:1m0s VettingHoldWindow:2m0s PendingReceiptGCAge:5m0s RepairPromotionTimeout:3m0s ScoreWindowShort:2m0s ScoreWindowMedium:6m0s ScoreWindowLong:20m0s DualWindowDrop:0.2 VettingMinPasses:5 VettingMinDuration:5m0s VettingCapFraction:0.1 Argon2Time:1 Argon2Memory:4096 Argon2Threads:1 RequireSecretsManager:false RequireQuorum:false AllowLivePayments:false PaymentMode:mock SkipMnemonicConfirm:true RazorpayCoolingPeriod:0s IsDemoMode:true ReleaseComputationInterval:2m0s ChargeComputationInterval:1m30s AuthRequestFreshnessWindow:2m0s GCRetryBackoff:[10s 30s 2m0s] Mode:demo BackgroundViewRefreshInterval:5s StorageRatePaisePerGBPerMonth:100}
+    demo_departure_test.go:880: uploaded file_id=01a03fed-930a-7b5e-887f-7314356ddd20
+    demo_departure_test.go:887: departed indices=4,0 — leaving s=DataShards=3 exactly
+2026/08/27 02:47:09 [STARTUP] Vyomanaut — mode=DEMO — do not use for real data
+2026/08/27 02:47:09 [STARTUP] NetworkProfile: {DataShards:3 ParityShards:2 TotalShards:5 ShardSize:262144 LazyRepairR0:1 MinActiveProviders:5 MinDistinctASNs:5 MinMetroRegions:1 MinRelayNodes:0 MinCooledAccounts:5 ASNCapFraction:0.2 HeartbeatInterval:30s HeartbeatJitter:5s PollingInterval:2m0s DeparturePollingInterval:30s DHTRepublishInterval:2m0s DHTExpiryDuration:4m0s DepartureThreshold:10m0s PromisedDowntimeMaximum:10m0s AuditPeriodDuration:2m0s EscrowHoldWindow:1m0s VettingHoldWindow:2m0s PendingReceiptGCAge:5m0s RepairPromotionTimeout:3m0s ScoreWindowShort:2m0s ScoreWindowMedium:6m0s ScoreWindowLong:20m0s DualWindowDrop:0.2 VettingMinPasses:5 VettingMinDuration:5m0s VettingCapFraction:0.1 Argon2Time:1 Argon2Memory:4096 Argon2Threads:1 RequireSecretsManager:false RequireQuorum:false AllowLivePayments:false PaymentMode:mock SkipMnemonicConfirm:true RazorpayCoolingPeriod:0s IsDemoMode:true ReleaseComputationInterval:2m0s ChargeComputationInterval:1m30s AuthRequestFreshnessWindow:2m0s GCRetryBackoff:[10s 30s 2m0s] Mode:demo BackgroundViewRefreshInterval:5s StorageRatePaisePerGBPerMonth:100}
+--- PASS: TestTwoConcurrentDeparturesAtEmergencyFloor (822.51s)
+PASS
+ok  	github.com/vyomanaut-labs/Vyomanaut_V2/scripts/test	823.360s
+Thu Aug 27 02:47:09 IST 2026
+eanan@Aloks-MacBook-Air Vyomanaut_V2 % ansifilter  demo_tests.txt  > clean_demo_tests_5.txt
+
+Script done on Thu Aug 27 06:09:44 2026
