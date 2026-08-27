@@ -165,6 +165,12 @@ linters:
       - path: "internal/config/profiles\\.go"
         linters:
           - mnd
+      - path: "scripts/test/daemon_process_unix\\.go"
+        linters:
+          - unused
+      - path: "scripts/test/daemon_process_windows\\.go"
+        linters:
+          - unused
 
 formatters:
   enable:
