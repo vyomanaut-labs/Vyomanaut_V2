@@ -26,7 +26,18 @@ fi
 
 # Reverse order: providers were appended after the microservice in
 # up.sh, so reversing the file's line order stops them before it.
-mapfile -t PIDS < "$PID_FILE"
+#
+# A `while read` loop, not `mapfile -t` (bash 4.0+ only): macOS ships bash
+# 3.2.57 as /bin/bash, and /usr/bin/env bash resolves to that system bash
+# unless a newer one is explicitly first on PATH — the exact same
+# version gap that broke up.sh's original `exec {FIFO_FD}<>` fd-name
+# syntax (bash 4.1+ only) on a real Mac run of this script. Both fixed the
+# same way: fall back to whatever bash 3.2 itself supports, not whatever
+# happens to be installed in a given dev/CI sandbox.
+PIDS=()
+while IFS= read -r line; do
+  PIDS+=("$line")
+done < "$PID_FILE"
 for (( idx=${#PIDS[@]}-1; idx>=0; idx-- )); do
   pid="${PIDS[$idx]}"
   [[ -z "$pid" ]] && continue

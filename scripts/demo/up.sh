@@ -204,10 +204,22 @@ for i in $(seq 1 "$PROVIDERS"); do
   # process, let it actually send the OTP, THEN read the code back off
   # cmd/microservice's delivery log via the just-built `operator otp`
   # command, and hand it to the still-waiting onboard process exactly once.
+  #
+  # Fixed fd 3, not bash 4.1+'s `exec {name}<>file` automatic fd-name
+  # allocation: macOS ships bash 3.2.57 as /bin/bash (Apple's last GPLv2
+  # release, frozen there for licensing reasons) and /usr/bin/env bash
+  # resolves to that system bash unless a newer one is explicitly first on
+  # PATH — confirmed live, not hypothetically: `exec {FIFO_FD}<>"$FIFO"`
+  # failed on a real Mac run of this script with "exec: {FIFO_FD}: not
+  # found", bash 3.2 parsing the unrecognized `{FIFO_FD}` fd-name token as
+  # a literal command word instead. Fd 3 is closed at the end of every loop
+  # iteration below before the next provider opens it again, so reusing the
+  # same fixed number across iterations is safe — this loop is strictly
+  # sequential, never concurrent.
   FIFO="$STATE_DIR/onboard-fifo-$i"
   rm -f "$FIFO"
   mkfifo "$FIFO"
-  exec {FIFO_FD}<>"$FIFO"
+  exec 3<>"$FIFO"
 
   "$BIN_DIR/provider" onboard \
     --microservice-url="$MICROSERVICE_URL" \
@@ -216,7 +228,7 @@ for i in $(seq 1 "$PROVIDERS"); do
     --data-dir="$PROVIDER_DATA_DIR" \
     --listen-port="$PROVIDER_PORT" \
     "${ADVERTISE_FLAG[@]}" \
-    <&"$FIFO_FD" > "$onboard_log" 2>&1 &
+    <&3 > "$onboard_log" 2>&1 &
   ONBOARD_PID=$!
 
   code=""
@@ -228,20 +240,20 @@ for i in $(seq 1 "$PROVIDERS"); do
     sleep 0.5
   done
   if [[ -z "$code" ]]; then
-    exec {FIFO_FD}<&-
+    exec 3<&-
     rm -f "$FIFO"
     echo "[up.sh] provider $i: never saw an OTP for $PHONE in $OTP_LOG — see $onboard_log" >&2
     exit 1
   fi
 
-  echo "$code" >&"$FIFO_FD"
+  echo "$code" >&3
   if ! wait "$ONBOARD_PID"; then
-    exec {FIFO_FD}<&-
+    exec 3<&-
     rm -f "$FIFO"
     echo "[up.sh] provider $i: onboarding failed — see $onboard_log" >&2
     exit 1
   fi
-  exec {FIFO_FD}<&-
+  exec 3<&-
   rm -f "$FIFO"
 
   log "starting local provider $i/$PROVIDERS (run, normal mode)"
