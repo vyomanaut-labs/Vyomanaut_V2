@@ -114,8 +114,10 @@ else
   read -r -p "Your phone number, E.164 format (e.g. +919876500001): " PHONE
 
   log "onboarding — you'll be asked how much storage to share, then for the"
-  log "6-digit code. Ask the network operator to read it back to you (they"
-  log "get it by running: operator otp $PHONE)."
+  log "6-digit code. Ask the network operator to read it back to you — on"
+  log "the coordinator machine (wherever up.sh is running), they get it by"
+  log "running: operator otp $PHONE --otp-delivery-log=<path to their otp.log>"
+  log "(or with VYOMANAUT_OTP_DELIVERY_LOG set instead of the flag)."
   "$PROVIDER_BIN" onboard \
     --microservice-url="$MICROSERVICE_URL" \
     --phone="$PHONE" \

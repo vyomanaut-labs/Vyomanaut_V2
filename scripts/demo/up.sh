@@ -243,7 +243,17 @@ for i in $(seq 1 "$PROVIDERS"); do
 
   code=""
   for _ in $(seq 1 60); do
-    if raw="$("$BIN_DIR/operator" otp "$PHONE" --mode=demo --otp-delivery-log="$OTP_LOG" 2>/dev/null)"; then
+    # Flags BEFORE the positional phone argument, not after: Go's stdlib
+    # flag package stops parsing at the first non-flag token, so
+    # `operator otp "$PHONE" --mode=demo --otp-delivery-log=...` (phone
+    # first) leaves --mode and --otp-delivery-log unparsed as extra
+    # positional arguments, tripping otp.go's own `len(rest) != 1` usage
+    # check on every single call — confirmed directly, not guessed: this
+    # exact ordering reproducibly exits 2 with a usage error, while
+    # swapping the order (flags first) exits 0 with the code. The original
+    # ordering meant this loop never once succeeded, regardless of
+    # whether cmd/microservice had actually written the OTP yet.
+    if raw="$("$BIN_DIR/operator" otp --mode=demo --otp-delivery-log="$OTP_LOG" "$PHONE" 2>/dev/null)"; then
       code="$(awk '{print $1}' <<<"$raw")"
       break
     fi
