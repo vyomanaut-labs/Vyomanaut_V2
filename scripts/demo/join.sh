@@ -111,7 +111,20 @@ REGISTRATION_RECORD="$DATA_DIR/registration.json"
 if [[ -f "$REGISTRATION_RECORD" ]]; then
   log "found an existing registration under $DATA_DIR — skipping onboard, going straight to run"
 else
-  read -r -p "Your phone number, E.164 format (e.g. +919876500001): " PHONE
+  # [Minor UX gap, found alongside the --mode=demo fix above] A blank or
+  # malformed phone number here used to fall through silently to onboard.go's
+  # own validation, which does catch it correctly — but only after this
+  # script had already printed instructions referencing an empty/invalid
+  # number, which reads as confusing rather than as a clear input error.
+  # Validating here first (E.164: a leading +, then 8-15 digits) gives an
+  # immediate, specific re-prompt instead.
+  while true; do
+    read -r -p "Your phone number, E.164 format (e.g. +919876500001): " PHONE
+    if [[ "$PHONE" =~ ^\+[0-9]{8,15}$ ]]; then
+      break
+    fi
+    echo "  not E.164 format (need a leading + then 8-15 digits) — try again." >&2
+  done
 
   log "onboarding — you'll be asked how much storage to share, then for the"
   log "6-digit code. Ask the network operator to read it back to you — on"
@@ -138,7 +151,30 @@ if [[ -z "$DECLARED_STORAGE_GB" || "$DECLARED_STORAGE_GB" -le 0 ]]; then
   log "warning: could not read declared storage from $REGISTRATION_RECORD; defaulting --declared-storage-gb=$DECLARED_STORAGE_GB"
 fi
 
+# [Found live, real Mac run] `provider onboard` has no --mode flag at
+# all (it's a one-shot HTTP registration call, mode-independent), but
+# `provider run` genuinely needs it — omitting it below meant this daemon
+# defaulted to PROD's own NetworkProfile (HeartbeatInterval:4h,
+# DepartureThreshold:72h) while heartbeating against a microservice
+# enforcing DEMO's much faster thresholds (30s/10m). The observed
+# symptom: the volunteer's own provider was marked DEPARTED by the server
+# within about two minutes of onboarding, having never sent a heartbeat
+# the server would recognize as timely — not a queue or network problem,
+# just the wrong profile entirely. up.sh's own local fleet never hit this
+# because its `provider run` call already included --mode=demo; this one
+# didn't, until now.
+#
+# [Caught before shipping] A first draft of this fix put an explanatory
+# comment on its own line INSIDE this backslash-continued command, between
+# --mode=demo and --microservice-url. That is a real, silent bug in bash,
+# not just bad style: backslash-newline splicing happens before comment
+# recognition, so the comment consumes every subsequent continued line as
+# comment text — confirmed empirically (`echo "arg1" \` then a commented
+# continuation line then `"arg2"` prints only "arg1"). The broken version
+# would have run `provider run --mode=demo` with every other flag silently
+# dropped. Comments belong before a continued command, never inside one.
 exec "$PROVIDER_BIN" run \
+  --mode=demo \
   --microservice-url="$MICROSERVICE_URL" \
   --data-dir="$DATA_DIR" \
   --declared-storage-gb="$DECLARED_STORAGE_GB" \
