@@ -288,5 +288,16 @@ for i in $(seq 1 "$PROVIDERS"); do
   echo "$!" >> "$PID_FILE"
 done
 
-log "up. Logs under $LOG_DIR. Try:"
-log "  ${BIN_DIR}/operator watch --microservice-url=$MICROSERVICE_URL --admin-api-key=$ADMIN_API_KEY"
+log "up. Logs under $LOG_DIR."
+log ""
+log "In any NEW terminal, first load the state this run just wrote:"
+log "  source $ENV_FILE"
+log ""
+log "Then, to watch the live console (--mode=demo matters — without it the"
+log "console computes its own readiness thresholds against the PROD profile"
+log "instead of demo's, and every number on screen will look wrong even"
+log "though the real system underneath is fine):"
+log "  \$BIN_DIR/operator watch --mode=demo --microservice-url=\$MICROSERVICE_URL --admin-api-key=\$ADMIN_API_KEY"
+log ""
+log "To read a volunteer's OTP code (join.sh tells them to ask you for it):"
+log "  \$BIN_DIR/operator otp --mode=demo --otp-delivery-log=\$OTP_LOG <their phone number>"
