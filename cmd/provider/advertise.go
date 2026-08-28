@@ -169,7 +169,28 @@ func isSuspectVirtualInterfaceName(name string) bool {
 // broad RFC1918 172.16.0.0/12 range check would false-positive on ordinary
 // corporate LANs that happen to use nearby-but-different 172.16.0.0/12
 // addressing. [F-17E-20]
-var dockerDefaultBridgeNet = &net.IPNet{IP: net.IPv4(172, 17, 0, 0), Mask: net.CIDRMask(16, 32)}
+//
+// Expressed via net.ParseCIDR (a single string literal) rather than
+// net.IPNet{IP: net.IPv4(172, 17, 0, 0), Mask: net.CIDRMask(16, 32)}:
+// golangci-lint's mnd linter correctly flags four bare integer literals
+// with no shared name as unexplained magic numbers, and four individually
+// named octet constants would be more verbose than clarifying for a
+// single, indivisible subnet address. Parsed once at package init; a
+// parse failure here would mean this file's own literal is malformed,
+// not a runtime condition to recover from.
+var dockerDefaultBridgeNet = mustParseCIDR("172.17.0.0/16")
+
+// mustParseCIDR panics on a malformed cidr — acceptable only because every
+// caller in this file passes a compile-time-fixed literal string; a panic
+// here fires at package init, on any platform, long before this daemon
+// could ever reach the network code that uses dockerDefaultBridgeNet.
+func mustParseCIDR(cidr string) *net.IPNet {
+	_, ipNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		panic(fmt.Sprintf("advertise.go: invalid hardcoded CIDR %q: %v", cidr, err))
+	}
+	return ipNet
+}
 
 // firstNonLoopbackIPv4 scans addrs — net.InterfaceAddrs' real return value,
 // or a synthetic slice of *net.IPNet in tests — for the first IPv4 unicast
