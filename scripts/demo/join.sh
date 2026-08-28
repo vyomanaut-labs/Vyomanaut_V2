@@ -92,6 +92,16 @@ else
   log "reusing already-built provider binary at $PROVIDER_BIN (delete it to force a rebuild)"
 fi
 
+# [Third bash-3.2 landmine found in this project's scripts/demo/ — see
+# up.sh's own history] An empty array expanded bare as
+# "${ADVERTISE_FLAG[@]}" under `set -u` throws "unbound variable" on bash
+# 3.2 through 4.3 (fixed in 4.4+) — macOS's system /bin/bash is 3.2.57,
+# confirmed live on a real Mac run of up.sh. Every use of this array below
+# is written as "${ADVERTISE_FLAG[@]+"${ADVERTISE_FLAG[@]}"}" (BashFAQ
+# 112's portable idiom) instead of a bare "${ADVERTISE_FLAG[@]}",
+# specifically so an empty --advertise-addr (the common case) doesn't
+# crash this script on the exact machine a volunteer is most likely to run
+# it on.
 ADVERTISE_FLAG=()
 if [[ -n "$ADVERTISE_ADDR" ]]; then
   ADVERTISE_FLAG=(--advertise-addr "$ADVERTISE_ADDR")
@@ -111,7 +121,7 @@ else
     --phone="$PHONE" \
     --data-dir="$DATA_DIR" \
     --listen-port="$LISTEN_PORT" \
-    "${ADVERTISE_FLAG[@]}"
+    "${ADVERTISE_FLAG[@]+"${ADVERTISE_FLAG[@]}"}"
 fi
 
 log "starting provider run (normal mode). Ctrl-C to stop sharing."
@@ -131,4 +141,4 @@ exec "$PROVIDER_BIN" run \
   --data-dir="$DATA_DIR" \
   --declared-storage-gb="$DECLARED_STORAGE_GB" \
   --listen-port="$LISTEN_PORT" \
-  "${ADVERTISE_FLAG[@]}"
+  "${ADVERTISE_FLAG[@]+"${ADVERTISE_FLAG[@]}"}"

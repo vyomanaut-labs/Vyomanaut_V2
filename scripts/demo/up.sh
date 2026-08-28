@@ -188,6 +188,16 @@ for i in $(seq 1 "$PROVIDERS"); do
   PROVIDER_PORT=$((NEXT_PORT + i - 1))
   mkdir -p "$PROVIDER_DATA_DIR"
 
+  # [Third bash-3.2 landmine in this file — see up.sh's own history] An
+  # empty array expanded bare as "${ADVERTISE_FLAG[@]}" under `set -u`
+  # throws "unbound variable" on bash 3.2 through 4.3 (fixed in 4.4+) —
+  # macOS's system /bin/bash is 3.2.57, confirmed live on a real Mac run.
+  # Every use of this array below is written as
+  # "${ADVERTISE_FLAG[@]+"${ADVERTISE_FLAG[@]}"}" (BashFAQ 112's portable
+  # idiom) instead of a bare "${ADVERTISE_FLAG[@]}", specifically so an
+  # empty ADVERTISE_ADDR (the common case — most volunteers have exactly
+  # one usable interface) doesn't crash this script on its most common
+  # target platform.
   ADVERTISE_FLAG=()
   if [[ -n "$ADVERTISE_ADDR" ]]; then
     ADVERTISE_FLAG=(--advertise-addr "$ADVERTISE_ADDR")
@@ -227,7 +237,7 @@ for i in $(seq 1 "$PROVIDERS"); do
     --storage-gb="$STORAGE_GB" \
     --data-dir="$PROVIDER_DATA_DIR" \
     --listen-port="$PROVIDER_PORT" \
-    "${ADVERTISE_FLAG[@]}" \
+    "${ADVERTISE_FLAG[@]+"${ADVERTISE_FLAG[@]}"}" \
     <&3 > "$onboard_log" 2>&1 &
   ONBOARD_PID=$!
 
@@ -263,7 +273,7 @@ for i in $(seq 1 "$PROVIDERS"); do
       --data-dir="$PROVIDER_DATA_DIR" \
       --declared-storage-gb="$STORAGE_GB" \
       --listen-port="$PROVIDER_PORT" \
-      "${ADVERTISE_FLAG[@]}" \
+      "${ADVERTISE_FLAG[@]+"${ADVERTISE_FLAG[@]}"}" \
       > "$LOG_DIR/provider-$i.log" 2>&1 &
   echo "$!" >> "$PID_FILE"
 done
