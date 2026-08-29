@@ -1092,3 +1092,370 @@ func gracefulDepartProvider(t *testing.T, ctx context.Context, providerBinPath, 
 	}
 	return string(output)
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// M17-E Session 17.8.2 additions (scripts/test/demo_requirements_test.go,
+// the eleven founding requirements — ADR-084 Appendix A)
+// ═══════════════════════════════════════════════════════════════════════
+
+// buildOperatorBinary builds cmd/operator, mirroring buildClientBinary's
+// own pattern exactly (same repo-root discovery, same t.TempDir() output
+// location) — for the identical reason buildClientBinary itself gives:
+// demo_timeline_test.go's buildBinaries (microservice, provider only) is
+// not in this session's own FILES list to extend.
+func buildOperatorBinary(t *testing.T) string {
+	t.Helper()
+	binDir := t.TempDir()
+	repoRoot := findRepoRoot(t)
+	operatorPath := filepath.Join(binDir, "operator")
+
+	cmd := exec.Command("go", "build", "-o", operatorPath, "./cmd/operator/")
+	cmd.Dir = repoRoot
+	cmd.Env = os.Environ()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("go build ./cmd/operator/: %v\n%s", err, output)
+	}
+	return operatorPath
+}
+
+// runOperatorJSON runs the compiled cmd/operator binary once, appending
+// --json if the caller did not already include it, and returns its
+// stdout/stderr — mirroring runClientJSON's own discipline exactly (same
+// --json enforcement, same non-zero-exit-fails-the-test behavior), for the
+// identical reason: every assertion this session's own tests make against
+// cmd/operator's output parses --json, never screen-scrapes its
+// human-readable rendering.
+func runOperatorJSON(t *testing.T, ctx context.Context, operatorBinPath string, args []string) (stdout, stderr string) {
+	t.Helper()
+	hasJSON := false
+	for _, a := range args {
+		if a == "--json" {
+			hasJSON = true
+		}
+	}
+	if !hasJSON {
+		args = append(args, "--json")
+	}
+	cmd := exec.CommandContext(ctx, operatorBinPath, args...)
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	err := cmd.Run()
+	stdout, stderr = outBuf.String(), errBuf.String()
+	if err != nil {
+		t.Fatalf("cmd/operator %v: %v\nstdout: %s\nstderr: %s", args, err, stdout, stderr)
+	}
+	return stdout, stderr
+}
+
+// onboardRegistrationRecord mirrors cmd/provider/onboard.go's own
+// (unexported) registrationRecord JSON shape exactly, confirmed against
+// that struct's own `json:` tags directly rather than assumed. This
+// package cannot import cmd/provider's own type — it is a second
+// `package main`, and IC §4's import rule runs the other way in any case
+// (cmd/ wires internal/; nothing wires cmd/) — so this is a local mirror,
+// the same convention onboard.go/otp.go themselves already establish for
+// the wire formats THEY read.
+type onboardRegistrationRecord struct {
+	ProviderID        string `json:"provider_id"`
+	Token             string `json:"token"`
+	DeclaredStorageGB int    `json:"declared_storage_gb"`
+}
+
+// readOnboardRegistrationRecord reads dataDir/registration.json — the
+// exact file onboard.go's saveRegistrationRecord persists
+// (registrationRecordFileName) — rather than parsing onboardCmd's own
+// human-readable stdout line, honouring this session's "every assertion
+// parses JSON, never screen-scrapes" discipline even for a subcommand
+// (`onboard`) that has no --json flag of its own.
+func readOnboardRegistrationRecord(t *testing.T, dataDir string) onboardRegistrationRecord {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dataDir, "registration.json"))
+	if err != nil {
+		t.Fatalf("read registration.json under %s: %v", dataDir, err)
+	}
+	var rec onboardRegistrationRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("parse registration.json under %s: %v", dataDir, err)
+	}
+	return rec
+}
+
+// onboardPhoneNumber generates a phone number under a +9196 prefix —
+// distinct from every other prefix this package's helpers already use
+// (+9199 registerOwner, +91987653 startProviders' sim fleet, +9197
+// cliPhoneNumber) — so a normal-mode onboarding flow run alongside any
+// other helper against the same database can never collide.
+func onboardPhoneNumber(index int) string {
+	return fmt.Sprintf("+9196%07d", index)
+}
+
+// otpCodeViaOperator runs `operator otp <phone> --otp-delivery-log=<path>
+// --mode=demo --json` — the exact command scripts/demo/join.sh's own
+// instructions tell a real network operator to run — and returns the
+// decoded code. Deliberately NOT recoverOTPCode
+// (demo_timeline_test.go): that helper brute-forces otp_codes.code_hash
+// directly against the database, the correct approach for every OTHER
+// helper in this suite (registerOwner, startProviders' own sim-mode
+// registration) but the wrong artifact under test here —
+// TestReqD02/TestReqD11 exist specifically to close F-D-2/F-D-3 in CI by
+// exercising the SAME two-party, no-database operator/volunteer flow the
+// physical rig uses, not a harness shortcut around it. Retries briefly:
+// FileOtpSender's own write (internal/api/otp.go) completes synchronously
+// inside the HTTP handler onboard's own sendOTP call already waited on, so
+// no real race is expected, but a short retry loop costs little and
+// removes any doubt.
+func otpCodeViaOperator(t *testing.T, ctx context.Context, operatorBinPath, deliveryLogPath, phone string) string {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		pollContextAlive(t, ctx, "otpCodeViaOperator")
+		cmd := exec.CommandContext(ctx, operatorBinPath, "otp", phone,
+			"--otp-delivery-log="+deliveryLogPath, "--mode=demo", "--json")
+		var outBuf, errBuf bytes.Buffer
+		cmd.Stdout = &outBuf
+		cmd.Stderr = &errBuf
+		err := cmd.Run()
+		if err == nil {
+			var result struct {
+				Code string `json:"code"`
+			}
+			lastJSONLine(t, outBuf.String(), &result)
+			if result.Code != "" {
+				return result.Code
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("operator otp %s --otp-delivery-log=%s: no code found within 30s: %v\nstdout: %s\nstderr: %s",
+				phone, deliveryLogPath, err, outBuf.String(), errBuf.String())
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// onboardProviderInteractive drives `provider onboard` as a REAL
+// subprocess through its interactive OTP prompt — the identical code path
+// scripts/demo/join.sh drives on a volunteer's own desktop (F-D-2), never
+// scripted around. --storage-gb is always supplied so onboard's own
+// storage prompt (resolveStorageGB) is skipped, leaving the OTP code as
+// this function's only interactive exchange — driven via os/exec's Stdin
+// as a real io.Writer pipe (interactiveClient, above), not a bash FIFO
+// trick, per the M17-E Session 17.8.1 handoff's own "one thing worth
+// deciding" note on this exact choice. Returns the registration record
+// onboard itself persisted to dataDir/registration.json.
+func onboardProviderInteractive(t *testing.T, ctx context.Context, providerBinPath, operatorBinPath, microserviceURL, deliveryLogPath, dataDir, phone string, listenPort, storageGB int) onboardRegistrationRecord {
+	t.Helper()
+
+	cmd := exec.CommandContext(ctx, providerBinPath, "onboard",
+		"--microservice-url="+microserviceURL,
+		"--phone="+phone,
+		fmt.Sprintf("--storage-gb=%d", storageGB),
+		"--data-dir="+dataDir,
+		fmt.Sprintf("--listen-port=%d", listenPort),
+		"--advertise-addr=127.0.0.1", // sandbox determinism — resolveAdvertiseHost takes an explicit value as-is, no autodetection race (advertise.go)
+	)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("provider onboard (phone %s): StdinPipe: %v", phone, err)
+	}
+	buf := &syncBuffer{}
+	cmd.Stdout = buf
+	cmd.Stderr = buf
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start provider onboard (phone %s): %v", phone, err)
+	}
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+	ic := &interactiveClient{cmd: cmd, stdin: stdin, buf: buf, waitCh: waitCh}
+
+	ic.waitForPromptContaining(t, "Enter the 6-digit code", 30*time.Second)
+	code := otpCodeViaOperator(t, ctx, operatorBinPath, deliveryLogPath, phone)
+	ic.send(t, code)
+
+	if _, err := ic.finish(t, 30*time.Second); err != nil {
+		t.Fatalf("provider onboard (phone %s): %v\noutput:\n%s", phone, err, ic.buf.String())
+	}
+
+	return readOnboardRegistrationRecord(t, dataDir)
+}
+
+// normalModeProviderInstance is one provider daemon started via `provider
+// run` against an identity `provider onboard` already registered —
+// requirement 2's real code path (ADR-084 D-7, F-D-3): a distinct
+// --listen-port per instance, never --sim-count/--sim-only-index.
+type normalModeProviderInstance struct {
+	cmd     *exec.Cmd
+	logPath string
+	dataDir string
+}
+
+// startProviderNormalMode runs `provider run --mode=demo` as a real,
+// long-lived daemon against dataDir — the SAME dataDir
+// onboardProviderInteractive already wrote registration.json into, so
+// runCmd's own loadRegistrationRecord priority path (main.go's own
+// comment: registration persisted by `provider onboard` "takes priority
+// over --registration-bearer-token outright") picks it up with no
+// --registration-bearer-token needed at all, matching join.sh's own
+// invocation exactly.
+func startProviderNormalMode(t *testing.T, ctx context.Context, providerBinPath, microserviceURL, dataDir string, listenPort, declaredStorageGB int) *normalModeProviderInstance {
+	t.Helper()
+
+	logDir, err := os.MkdirTemp("", "vyomanaut-provider-normal-log-")
+	if err != nil {
+		t.Fatalf("create normal-mode provider log dir: %v", err)
+	}
+	logPath := filepath.Join(logDir, "provider.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		t.Fatalf("create normal-mode provider log file: %v", err)
+	}
+
+	cmd := exec.CommandContext(ctx, providerBinPath, "run",
+		"--mode=demo",
+		"--microservice-url="+microserviceURL,
+		"--data-dir="+dataDir,
+		fmt.Sprintf("--declared-storage-gb=%d", declaredStorageGB),
+		fmt.Sprintf("--listen-port=%d", listenPort),
+		"--advertise-addr=127.0.0.1",
+	)
+	setNewProcessGroup(cmd) // F-17E-14: see startMicroservice's own note (demo_timeline_test.go)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start normal-mode provider run (data-dir=%s): %v", dataDir, err)
+	}
+	registerDaemon(cmd.Process.Pid, providerBinPath, "provider") // F-17E-14
+
+	inst := &normalModeProviderInstance{cmd: cmd, logPath: logPath, dataDir: dataDir}
+	t.Cleanup(func() {
+		killDaemonProcessGroup(cmd)
+		_ = logFile.Close()
+		if t.Failed() {
+			if content, readErr := os.ReadFile(logPath); readErr == nil {
+				t.Logf("normal-mode provider log (data-dir=%s, %s):\n%s", dataDir, logPath, content)
+			} else {
+				t.Logf("could not read normal-mode provider log at %s: %v", logPath, readErr)
+			}
+		}
+		_ = os.RemoveAll(logDir)
+	})
+	return inst
+}
+
+// normalModeStorageGB is an arbitrary, valid (schema CHECK: 10-100000)
+// declared allocation used by startNormalModeProviderFleet's own fleet —
+// TestReqD11 uses its own distinct, deliberately unusual value instead, so
+// that test's own assertion is unambiguous evidence of ITS choice
+// specifically, not a coincidental match against this fleet-wide default.
+const normalModeStorageGB = 25
+
+// normalModeProviderFleet is count providers, each onboarded
+// (onboardProviderInteractive) and then run (startProviderNormalMode) on
+// its own --listen-port — requirement 2's actual code path, closing
+// F-D-2/F-D-3 in CI (Session 17.8.2 task item 2) rather than only at the
+// physical rig.
+type normalModeProviderFleet struct {
+	instances []*normalModeProviderInstance
+	records   []onboardRegistrationRecord
+}
+
+// startNormalModeProviderFleet onboards and runs count providers in
+// normal mode — no --sim-count anywhere on this path (F-D-3's own
+// standing rule, scripts/demo/up.sh's identical constraint applied here to
+// the Go integration-test equivalent of the same flow).
+func startNormalModeProviderFleet(t *testing.T, ctx context.Context, providerBinPath, operatorBinPath, microserviceURL, deliveryLogPath string, count int) *normalModeProviderFleet {
+	t.Helper()
+	fleet := &normalModeProviderFleet{}
+	for i := 0; i < count; i++ {
+		phone := onboardPhoneNumber(i)
+		dataDir := t.TempDir()
+		listenPort := freePort(t)
+
+		rec := onboardProviderInteractive(t, ctx, providerBinPath, operatorBinPath, microserviceURL, deliveryLogPath, dataDir, phone, listenPort, normalModeStorageGB)
+		fleet.records = append(fleet.records, rec)
+
+		inst := startProviderNormalMode(t, ctx, providerBinPath, microserviceURL, dataDir, listenPort, normalModeStorageGB)
+		fleet.instances = append(fleet.instances, inst)
+	}
+	return fleet
+}
+
+// pollProviderRegisteredByPhone mirrors demo_timeline_test.go's own
+// pollProviderRegistered, generalised to accept phone directly rather than
+// reconstructing it from startProviders' own +91987653NNNN sim-fleet
+// convention — Session 17.8.2's normal-mode onboarding flow uses a
+// different phone convention entirely (onboardPhoneNumber, above), so that
+// convention cannot be reused unchanged here.
+func pollProviderRegisteredByPhone(t *testing.T, ctx context.Context, db *sql.DB, phone string, timeout time.Duration) uuid.UUID {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		pollContextAlive(t, ctx, "pollProviderRegisteredByPhone")
+		var providerID uuid.UUID
+		err := db.QueryRowContext(ctx, `SELECT provider_id FROM providers WHERE phone_number = $1`, phone).Scan(&providerID)
+		if err == nil {
+			return providerID
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pollProviderRegisteredByPhone: phone %s never registered within %s: %v", phone, timeout, err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// seedAuditPeriodsForActiveProviders inserts one open audit_periods row
+// (covering "now") for every currently-ACTIVE provider.
+//
+// [Flagged, not fabricated] No production code path in this codebase
+// inserts into audit_periods at all — confirmed by grep across the whole
+// repository, not assumed: the only two `INSERT INTO audit_periods`
+// statements anywhere are internal/api/provider_test.go's and
+// internal/payment/razorpay_test.go's own unit-test fixtures.
+// ComputeMonthlyRelease/PreviewMonthlyRelease (internal/payment/release.go)
+// are both real and fully implemented — but nothing upstream of them, in
+// this live system, ever creates the row their shared
+// pendingReleaseCandidates query reads. A live `operator payout` run today
+// would see an empty audit_periods table and report zero providers
+// regardless of how many real files, charges, or audit passes occurred.
+// This helper seeds the row TestReqD10 needs directly, using the identical
+// INSERT shape those two existing test fixtures already establish, so that
+// test can exercise the real, correctly-implemented split/remainder
+// arithmetic (splitByLargestRemainder, computeReleaseForProvider) end to
+// end despite the missing production wiring. A follow-up session should
+// wire a real audit_periods-creation path (most likely alongside
+// RunChargeComputationLoop or the audit scheduler itself) rather than
+// leave this seed as a permanent substitute — flagged here as a genuine
+// gap, not silently worked around.
+func seedAuditPeriodsForActiveProviders(t *testing.T, ctx context.Context, db *sql.DB) {
+	t.Helper()
+	rows, err := db.QueryContext(ctx, `SELECT provider_id FROM providers WHERE status = 'ACTIVE'`)
+	if err != nil {
+		t.Fatalf("seedAuditPeriodsForActiveProviders: query ACTIVE providers: %v", err)
+	}
+	var providerIDs []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			t.Fatalf("seedAuditPeriodsForActiveProviders: scan: %v", err)
+		}
+		providerIDs = append(providerIDs, id)
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatalf("seedAuditPeriodsForActiveProviders: iterate: %v", err)
+	}
+	if len(providerIDs) == 0 {
+		t.Fatalf("seedAuditPeriodsForActiveProviders: no ACTIVE providers found to seed")
+	}
+
+	periodStart := time.Now().Add(-1 * time.Hour)
+	periodEnd := time.Now().Add(24 * time.Hour)
+	for _, id := range providerIDs {
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO audit_periods (provider_id, period_start, period_end) VALUES ($1, $2, $3)`,
+			id, periodStart, periodEnd); err != nil {
+			t.Fatalf("seedAuditPeriodsForActiveProviders: insert for provider %s: %v", id, err)
+		}
+	}
+}
