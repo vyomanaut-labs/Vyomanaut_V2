@@ -1118,13 +1118,31 @@ func buildOperatorBinary(t *testing.T) string {
 	return operatorPath
 }
 
-// runOperatorJSON runs the compiled cmd/operator binary once, appending
-// --json if the caller did not already include it, and returns its
-// stdout/stderr — mirroring runClientJSON's own discipline exactly (same
-// --json enforcement, same non-zero-exit-fails-the-test behavior), for the
-// identical reason: every assertion this session's own tests make against
-// cmd/operator's output parses --json, never screen-scrapes its
+// runOperatorJSON runs the compiled cmd/operator binary once and returns
+// its stdout/stderr — mirroring runClientJSON's own discipline exactly
+// (same --json enforcement, same non-zero-exit-fails-the-test behavior),
+// for the identical reason: every assertion this session's own tests make
+// against cmd/operator's output parses --json, never screen-scrapes its
 // human-readable rendering.
+//
+// [Fixed — live-run finding, TestReqD02/D03/D04/D09/D11 all failed the
+// same way: "usage: operator otp <phone> --otp-delivery-log=<path>
+// [flags]" / "--microservice-url is required"] cmd/operator's subcommands
+// parse flags with the stdlib flag package (confirmed directly,
+// cmd/operator/dispatch.go's own fs.Parse(args) call sites), which stops
+// consuming argv at the first token that doesn't start with "-" — a
+// positional argument (a phone number, a file_id, a provider_id) appearing
+// BEFORE the flags silently swallows every flag after it into fs.Args()
+// instead, so --microservice-url/--admin-api-key/--otp-delivery-log/--mode
+// are never actually set and fall back to their empty defaults. This is
+// exactly the ordering scripts/demo/join.sh's own working instructions
+// already use (`operator otp --mode=demo --otp-delivery-log="$OTP_LOG"
+// "+919571276889"`) and every prior session's own manual TUI verification
+// confirmed live — flags first, positional argument last. --json is
+// inserted right after the subcommand name (never appended at the end) so
+// this holds regardless of whether a future caller also passes a
+// positional argument and forgets --json: appending after a positional
+// argument would silently reproduce this exact bug.
 func runOperatorJSON(t *testing.T, ctx context.Context, operatorBinPath string, args []string) (stdout, stderr string) {
 	t.Helper()
 	hasJSON := false
@@ -1134,7 +1152,14 @@ func runOperatorJSON(t *testing.T, ctx context.Context, operatorBinPath string, 
 		}
 	}
 	if !hasJSON {
-		args = append(args, "--json")
+		if len(args) == 0 {
+			args = []string{"--json"}
+		} else {
+			withJSON := make([]string, 0, len(args)+1)
+			withJSON = append(withJSON, args[0], "--json")
+			withJSON = append(withJSON, args[1:]...)
+			args = withJSON
+		}
 	}
 	cmd := exec.CommandContext(ctx, operatorBinPath, args...)
 	var outBuf, errBuf bytes.Buffer
@@ -1190,9 +1215,9 @@ func onboardPhoneNumber(index int) string {
 	return fmt.Sprintf("+9196%07d", index)
 }
 
-// otpCodeViaOperator runs `operator otp <phone> --otp-delivery-log=<path>
-// --mode=demo --json` — the exact command scripts/demo/join.sh's own
-// instructions tell a real network operator to run — and returns the
+// otpCodeViaOperator runs `operator otp --otp-delivery-log=<path>
+// --mode=demo --json <phone>` — the exact command scripts/demo/join.sh's
+// own instructions tell a real network operator to run — and returns the
 // decoded code. Deliberately NOT recoverOTPCode
 // (demo_timeline_test.go): that helper brute-forces otp_codes.code_hash
 // directly against the database, the correct approach for every OTHER
@@ -1205,13 +1230,22 @@ func onboardPhoneNumber(index int) string {
 // inside the HTTP handler onboard's own sendOTP call already waited on, so
 // no real race is expected, but a short retry loop costs little and
 // removes any doubt.
+//
+// [Fixed — live-run finding] phone MUST come after every flag, not before:
+// cmd/operator's stdlib flag.Parse stops at the first non-flag argument,
+// so `otp <phone> --otp-delivery-log=...` silently drops every flag after
+// the phone number, always failing with "usage: operator otp <phone>
+// --otp-delivery-log=<path> [flags]" regardless of whether the code
+// actually exists in the delivery log. See runOperatorJSON's own doc
+// comment (same file) for the full account — this function predates that
+// helper and had the identical bug independently.
 func otpCodeViaOperator(t *testing.T, ctx context.Context, operatorBinPath, deliveryLogPath, phone string) string {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		pollContextAlive(t, ctx, "otpCodeViaOperator")
-		cmd := exec.CommandContext(ctx, operatorBinPath, "otp", phone,
-			"--otp-delivery-log="+deliveryLogPath, "--mode=demo", "--json")
+		cmd := exec.CommandContext(ctx, operatorBinPath,
+			"otp", "--otp-delivery-log="+deliveryLogPath, "--mode=demo", "--json", phone)
 		var outBuf, errBuf bytes.Buffer
 		cmd.Stdout = &outBuf
 		cmd.Stderr = &errBuf
@@ -1226,8 +1260,8 @@ func otpCodeViaOperator(t *testing.T, ctx context.Context, operatorBinPath, deli
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("operator otp %s --otp-delivery-log=%s: no code found within 30s: %v\nstdout: %s\nstderr: %s",
-				phone, deliveryLogPath, err, outBuf.String(), errBuf.String())
+			t.Fatalf("operator otp --otp-delivery-log=%s %s: no code found within 30s: %v\nstdout: %s\nstderr: %s",
+				deliveryLogPath, phone, err, outBuf.String(), errBuf.String())
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
