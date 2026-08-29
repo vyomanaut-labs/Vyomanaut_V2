@@ -129,8 +129,10 @@ else
   log "onboarding — you'll be asked how much storage to share, then for the"
   log "6-digit code. Ask the network operator to read it back to you — on"
   log "the coordinator machine (wherever up.sh is running), they get it by"
-  log "running: operator otp $PHONE --otp-delivery-log=<path to their otp.log>"
-  log "(or with VYOMANAUT_OTP_DELIVERY_LOG set instead of the flag)."
+  log "running: operator otp --otp-delivery-log=<path to their otp.log> $PHONE"
+  log "(or with VYOMANAUT_OTP_DELIVERY_LOG set instead of the flag). Flags"
+  log "must come before the phone number — cmd/operator's flag parser stops"
+  log "at the first non-flag argument (see up.sh's own note on this)."
   "$PROVIDER_BIN" onboard \
     --microservice-url="$MICROSERVICE_URL" \
     --phone="$PHONE" \

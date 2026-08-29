@@ -66,7 +66,10 @@ if (Test-Path $RegistrationRecord) {
 
     Write-Log "onboarding — you'll be asked how much storage to share, then for the"
     Write-Log "6-digit code. Ask the network operator to read it back to you (they"
-    Write-Log "get it by running: operator otp $Phone)."
+    Write-Log "get it by running: operator otp --otp-delivery-log=<path to their otp.log> $Phone"
+    Write-Log "-- or with VYOMANAUT_OTP_DELIVERY_LOG set instead of the flag. Flags"
+    Write-Log "must come before the phone number, or cmd/operator's flag parser stops"
+    Write-Log "parsing at the phone number and drops every flag after it.)"
 
     $onboardArgs = @(
         "onboard",
