@@ -235,15 +235,43 @@ func acquireBackgroundSlot(ctx context.Context) (release func(), err error) {
 }
 
 // backgroundRefreshedViews are the materialized views this loop keeps
-// current. Order is deliberate but not load-bearing: none of the three
-// views reads from another, so a partial failure partway through (logged,
-// not fatal — see runBackgroundViewRefreshLoop) only leaves whichever views
+// current. Order is deliberate but not load-bearing: none of the views
+// reads from another, so a partial failure partway through (logged, not
+// fatal — see runBackgroundViewRefreshLoop) only leaves whichever views
 // weren't reached yet stale until the next tick, same as if the whole tick
 // were skipped.
+//
+// [Fixed — live-run finding, M17-E Session 17.8.2's own TestReqD10] added
+// "mv_provider_scores": that view is DROPPED and CREATEd exactly once, at
+// microservice startup (scores_view.go's regenerateProviderScoresView),
+// before any provider has registered or been audited — it was never
+// wired into this loop or any other periodic refresh, so it was
+// permanently frozen at zero rows for the entire life of every
+// microservice process. Every caller of scoring.GetScore/
+// GetScoreFromPrimary (internal/payment.PreviewMonthlyRelease/
+// ComputeMonthlyRelease, internal/repair.SelectReplacementProvider) was
+// silently reading a snapshot from before any audit history existed.
+// PreviewMonthlyRelease surfaced this loudly (a hard 500 the first time
+// `operator payout` was ever actually exercised against a live run — see
+// that endpoint's own errors.Join behavior, which turns any one
+// candidate's missing-score error into a total failure for the whole
+// batch); SelectReplacementProvider evidently tolerates a missing score
+// more gracefully, which is presumably why this went unnoticed through
+// every prior repair-pipeline test. mv_provider_scores already carries
+// the unique index REFRESH MATERIALIZED VIEW CONCURRENTLY needs
+// (providerScoresViewTemplate's own final CREATE UNIQUE INDEX statement,
+// scores_view.go), so it drops into this exact mechanism with no further
+// schema change. Flagged for its own review rather than folded silently
+// into a test-only fix: this is a genuine, previously-undiscovered
+// production gap in scoring/payment/repair, not a Session 17.8.2 test bug,
+// and may warrant its own ADR and a design decision on whether it belongs
+// in this shared, 5-second-interval loop at all versus a
+// scoring-specific refresh cadence tied to ScoreWindowShort.
 var backgroundRefreshedViews = [...]string{
 	"mv_owner_escrow_balance",
 	"mv_provider_escrow_balance",
 	"mv_segment_shard_counts",
+	"mv_provider_scores",
 }
 
 // runBackgroundViewRefreshLoop implements the "view refresh" background
