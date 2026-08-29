@@ -69,9 +69,19 @@ import (
 // ═══════════════════════════════════════════════════════════════════════
 
 func TestReqD01OwnerUploadsLocalFile(t *testing.T) {
-	env := setupCLIDemoEnv(t, 30*time.Minute)
+	// [Widened — live-run finding, shared class with
+	// TestDepartureMidRetrievalStillGathersK] pollAllProvidersActive's own
+	// 25-minute deadline is occasionally too tight for a 7th provider's
+	// ACTIVE transition on real hardware — confirmed live twice in the
+	// same run (this suite's own TestDepartureMidRetrievalStillGathersK
+	// and TestReqD08, both failing with the identical "last count: 6"
+	// message). Bumped here, and the outer context timeout correspondingly,
+	// rather than only bumping the outer `go test -timeout` flag, since
+	// THIS internal deadline — not the process-level one — is what was
+	// actually being hit.
+	env := setupCLIDemoEnv(t, 40*time.Minute)
 	startProviders(t, env.ctx, env.db, env.providerPath, env.ms.baseURL)
-	pollAllProvidersActive(t, env.ctx, env.db, 25*time.Minute)
+	pollAllProvidersActive(t, env.ctx, env.db, 35*time.Minute)
 
 	dataDir := t.TempDir()
 	registerAndDepositViaCLI(t, env, dataDir, 100_000_00) // ₹100,000 in paise
@@ -109,7 +119,10 @@ func TestReqD01OwnerUploadsLocalFile(t *testing.T) {
 
 func TestReqD02SevenProvidersVolunteerAndReachActive(t *testing.T) {
 	db := liveDB(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Minute)
+	// [Widened — same live-run finding as TestReqD01] 45m outer / 35m
+	// poll, not 40m/25m — see TestReqD01's own comment for the full
+	// account.
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 	defer cancel()
 	resetDemoDatabase(t, ctx, db)
 
@@ -132,7 +145,7 @@ func TestReqD02SevenProvidersVolunteerAndReachActive(t *testing.T) {
 		}
 	}
 
-	pollAllProvidersActive(t, ctx, db, 25*time.Minute)
+	pollAllProvidersActive(t, ctx, db, 35*time.Minute)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -142,7 +155,8 @@ func TestReqD02SevenProvidersVolunteerAndReachActive(t *testing.T) {
 
 func TestReqD03FileIsEncryptedAndDistributedAcrossDistinctASNs(t *testing.T) {
 	db := liveDB(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	// [Widened — same live-run finding as TestReqD01/D02.]
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 	defer cancel()
 	resetDemoDatabase(t, ctx, db)
 
@@ -153,7 +167,7 @@ func TestReqD03FileIsEncryptedAndDistributedAcrossDistinctASNs(t *testing.T) {
 	depositForOwner(t, ctx, ms.baseURL, owner, 100_000_00)
 	startProviders(t, ctx, db, providerPath, ms.baseURL)
 	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 12*time.Minute)
-	pollAllProvidersActive(t, ctx, db, 25*time.Minute)
+	pollAllProvidersActive(t, ctx, db, 35*time.Minute)
 
 	fileID, _, plaintext := uploadTestFileTracked(t, ctx, ms, owner, testUploadBytes)
 
@@ -165,11 +179,18 @@ func TestReqD03FileIsEncryptedAndDistributedAcrossDistinctASNs(t *testing.T) {
 	// where "distributed among the providers" and "encrypted" (i.e.
 	// content the console structurally cannot show) are both checkable at
 	// once.
+	//
+	// [Fixed — live-run finding] file_id (a positional argument) must come
+	// LAST: cmd/operator's stdlib flag.Parse stops at the first non-flag
+	// token, so putting it before the flags silently drops every flag that
+	// follows — see runOperatorJSON's own doc comment (helpers_test.go)
+	// for the full account.
 	stdout, _ := runOperatorJSON(t, ctx, operatorPath, []string{
-		"shards", fileID.String(),
+		"shards",
 		"--microservice-url=" + ms.baseURL,
 		"--admin-api-key=" + ms.adminAPIKey,
 		"--mode=demo",
+		fileID.String(),
 	})
 
 	var shardsResult struct {
@@ -221,7 +242,8 @@ func TestReqD03FileIsEncryptedAndDistributedAcrossDistinctASNs(t *testing.T) {
 
 func TestReqD04OperatorSeesNetworkStateAndCannotDecode(t *testing.T) {
 	db := liveDB(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	// [Widened — same live-run finding as TestReqD01/D02/D03.]
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 	defer cancel()
 	resetDemoDatabase(t, ctx, db)
 
@@ -230,7 +252,7 @@ func TestReqD04OperatorSeesNetworkStateAndCannotDecode(t *testing.T) {
 	clientBin := buildClientBinary(t)
 	ms := startMicroservice(t, ctx, microservicePath)
 	startProviders(t, ctx, db, providerPath, ms.baseURL)
-	pollAllProvidersActive(t, ctx, db, 25*time.Minute)
+	pollAllProvidersActive(t, ctx, db, 35*time.Minute)
 
 	dataDir := t.TempDir()
 	phone := cliPhoneNumber(t, randSuffix(t))
@@ -293,11 +315,14 @@ func TestReqD04OperatorSeesNetworkStateAndCannotDecode(t *testing.T) {
 		t.Errorf("operator watch --json reported no providers — requirement 4's \"monitor a new node entry\" half")
 	}
 
+	// [Fixed — live-run finding, same class as TestReqD03] file_id last,
+	// after every flag — see runOperatorJSON's own doc comment.
 	shardsStdout, _ := runOperatorJSON(t, ctx, operatorPath, []string{
-		"shards", uploadResult.FileID,
+		"shards",
 		"--microservice-url=" + ms.baseURL,
 		"--admin-api-key=" + ms.adminAPIKey,
 		"--mode=demo",
+		uploadResult.FileID,
 	})
 	var shardsResult struct {
 		FileID string `json:"file_id"`
@@ -348,7 +373,10 @@ func TestReqD04OperatorSeesNetworkStateAndCannotDecode(t *testing.T) {
 
 func TestReqD05ProviderLocalStorageIsCiphertext(t *testing.T) {
 	db := liveDB(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
+	// [Widened — same live-run finding as TestReqD01-04; larger margin
+	// here since this test also onboards a fleet AND does the
+	// upload/kill/inspect/full-store-scan work afterward.]
+	ctx, cancel := context.WithTimeout(context.Background(), 55*time.Minute)
 	defer cancel()
 	resetDemoDatabase(t, ctx, db)
 
@@ -365,7 +393,7 @@ func TestReqD05ProviderLocalStorageIsCiphertext(t *testing.T) {
 	// fleet member, matching inspect.go's own designed usage, rather than
 	// the sim-mode fleet most other tests in this file use.
 	fleet := startNormalModeProviderFleet(t, ctx, providerPath, operatorPath, ms.baseURL, deliveryLogPath, testSimCount)
-	pollAllProvidersActive(t, ctx, db, 25*time.Minute)
+	pollAllProvidersActive(t, ctx, db, 35*time.Minute)
 
 	owner := registerOwner(t, ctx, db, ms.baseURL)
 	depositForOwner(t, ctx, ms.baseURL, owner, 100_000_00)
@@ -482,26 +510,46 @@ func TestReqD06HeartbeatMarksProviderOnline(t *testing.T) {
 	ms := startMicroservice(t, ctx, microservicePath)
 	startProviders(t, ctx, db, providerPath, ms.baseURL)
 
+	// [Fixed — live-run finding] last_heartbeat_ts is NOT a reliable signal
+	// that the periodic heartbeat mechanism has fired: F-17E-02
+	// (internal/api/provider.go's own registration handler) deliberately
+	// seeds last_heartbeat_ts = NOW() at REGISTRATION time too — a real
+	// proof-of-life event in its own right, and the fix for a genuine
+	// departure-detection bug (a provider killed before its first
+	// heartbeat could never be detected as departed). So
+	// last_heartbeat_ts IS NOT NULL is true from the moment of
+	// registration onward, before the heartbeat mechanism this
+	// requirement is actually about has run even once — confirmed live: a
+	// fresh 7-provider fleet failed this test's old assertion within 8
+	// seconds, far less than one HeartbeatInterval (30s). The unambiguous
+	// signal that HandleHeartbeat specifically (not HandleRegister) has
+	// processed a real heartbeat is providers.status advancing past
+	// PENDING_ONBOARDING — HandleHeartbeat's own atomic UPDATE is the
+	// ONLY place in the codebase that CASEs status from PENDING_ONBOARDING
+	// to VETTING (confirmed by search), and it sets last_heartbeat_ts in
+	// that same statement, so a provider whose status has advanced is
+	// live proof both columns reflect a genuine heartbeat, not just
+	// registration.
 	const heartbeatWait = 3 * time.Minute
 	deadline := time.Now().Add(heartbeatWait)
 	for {
 		pollContextAlive(t, ctx, "TestReqD06HeartbeatMarksProviderOnline")
 		var count int
-		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM providers WHERE last_heartbeat_ts IS NOT NULL`).Scan(&count); err == nil && count > 0 {
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM providers WHERE status <> 'PENDING_ONBOARDING'`).Scan(&count); err == nil && count > 0 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("no provider recorded a heartbeat (last_heartbeat_ts) within %s", heartbeatWait)
+			t.Fatalf("no provider's status advanced past PENDING_ONBOARDING within %s — no real heartbeat (HandleHeartbeat, not registration) appears to have been processed", heartbeatWait)
 		}
 		time.Sleep(2 * time.Second)
 	}
 
-	var status string
-	if err := db.QueryRowContext(ctx, `SELECT status FROM providers WHERE last_heartbeat_ts IS NOT NULL LIMIT 1`).Scan(&status); err != nil {
-		t.Fatalf("query heartbeating provider's status: %v", err)
+	var lastHeartbeatIsSet bool
+	if err := db.QueryRowContext(ctx, `SELECT last_heartbeat_ts IS NOT NULL FROM providers WHERE status <> 'PENDING_ONBOARDING' LIMIT 1`).Scan(&lastHeartbeatIsSet); err != nil {
+		t.Fatalf("query heartbeating provider's last_heartbeat_ts: %v", err)
 	}
-	if status == "PENDING_ONBOARDING" {
-		t.Errorf("a provider with a recorded heartbeat is still PENDING_ONBOARDING — the heartbeat mechanism should mark it past that initial state")
+	if !lastHeartbeatIsSet {
+		t.Errorf("a provider whose status advanced past PENDING_ONBOARDING (i.e. received a real heartbeat) has no last_heartbeat_ts recorded")
 	}
 }
 
@@ -523,9 +571,12 @@ func TestReqD06HeartbeatMarksProviderOnline(t *testing.T) {
 // ═══════════════════════════════════════════════════════════════════════
 
 func TestReqD08RetrievedBytesIdenticalToUploaded(t *testing.T) {
-	env := setupCLIDemoEnv(t, 30*time.Minute)
+	// [Widened — this is the exact test that failed live: "not all 7
+	// providers reached ACTIVE within 25m0s (last count: 6)" — see
+	// TestReqD01's own comment for the full account.]
+	env := setupCLIDemoEnv(t, 40*time.Minute)
 	startProviders(t, env.ctx, env.db, env.providerPath, env.ms.baseURL)
-	pollAllProvidersActive(t, env.ctx, env.db, 25*time.Minute)
+	pollAllProvidersActive(t, env.ctx, env.db, 35*time.Minute)
 
 	dataDir := t.TempDir()
 	registerAndDepositViaCLI(t, env, dataDir, 100_000_00)
@@ -573,7 +624,9 @@ func TestReqD08RetrievedBytesIdenticalToUploaded(t *testing.T) {
 
 func TestReqD09AuditChallengeVerifiesProviderStorage(t *testing.T) {
 	db := liveDB(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	// [Widened — same live-run finding as TestReqD01 etc.; extra margin
+	// for the up-to-6-minute real-audit-pass poll that follows.]
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Minute)
 	defer cancel()
 	resetDemoDatabase(t, ctx, db)
 
@@ -584,7 +637,7 @@ func TestReqD09AuditChallengeVerifiesProviderStorage(t *testing.T) {
 	depositForOwner(t, ctx, ms.baseURL, owner, 100_000_00)
 	startProviders(t, ctx, db, providerPath, ms.baseURL)
 	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 12*time.Minute)
-	pollAllProvidersActive(t, ctx, db, 25*time.Minute)
+	pollAllProvidersActive(t, ctx, db, 35*time.Minute)
 
 	fileID, _, _ := uploadTestFileTracked(t, ctx, ms, owner, 8192)
 
@@ -618,11 +671,16 @@ func TestReqD09AuditChallengeVerifiesProviderStorage(t *testing.T) {
 	// Requirement 9's own "on demand, in front of an audience" half:
 	// operator audit dispatches a fresh challenge against the SAME
 	// provider/chunk pair the real background path already proved PASSes.
+	//
+	// [Fixed — live-run finding, same class as TestReqD03/D04] both
+	// positional arguments (provider_id, chunk_id) must come after every
+	// flag, in that order — see runOperatorJSON's own doc comment.
 	stdout, _ := runOperatorJSON(t, ctx, operatorPath, []string{
-		"audit", passProviderID, passChunkIDHex,
+		"audit",
 		"--microservice-url=" + ms.baseURL,
 		"--admin-api-key=" + ms.adminAPIKey,
 		"--mode=demo",
+		passProviderID, passChunkIDHex,
 	})
 	var auditResult struct {
 		ProviderID     string `json:"provider_id"`
@@ -648,7 +706,9 @@ func TestReqD09AuditChallengeVerifiesProviderStorage(t *testing.T) {
 
 func TestReqD10PaymentSplitsEquallyAcrossProviders(t *testing.T) {
 	db := liveDB(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Minute)
+	// [Widened — same live-run finding as TestReqD01 etc.; extra margin
+	// for the audit-pass poll and payout-preview poll that follow.]
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Minute)
 	defer cancel()
 	resetDemoDatabase(t, ctx, db)
 
@@ -659,7 +719,7 @@ func TestReqD10PaymentSplitsEquallyAcrossProviders(t *testing.T) {
 	depositForOwner(t, ctx, ms.baseURL, owner, 100_000_00)
 	startProviders(t, ctx, db, providerPath, ms.baseURL)
 	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 12*time.Minute)
-	pollAllProvidersActive(t, ctx, db, 25*time.Minute)
+	pollAllProvidersActive(t, ctx, db, 35*time.Minute)
 
 	uploadTestFileTracked(t, ctx, ms, owner, 8192)
 	pollFirstAuditPass(t, ctx, db, 5*time.Minute)
