@@ -15,8 +15,19 @@
 // time; RecoverPendingRegistration/DeletePendingRegistration (exported
 // below) let the register endpoints redeem it exactly once.
 //
+// This file also declares the OtpSender interface HandleSend delivers a
+// code through, and its two implementations: NoopOtpSender (does nothing;
+// production, until a real SMS gateway is wired in) and FileOtpSender
+// (M17-E Session 17.4.2, ADR-084 §D-3 — appends each OTP to a demo-mode
+// delivery log on disk, cmd/microservice's own --otp-delivery-log /
+// VYOMANAUT_OTP_DELIVERY_LOG, fatal to enable outside demo mode). Neither
+// implementation nor the interface changes anything about otp_codes
+// itself: the database only ever stores code_hash, regardless of which
+// sender delivered the plaintext.
+//
 // [REF: FR-001, OAS OtpSendRequest/Response, OtpVerifyRequest/Response,
-// build.md Phase 11.4]
+// build.md Phase 11.4; ADR-084 §D-3, build_part3.md Phase 17.4 Session
+// 17.4.2 (FileOtpSender)]
 
 package api
 
