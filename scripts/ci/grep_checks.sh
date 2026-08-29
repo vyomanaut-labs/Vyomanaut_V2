@@ -16,6 +16,38 @@
     fi
   }
 
+  # require() is check()'s positive-assertion companion (M17-E Session
+  # 17.8.2, build_part3.md Phase 17.8 task item 7): check() fails when a
+  # pattern IS found; require() fails when a pattern is ABSENT. Used below
+  # to register each of the eleven founding-requirement integration tests
+  # (demo_requirements_test.go, demo_departure_test.go's own TestReqD07) by
+  # name, so a future session that deletes one breaks CI instead of
+  # passing quietly — ADR-084-demo-presentation-surface.md's own
+  # Consequences section names this exact guarantee.
+  require() {
+    local name="$1"; local pattern="$2"; local scope="$3"
+    if grep -rn --include="*.go" -E "$pattern" "$REPO_ROOT/$scope" 2>/dev/null | grep -q .; then
+      echo "PASS [$name]"
+    else
+      echo "FAIL [$name]: required pattern '$pattern' NOT found in '$scope'"
+      FAIL=1
+    fi
+  }
+
+  # The eleven founding requirements (ADR-084-demo-presentation-surface.md
+  # Appendix A) — each acquires a named integration test, registered here.
+  require "REQD01_PRESENT" "func TestReqD01OwnerUploadsLocalFile\(" "scripts/test"
+  require "REQD02_PRESENT" "func TestReqD02SevenProvidersVolunteerAndReachActive\(" "scripts/test"
+  require "REQD03_PRESENT" "func TestReqD03FileIsEncryptedAndDistributedAcrossDistinctASNs\(" "scripts/test"
+  require "REQD04_PRESENT" "func TestReqD04OperatorSeesNetworkStateAndCannotDecode\(" "scripts/test"
+  require "REQD05_PRESENT" "func TestReqD05ProviderLocalStorageIsCiphertext\(" "scripts/test"
+  require "REQD06_PRESENT" "func TestReqD06HeartbeatMarksProviderOnline\(" "scripts/test"
+  require "REQD07_PRESENT" "func TestReqD07FileRetrievableAfterProviderLossAndRepair\(" "scripts/test"
+  require "REQD08_PRESENT" "func TestReqD08RetrievedBytesIdenticalToUploaded\(" "scripts/test"
+  require "REQD09_PRESENT" "func TestReqD09AuditChallengeVerifiesProviderStorage\(" "scripts/test"
+  require "REQD10_PRESENT" "func TestReqD10PaymentSplitsEquallyAcrossProviders\(" "scripts/test"
+  require "REQD11_PRESENT" "func TestReqD11ProviderAllocationIsHonoured\(" "scripts/test"
+
   # Check 8: challenge_nonce must be BYTEA(33), never BYTEA(32)
   check "NONCE_LENGTH" \
     " octet_length\(challenge_nonce\)\s*=\s*32\b" \
