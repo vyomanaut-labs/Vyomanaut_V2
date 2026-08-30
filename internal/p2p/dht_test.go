@@ -80,6 +80,30 @@ func sha256Multihash(data []byte) []byte {
 //
 // Run with: go test -run TestDHTKeyValidatorPersists ./internal/p2p/
 // This test MUST be re-run after every change to dht.go's validator logic.
+//
+// TRACK: DEMO+LTS — rationale restated, assertions unchanged (Session 18.1.1,
+// ADR-062 §1, ADR-063 §3).
+//
+// This check's originally documented trigger was "re-run after every
+// go-libp2p upgrade." That trigger does not exist on the demo track, because
+// its subject does not: this repository never imported go-libp2p, and the
+// DHT below it is a from-scratch
+// Kademlia implementation over stdlib TLS 1.3/TCP, not
+// go-libp2p-kad-dht — the substitution is recorded in full in doc.go and
+// ratified by ADR-063. There is no upgrade that could ever fire the original
+// trigger here, so a reader who took the comment at face value would conclude
+// this gate guards something it does not.
+//
+// The property this test actually guards, on both tracks, is IC §12's key
+// accept/reject rules — 32-byte HMAC-derived keys accepted, plain
+// multihash-shaped keys and any other length rejected — implemented
+// byte-for-byte against that contract. ADR-063's substitution table lists
+// exactly this row as "preserved exactly," with the routing machinery
+// (k-buckets, iterative lookup) as the approximated part. That is why the
+// gate is DEMO+LTS and not LTS: the assertions below hold identically once
+// go-libp2p-kad-dht is restored behind the same validator in the LTS
+// Foundation milestone, and any change that weakens them breaks this test on
+// either track.
 func TestDHTKeyValidatorPersists(t *testing.T) {
 	ctx := context.Background()
 	testHost := buildTestHost(t)
