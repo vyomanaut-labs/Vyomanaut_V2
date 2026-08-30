@@ -1,5 +1,49 @@
 package p2p
 
+// Demo-track restatement of two unnumbered verification claims
+// (Session 18.1.1; ADR-062 §1, ADR-063 §2–§3; MVP §8.4).
+//
+// Neither claim below is one of MVP §8.4's sixteen numbered checks, and
+// neither one's stated mechanism exists in this repository. They are restated
+// here, in the file that actually carries them, rather than only in a document
+// — a claim whose grounds live somewhere else is a claim a repository fork
+// will eventually inherit without them.
+//
+// ── NFR-016: authenticated transport bound to peer identity ──
+//
+// TRACK: LTS as named. ADR-063 §3 and build_part4.md both refer to a test
+// called TestTransportAuthentication. No test of that name exists on this
+// track. It is the LTS-track test that will carry the claim once QUIC v1 and
+// Noise XX are restored in the LTS Foundation milestone.
+//
+// The cryptographic property NFR-016 asks for does hold here, and this file
+// is where it is asserted — but over a different mechanism, so the mechanism
+// is stated rather than assumed. Not QUIC v1. Not Noise XX. What runs is
+// TLS 1.3 over TCP (crypto/tls, crypto/x509), with the peer's Ed25519 identity
+// bound into a self-signed certificate and checked in a custom
+// VerifyPeerCertificate callback — see host.go and doc.go's substitution
+// record. On this track the claim is carried by
+// TestHostConnectRejectsWrongPeerID and
+// TestHostConnectPrioritizesPeerIDMismatchOverLaterBenignFailure below, which
+// assert the operative half of NFR-016: one provider cannot present itself
+// under another provider's Peer ID. The related 0-RTT deny-list property
+// (IC §4) is asserted by TestZeroRTTDenyListExact over TLS session tickets,
+// not QUIC 0-RTT, for the reason doc.go gives.
+//
+// ── NFR-006: relay one-way RTT below 50 ms ──
+//
+// TRACK: LTS. Not measurable on the demo track, and recorded as unmeasured
+// rather than passing. NFR-006's budget is a property of Circuit Relay v2
+// reservations against Indian cloud-hosted relay nodes; no such reservation
+// exists here. nat.go implements a from-scratch, same-shape three-tier
+// substitute (self-reachability probe, TCP simultaneous-open hole punching,
+// and a minimal Vyomanaut-only relay client) with no AutoNAT, no DCUtR and no
+// Circuit Relay v2, and the demo profile's own readiness gate sets
+// relay_nodes_deployed to 0. There is therefore nothing on this track that
+// could produce a number to compare against 50 ms. ADR-063's substitution
+// table names this as the row where the LTS reversal makes the budget
+// measurable for the first time.
+
 import (
 	"context"
 	"crypto/ed25519"
