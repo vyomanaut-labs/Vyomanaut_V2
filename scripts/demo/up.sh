@@ -2,11 +2,20 @@
 # scripts/demo/up.sh — M17-E Session 17.8.1 (ADR-084, F-D-2/F-D-3/F-D-4).
 #
 # Resets Postgres, applies the demo migration, builds cmd/microservice,
-# cmd/provider, and cmd/operator fresh, starts the microservice, then
-# starts N *normal-mode* providers as N distinct OS processes on distinct
+# cmd/provider, cmd/operator, and cmd/client fresh, starts the microservice,
+# then starts N *normal-mode* providers as N distinct OS processes on distinct
 # ports (F-D-3: none of the simulation-mode flags appear anywhere in this
 # directory) so the coordinator
 # side of the demo exercises the exact code path the physical rig runs.
+#
+# [Extended, Session 18.1.1 — Operator Guide upgrade] cmd/client (the data
+# owner's own CLI: register/deposit/upload/retrieve/ls/rm/balance) has no
+# dependency on internal/storage and therefore no RocksDB/CGO requirement —
+# unlike microservice/provider, it never needs the CGO_CFLAGS/CGO_LDFLAGS
+# environment this script's own callers export before running it. It is
+# built here purely so a data-owner demo walkthrough never needs a second,
+# separate build step: everything up.sh's own printed BIN_DIR already
+# promises ("Freshly built each up.sh run") now actually includes it.
 #
 # The N providers this script starts are the rehearsal/smoke fleet run
 # locally alongside the microservice — real, separate normal-mode processes,
@@ -115,10 +124,11 @@ psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGMIGRATORUSER" -d "$PGDA
    ALTER ROLE vyomanaut_gc  WITH PASSWORD '$PGAPPPASSWORD';"
 
 # ── build fresh binaries — never a stale prior run's copy ─────────────────
-log "building cmd/microservice, cmd/provider, cmd/operator"
+log "building cmd/microservice, cmd/provider, cmd/operator, cmd/client"
 go build -o "$BIN_DIR/microservice" ./cmd/microservice/
 go build -o "$BIN_DIR/provider" ./cmd/provider/
 go build -o "$BIN_DIR/operator" ./cmd/operator/
+go build -o "$BIN_DIR/client" ./cmd/client/
 
 # ── start the microservice ─────────────────────────────────────────────────
 ADMIN_API_KEY="$(openssl rand -hex 32)"
