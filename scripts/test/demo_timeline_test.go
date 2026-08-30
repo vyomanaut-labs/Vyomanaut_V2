@@ -1169,7 +1169,10 @@ func TestViabilityASNCapMatchesRunningDemoProfile(t *testing.T) {
 // both lost shards.
 func TestViabilityRepairSucceedsWithTwoOfFiveOffline(t *testing.T) {
 	db := liveDB(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Minute) // [Bumped 30->40min, F-17E-17] widened alongside pollAllProvidersActive's own 15->25min bump just below -- see that call's comment for why
+	// [Bumped 40->50min, live-run finding continuing F-17E-17's own
+	// pattern] widened alongside pollAllProvidersActive's own bump just
+	// below.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Minute)
 	defer cancel()
 	resetDemoDatabase(t, ctx, db)
 
@@ -1183,7 +1186,7 @@ func TestViabilityRepairSucceedsWithTwoOfFiveOffline(t *testing.T) {
 	// [Fixed — F-17E-01] see TestDemoTimeline's own identical fix note.
 	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 12*time.Minute)
 	pollFirstAuditPass(t, ctx, db, 3*time.Minute)
-	pollAllProvidersActive(t, ctx, db, 25*time.Minute) // [Bumped 15->25min, F-17E-17] this session's clean_demo_tests_3/_4 runs showed 6/7 and 5/7 near-misses at 15 minutes under sustained multi-hour load, at this call site and several in demo_departure_test.go -- the same pattern already fixed once in demo_cli_test.go (F-17E-15) but not caught here at the time; this file's own TestViabilityActiveTransitionAtTenMinutes is deliberately NOT bumped -- its 15-minute poll is the measurement under test, not setup headroom, see its own doc comment
+	pollAllProvidersActive(t, ctx, db, 35*time.Minute) // [Bumped 25->35min, live-run finding continuing F-17E-17's own pattern] this exact test failed live again at the 25-minute ceiling ("not all 7 providers reached ACTIVE within 25m0s (last count: 6)") -- the same near-miss signature F-17E-17 already documents once, recurring under the same "sustained multi-hour load" condition that comment itself names. Bumped again rather than treated as a one-off flake: this is now the third confirmed occurrence of this exact signature across three different test files in the same run (this test, TestDepartureMidRetrievalStillGathersK, and M17-E Session 17.8.2's own TestReqD08 -- all three failing with the identical message).
 
 	fileID := uploadTestFile(t, ctx, ms, owner)
 	t.Logf("uploaded file_id=%s", fileID)

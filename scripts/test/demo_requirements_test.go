@@ -169,7 +169,19 @@ func TestReqD03FileIsEncryptedAndDistributedAcrossDistinctASNs(t *testing.T) {
 	pollReadiness(t, ctx, ms.baseURL, ms.adminAPIKey, 12*time.Minute)
 	pollAllProvidersActive(t, ctx, db, 35*time.Minute)
 
-	fileID, _, plaintext := uploadTestFileTracked(t, ctx, ms, owner, testUploadBytes)
+	// [Fixed — live-run finding] testUploadBytes (demo_timeline_test.go)
+	// is 1,000,000 bytes, and that constant's OWN comment already
+	// documents it spans two segments under the real
+	// plaintextSegmentSize arithmetic (786,384 bytes/segment) — confirmed
+	// live: this test's original assertion of exactly profile.TotalShards
+	// shards failed with "reported 10 shard(s), want 5" for precisely
+	// that reason (2 segments x 5 shards/segment). A smaller,
+	// single-segment payload keeps the shard-count assertion below
+	// meaningful without hardcoding segment-count arithmetic this test
+	// doesn't otherwise care about — matching the same size convention
+	// TestReqD09/TestReqD10 already use for the same reason.
+	const reqD03PlaintextBytes = 8192
+	fileID, _, plaintext := uploadTestFileTracked(t, ctx, ms, owner, reqD03PlaintextBytes)
 
 	profile := config.SelectProfile("demo")
 
@@ -359,8 +371,30 @@ func TestReqD04OperatorSeesNetworkStateAndCannotDecode(t *testing.T) {
 		"database/sql",
 		"github.com/lib/pq",
 	}
+	// [Fixed — live-run finding] go list -deps prints one full import path
+	// per line; matching forbiddenDeps as a raw substring against the
+	// whole blob false-positives on any real dependency that happens to
+	// be PREFIXED by a forbidden path — confirmed live: cmd/operator
+	// genuinely does import database/sql/driver (google/uuid's own
+	// Value()/Scan() implementation of the driver.Valuer/sql.Scanner
+	// interfaces, so uuid.UUID works as a database/sql query argument
+	// EVERYWHERE ELSE in this codebase, without uuid itself ever opening a
+	// connection or touching database/sql) — a leaf, interface-only
+	// package with no database connectivity of its own and, notably, no
+	// dependency on database/sql itself (database/sql depends on
+	// database/sql/driver, never the reverse), so importing it grants
+	// cmd/operator none of the access I-DEMO-1 actually prohibits. Every
+	// line is now compared for an EXACT match against each forbidden path
+	// instead, so a real "database/sql" line still fails correctly while
+	// "database/sql/driver" — or any other legitimately-prefixed but
+	// unrelated package — does not.
+	depLines := strings.Split(strings.TrimSpace(string(listOut)), "\n")
+	depSet := make(map[string]bool, len(depLines))
+	for _, line := range depLines {
+		depSet[strings.TrimSpace(line)] = true
+	}
 	for _, dep := range forbiddenDeps {
-		if strings.Contains(string(listOut), dep) {
+		if depSet[dep] {
 			t.Errorf("cmd/operator's dependency graph includes %q — I-DEMO-1 violated", dep)
 		}
 	}
