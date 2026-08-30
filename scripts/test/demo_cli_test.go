@@ -14,6 +14,7 @@
 // PASS
 // ok      github.com/vyomanaut-labs/Vyomanaut_V2/scripts/test     1491.561s
 
+
 // Drives the compiled cmd/client binary through the full demo lifecycle
 // (MVP §8.3's subcommand table) rather than internal/client's SDK
 // packages directly, per Session 17.2.1's own mandate: demo_timeline_test.go's
@@ -135,10 +136,10 @@ func intToStr(n int64) string {
 // retrieve -> balance -> rm through the compiled binary, exactly the
 // sequence TASK step 2 names, asserting every step's --json shape.
 func TestDemoCLIFullLifecycle(t *testing.T) {
-	env := setupCLIDemoEnv(t, 40*time.Minute)
+	env := setupCLIDemoEnv(t, 50*time.Minute) // [Widened alongside the poll bump just below]
 	providers := startProviders(t, env.ctx, env.db, env.providerPath, env.ms.baseURL)
 	_ = providers
-	pollAllProvidersActive(t, env.ctx, env.db, 25*time.Minute) // [Bumped 15->25min, F-17E-15] all three call sites in this file share this exact 15-minute budget; TestDemoCLIUploadFailsBeforeDeposit reached only 6/7 after 24+ minutes of prior sustained load from this file's own two preceding tests in the same run, while the identical call succeeded twice moments earlier in that same run -- a timing-margin miss under load, not a functional difference, so the fix widens the shared margin rather than touching the (unweakened) all-7-ACTIVE requirement itself
+	pollAllProvidersActive(t, env.ctx, env.db, 35*time.Minute) // [Bumped 25->35min, live-run finding: TestDepartureAfterUploadFileStillRetrievable and TestReplacementProviderDepartsMidRepair (demo_departure_test.go) both failed live at the 25-minute ceiling this same run, the fourth and fifth confirmed occurrence of this exact signature across three files (see demo_timeline_test.go's TestViabilityRepairSucceedsWithTwoOfFiveOffline for the full account and the audit-dispatch-timing explanation). Bumped comprehensively across every remaining 25-minute call site in the suite in one pass rather than reactively, one test at a time, as each next one happened to fail.
 
 	dataDir := t.TempDir()
 	_, _ = registerAndDepositViaCLI(t, env, dataDir, 100_000_00) // ₹100,000 in paise
@@ -244,9 +245,9 @@ func TestDemoCLIFullLifecycle(t *testing.T) {
 // specific property has its own dedicated, real live exercise rather than
 // being buried only inside the broader lifecycle test's assertions.
 func TestDemoCLIRetrievedBytesIdenticalToUploaded(t *testing.T) {
-	env := setupCLIDemoEnv(t, 30*time.Minute)
+	env := setupCLIDemoEnv(t, 45*time.Minute) // [Widened alongside the poll bump just below]
 	startProviders(t, env.ctx, env.db, env.providerPath, env.ms.baseURL)
-	pollAllProvidersActive(t, env.ctx, env.db, 25*time.Minute) // [Bumped 15->25min, F-17E-15] all three call sites in this file share this exact 15-minute budget; TestDemoCLIUploadFailsBeforeDeposit reached only 6/7 after 24+ minutes of prior sustained load from this file's own two preceding tests in the same run, while the identical call succeeded twice moments earlier in that same run -- a timing-margin miss under load, not a functional difference, so the fix widens the shared margin rather than touching the (unweakened) all-7-ACTIVE requirement itself
+	pollAllProvidersActive(t, env.ctx, env.db, 35*time.Minute) // [Bumped 25->35min, live-run finding: TestDepartureAfterUploadFileStillRetrievable and TestReplacementProviderDepartsMidRepair (demo_departure_test.go) both failed live at the 25-minute ceiling this same run, the fourth and fifth confirmed occurrence of this exact signature across three files (see demo_timeline_test.go's TestViabilityRepairSucceedsWithTwoOfFiveOffline for the full account and the audit-dispatch-timing explanation). Bumped comprehensively across every remaining 25-minute call site in the suite in one pass rather than reactively, one test at a time, as each next one happened to fail.
 
 	dataDir := t.TempDir()
 	registerAndDepositViaCLI(t, env, dataDir, 100_000_00)
@@ -292,9 +293,9 @@ func TestDemoCLIRetrievedBytesIdenticalToUploaded(t *testing.T) {
 // escrow, so a pre-ACTIVE attempt would fail with NETWORK_NOT_READY
 // instead, proving the wrong thing.
 func TestDemoCLIUploadFailsBeforeDeposit(t *testing.T) {
-	env := setupCLIDemoEnv(t, 30*time.Minute)
+	env := setupCLIDemoEnv(t, 45*time.Minute) // [Widened alongside the poll bump just below]
 	startProviders(t, env.ctx, env.db, env.providerPath, env.ms.baseURL)
-	pollAllProvidersActive(t, env.ctx, env.db, 25*time.Minute) // [Bumped 15->25min, F-17E-15] all three call sites in this file share this exact 15-minute budget; TestDemoCLIUploadFailsBeforeDeposit reached only 6/7 after 24+ minutes of prior sustained load from this file's own two preceding tests in the same run, while the identical call succeeded twice moments earlier in that same run -- a timing-margin miss under load, not a functional difference, so the fix widens the shared margin rather than touching the (unweakened) all-7-ACTIVE requirement itself
+	pollAllProvidersActive(t, env.ctx, env.db, 35*time.Minute) // [Bumped 25->35min, live-run finding: TestDepartureAfterUploadFileStillRetrievable and TestReplacementProviderDepartsMidRepair (demo_departure_test.go) both failed live at the 25-minute ceiling this same run, the fourth and fifth confirmed occurrence of this exact signature across three files (see demo_timeline_test.go's TestViabilityRepairSucceedsWithTwoOfFiveOffline for the full account and the audit-dispatch-timing explanation). Bumped comprehensively across every remaining 25-minute call site in the suite in one pass rather than reactively, one test at a time, as each next one happened to fail.
 
 	dataDir := t.TempDir()
 	registerAndDepositViaCLI(t, env, dataDir, 0) // amountPaise=0: register only, no deposit

@@ -1067,7 +1067,7 @@ func TestDemoTimeline(t *testing.T) {
 	pollFirstAuditPass(t, ctx, db, 3*time.Minute)
 
 	// Assert VETTING→ACTIVE transition completes within 12 minutes.
-	pollAllProvidersActive(t, ctx, db, 25*time.Minute) // [Bumped 15->25min, F-17E-17] this session's clean_demo_tests_3/_4 runs showed 6/7 and 5/7 near-misses at 15 minutes under sustained multi-hour load, at this call site and several in demo_departure_test.go -- the same pattern already fixed once in demo_cli_test.go (F-17E-15) but not caught here at the time; this file's own TestViabilityActiveTransitionAtTenMinutes is deliberately NOT bumped -- its 15-minute poll is the measurement under test, not setup headroom, see its own doc comment
+	pollAllProvidersActive(t, ctx, db, 35*time.Minute) // [Bumped 25->35min, live-run finding — see TestViabilityRepairSucceedsWithTwoOfFiveOffline's own comment in this file for the full account; this file's own TestViabilityActiveTransitionAtTenMinutes is still deliberately NOT bumped -- its 15-minute poll is the measurement under test, not setup headroom, see its own doc comment]
 
 	// Now the real upload — ADR-071's corrected T+10:30: "Real data owner
 	// shard assignments begin." Providers are ACTIVE; ADR-030's trust
