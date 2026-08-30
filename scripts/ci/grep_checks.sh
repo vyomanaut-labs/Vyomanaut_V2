@@ -61,6 +61,40 @@
   # Check 10: no references to ADRs beyond the current known ceiling.
   # Pattern matches 001-099 and 100
   # This is done deliberately because the project in under development and constant research, making the ADR count highly volatile. To avoid constant clashes in the count a safe ceiling of 100 is chosen. Update it only after the project reaches production
+  #
+  # ── Freeze obligation (Session 18.1.1; ADR-062 §6) ─────────────────────
+  #
+  # ADR-062 §6 requires this ceiling be *fixed* in the demo repository at
+  # fork time, so a reference to an LTS ADR from demo source becomes a loud
+  # CI failure instead of a silent back-port. One correction to that
+  # instruction, recorded here rather than applied:
+  #
+  #   THE NUMBER IN ADR-062 §6 IS STALE. It names ADR-064. ADR-062 was
+  #   written before the demo track produced ADRs of its own; since then
+  #   ADR-070 through ADR-075, ADR-080, ADR-084, ADR-085 and ADR-086 have
+  #   all been accepted ON THE DEMO TRACK, and this working copy references
+  #   them roughly 250 times. A ceiling of ADR-064 would fail check 10 on
+  #   the demo track's own decisions — the exact opposite of what §6 wants.
+  #
+  # No replacement number is pinned here on purpose (Karma's own ruling,
+  # Session 18.1.1): the demo track still has active work ahead of it and
+  # more DEMO-tracked ADRs are expected before the actual fork, so any
+  # number written today would already be stale by the time Session 18.4.1
+  # runs. The QA remediation pass (M13-M16) and the LTS-flag cleanup that
+  # follow the fork happen in the LTS repository and are tagged LTS, not
+  # DEMO — Karma confirmed the demo repository itself is not touched again
+  # after the fork — so they never extend this ceiling; only ADRs accepted
+  # on the DEMO or BOTH track, up to the moment of the fork, count.
+  #
+  # THE PROCEDURE FOR SESSION 18.4.1, to run once, at the fork:
+  #   1. Find the highest-numbered ADR carrying `**Track:** DEMO` or
+  #      `**Track:** BOTH` at that moment.
+  #   2. Replace the pattern below with one admitting every ADR up to and
+  #      including that number and excluding everything above it.
+  #   3. Confirm the change is green before committing it: grep the whole
+  #      repository for any reference above the new ceiling and expect
+  #      none — every demo-track reference sits at or below the ceiling
+  #      just computed, by definition.
   check "ADR_REFERENCE" \
     "ADR-(0[0-9][1-9]|0[1-9]0|100)" \
     "."
