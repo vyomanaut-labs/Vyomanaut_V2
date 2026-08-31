@@ -27,6 +27,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
 )
@@ -228,6 +229,10 @@ const fanOutEndpointCount = 5
 // each cycle room to complete well before the next tick fires.
 const fetchTimeout = 5 * time.Second
 
+// pageScrollLines is how far PgUp/PgDn move in one press — enough to skip
+// past a whole panel, not just nudge past a couple of rows.
+const pageScrollLines = 10
+
 type tickMsg time.Time
 
 // fetchResultMsg carries one fan-out cycle's results. Fields are pointers
@@ -260,6 +265,17 @@ type watchModel struct {
 	prevSnap    watchSnapshot
 	events      []eventFeedEntry
 	fetchCycles int
+
+	// focus is 0 for the normal seven-panel grid, or 1-7 to render a
+	// single panel full-width — panelIndex below is the one place that
+	// ordering (and the digit each panel answers to) is defined. showHelp
+	// overlays the '?' legend on top of whichever view is current.
+	// scrollOffset is a line count into the rendered body, clamped in
+	// View so scrolling can never run off either end; it resets to 0 on
+	// every focus/help toggle so switching views never starts pre-scrolled.
+	focus        int
+	showHelp     bool
+	scrollOffset int
 }
 
 func newWatchModel(client *adminClient, profile config.NetworkProfile) watchModel {
@@ -365,9 +381,58 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		if msg.String() == "q" || msg.String() == "ctrl+c" {
+		key := msg.String()
+		switch {
+		case key == "q" || key == "ctrl+c":
 			m.quitting = true
 			return m, tea.Quit
+
+		case key == "?":
+			// The legend is a read-only overlay, not a view of its own —
+			// toggling it never touches focus or scroll, so closing it
+			// always returns exactly where the audience was looking.
+			m.showHelp = !m.showHelp
+			return m, nil
+
+		case key == "esc" || key == "0":
+			// esc/0 always means "back to the grid", from focus, from
+			// help, or both at once — one key the audience never has to
+			// think about mid-demo.
+			m.focus = 0
+			m.showHelp = false
+			m.scrollOffset = 0
+			return m, nil
+
+		case len(key) == 1 && key[0] >= '1' && key[0] <= '7':
+			n := int(key[0] - '0')
+			if m.focus == n {
+				m.focus = 0 // pressing the same digit again un-zooms
+			} else {
+				m.focus = n
+			}
+			m.scrollOffset = 0
+			return m, nil
+
+		case key == "up" || key == "k":
+			if m.scrollOffset > 0 {
+				m.scrollOffset--
+			}
+			return m, nil
+
+		case key == "down" || key == "j":
+			m.scrollOffset++ // View clamps this against actual content height
+			return m, nil
+
+		case key == "pgup":
+			m.scrollOffset -= pageScrollLines
+			if m.scrollOffset < 0 {
+				m.scrollOffset = 0
+			}
+			return m, nil
+
+		case key == "pgdown":
+			m.scrollOffset += pageScrollLines
+			return m, nil
 		}
 		return m, nil
 
@@ -484,12 +549,20 @@ func pluralCount(n int64, singular, plural string) string {
 	return strconv.FormatInt(n, 10) + " " + plural
 }
 
-// View renders the header bar and all seven panels (SEVEN_PANELS_PRESENT
-// counts render(Readiness|Fleet|ASNCap|Repair|Audit|Escrow|Events) in
-// panels.go directly, not through this function, but this is where every
-// one of the seven is actually called for a live run). A pure function of
-// m: no wall-clock read, no I/O — everything it needs is already in the
-// model from the last tickMsg/fetchResultMsg (this file's header note).
+// View renders the header bar and either the seven-panel grid, one focused
+// panel, or the legend overlay — exactly one of those three, never a
+// composite of two, since compositing an overlay ON TOP of live content
+// without a terminal library's absolute positioning support is the kind of
+// thing that looks fine in testing and tears on a real terminal size this
+// wasn't tried against. A pure function of m: no wall-clock read, no I/O —
+// everything it needs is already in the model from the last
+// tickMsg/fetchResultMsg (this file's header note).
+//
+// [Redesigned, Session 18.1.3] Previously a flat top-to-bottom stack of all
+// seven panels with no way to see more than one screen's worth at once, no
+// way to enlarge any single panel, and inline prose cluttering several
+// panel bodies (moved to the legend — see panels.go's renderLegend and each
+// panel's own [Trimmed, Session 18.1.3] note for where its explanation went).
 func (m watchModel) View() string {
 	if m.quitting {
 		return ""
@@ -497,29 +570,113 @@ func (m watchModel) View() string {
 
 	header := headerBarStyle.Render(fmt.Sprintf("VYOMANAUT OPERATOR CONSOLE \u2014 mode=%s", m.profile.Mode))
 	if !m.haveData {
-		return header + "\n\n" + dimStyle.Render("waiting for first fetch...") + "\n\n" + dimStyle.Render("press q to quit")
+		return header + "\n\n" + dimStyle.Render("waiting for first fetch...") + "\n\n" + footerStyle.Render("[q] quit")
 	}
 
-	// The six fixed-height panels are rendered first so the event feed —
-	// the only one whose height varies — can be given whatever budget is
-	// left. See renderEventsWithin's own note (F-18-6) for why an unbounded
-	// view produced both the cut-off feed and the duplicated footer.
-	fixed := []string{
-		renderReadiness(m.profile, m.snapshot.Readiness),
-		renderFleet(m.profile, m.snapshot.Providers, m.snapshot.Readiness, m.now),
-		renderASNCap(m.profile, m.snapshot.Providers),
-		renderRepair(m.profile, m.snapshot.RepairQueue),
-		renderAudit(m.profile, m.snapshot.AuditStats, m.now),
-		renderEscrow(m.profile),
+	if m.showHelp {
+		body, hint := m.applyScroll(legendStyle.Render(renderLegend(m.profile)), false)
+		return header + "\n" + body + "\n" + footerStyle.Render("[?] or [esc] close legend"+hint)
 	}
-	panels := append(fixed, renderEventsWithin(m.events, m.now, m.eventFeedBudget(fixed)))
 
 	var errLine string
 	if len(m.snapshot.FetchErrors) > 0 {
 		errLine = "\n" + statusStyle(severityWarn).Render(fmt.Sprintf("fetch errors: %s", strings.Join(m.snapshot.FetchErrors, "; ")))
 	}
 
-	return header + "\n" + strings.Join(panels, "\n") + errLine + "\n" + dimStyle.Render("press q to quit")
+	body, hint := m.applyScroll(m.bodyForFocus(), errLine != "")
+
+	return header + "\n" + body + errLine + "\n" + footerStyle.Render(m.footerHint()+hint)
+}
+
+// bodyForFocus renders either the full seven-panel grid (m.focus == 0) or
+// one panel alone at m.focus (1-7, in the same top-to-bottom reading order
+// the grid uses: Readiness, Fleet, ASN diversity, Repair, Audit, Escrow,
+// Event feed — the digit a key press answers to is defined nowhere else).
+//
+// The event feed's line budget differs between the two paths because its
+// competition for vertical space differs: in the grid it shares the screen
+// with six other panels (eventFeedBudget subtracts their rendered height);
+// focused, it IS the screen, so it gets everything but the chrome around it
+// (focusedEventFeedBudget).
+func (m watchModel) bodyForFocus() string {
+	readiness := renderReadiness(m.profile, m.snapshot.Readiness)
+	fleet := renderFleet(m.profile, m.snapshot.Providers, m.snapshot.Readiness, m.now)
+	asn := renderASNCap(m.profile, m.snapshot.Providers)
+	repair := renderRepair(m.profile, m.snapshot.RepairQueue)
+	audit := renderAudit(m.profile, m.snapshot.AuditStats, m.now)
+	escrow := renderEscrow(m.profile)
+
+	switch m.focus {
+	case 1:
+		return readiness
+	case 2:
+		return fleet
+	case 3:
+		return asn
+	case 4:
+		return repair
+	case 5:
+		return audit
+	case 6:
+		return escrow
+	case 7:
+		return renderEventsWithin(m.events, m.now, m.focusedEventFeedBudget())
+	}
+
+	// Grid: two compact status panels side by side, the wide provider
+	// table on its own row, two more compact panels side by side, escrow
+	// on its own row (short, but not worth crowding against the others'
+	// widths), and the event feed last with whatever budget remains.
+	row1 := lipgloss.JoinHorizontal(lipgloss.Top, readiness, asn)
+	row3 := lipgloss.JoinHorizontal(lipgloss.Top, repair, audit)
+	fixedRows := []string{row1, fleet, row3, escrow}
+	events := renderEventsWithin(m.events, m.now, m.eventFeedBudget(fixedRows))
+
+	return strings.Join(append(fixedRows, events), "\n")
+}
+
+// footerHint names the keys that matter for whatever m.focus currently is
+// — the grid's full key list is more than a focused view needs to repeat.
+func (m watchModel) footerHint() string {
+	if m.focus > 0 {
+		return fmt.Sprintf("[%d] or [esc] back to grid  [\u2191/\u2193] scroll  [?] legend  [q] quit", m.focus)
+	}
+	return "[1-7] focus a panel  [\u2191/\u2193 j/k] scroll  [?] legend  [q] quit"
+}
+
+// applyScroll windows body down to what m.height actually has room for,
+// returning the visible slice and a "[lines a-b/n]" hint for the footer
+// (empty when nothing was cut). It never mutates m.scrollOffset — Update is
+// the only place that changes, and clamping here on every render is what
+// keeps scrolling from running off either end without View needing to
+// write state back (this file's header note on Update/View purity).
+func (m watchModel) applyScroll(body string, hasErrLine bool) (string, string) {
+	if m.height <= 0 {
+		return body, ""
+	}
+
+	lines := strings.Split(body, "\n")
+	chromeLines := 2 // header + footer
+	if hasErrLine {
+		chromeLines++
+	}
+	viewport := m.height - chromeLines
+	if viewport < 1 || len(lines) <= viewport {
+		return body, ""
+	}
+
+	maxOffset := len(lines) - viewport
+	offset := m.scrollOffset
+	if offset > maxOffset {
+		offset = maxOffset
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	visible := lines[offset : offset+viewport]
+	hint := fmt.Sprintf("  [lines %d-%d/%d]", offset+1, offset+viewport, len(lines))
+	return strings.Join(visible, "\n"), hint
 }
 
 // eventFeedBudget returns how many event lines will fit under the panels
@@ -546,6 +703,24 @@ func (m watchModel) eventFeedBudget(fixed []string) int {
 	budget := m.height - used
 	if budget > eventFeedDisplayDepth {
 		budget = eventFeedDisplayDepth
+	}
+	return budget
+}
+
+// focusedEventFeedBudget is eventFeedBudget's counterpart when the event
+// feed is the ONLY panel on screen (m.focus == 7) — no sibling panels to
+// subtract, just the header/footer/panel chrome around it, and no ceiling
+// at eventFeedDisplayDepth since a dedicated full screen can reasonably
+// show more history than the grid's shared one can.
+func (m watchModel) focusedEventFeedBudget() int {
+	if m.height <= 0 {
+		return eventFeedDisplayDepth
+	}
+	const chromeLines = 2
+	const eventPanelChrome = 3
+	budget := m.height - chromeLines - eventPanelChrome
+	if budget < minEventFeedDisplayDepth {
+		budget = minEventFeedDisplayDepth
 	}
 	return budget
 }
