@@ -96,7 +96,7 @@ func renderReadiness(profile config.NetworkProfile, r *readinessAdminResponse) s
 	}
 	lines = append(lines, "", statusStyle(overallSev).Render(overall))
 
-	return panelStyle.Render(panelTitleStyle.Render(title) + "\n" + strings.Join(lines, "\n"))
+	return wrapPanel(title, strings.Join(lines, "\n"), overallSev)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -128,24 +128,34 @@ func renderFleet(profile config.NetworkProfile, providers *adminProvidersRespons
 	threshold := effectiveDepartureThreshold(profile, readiness)
 	half := threshold / halfDivisor
 
+	// worstSev tracks the least healthy heartbeat seen, so the panel's own
+	// border reflects fleet health at a glance — an OVERDUE provider
+	// anywhere turns the whole panel's border red, not just its own row.
+	worstSev := severityOK
+
 	lines := []string{dimStyle.Render(fmt.Sprintf(fleetRowFormat, "ID", "ASN", "STATUS", "HEARTBEAT", "GB", "CHUNKS", "PASSES", "SCORE"))}
 	for _, p := range providers.Providers {
 		heartbeatCol := "\u2014"
 		style := dimStyle
+		rowSev := severityOK
 		if p.LastHeartbeatTS != nil {
 			age := now.Sub(*p.LastHeartbeatTS)
 			remaining := threshold - age
 			switch {
 			case age > half && remaining <= 0:
 				heartbeatCol = fmt.Sprintf("%s (OVERDUE)", roundDuration(age))
-				style = statusStyle(severityAlert)
+				rowSev = severityAlert
 			case age > half:
 				heartbeatCol = fmt.Sprintf("%s (departs in %s)", roundDuration(age), roundDuration(remaining))
-				style = statusStyle(severityWarn)
+				rowSev = severityWarn
 			default:
 				heartbeatCol = roundDuration(age)
-				style = statusStyle(severityOK)
+				rowSev = severityOK
 			}
+			style = statusStyle(rowSev)
+		}
+		if rowSev > worstSev {
+			worstSev = rowSev
 		}
 		row := fmt.Sprintf(fleetRowFormat,
 			shortID(p.ProviderID), p.ASN, p.Status, heartbeatCol,
@@ -154,7 +164,7 @@ func renderFleet(profile config.NetworkProfile, providers *adminProvidersRespons
 		lines = append(lines, style.Render(row))
 	}
 
-	return panelStyle.Render(panelTitleStyle.Render(title) + "\n" + strings.Join(lines, "\n"))
+	return wrapPanel(title, strings.Join(lines, "\n"), worstSev)
 }
 
 // auditPassLabel renders a provider's consecutive audit passes.
@@ -179,7 +189,7 @@ func auditPassLabel(profile config.NetworkProfile, p providerAdminItem) string {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// 3. ASN cap occupancy
+// 3. ASN diversity
 // ═══════════════════════════════════════════════════════════════════════
 
 // renderASNCap shows how this fleet's stored chunks are distributed across
@@ -228,22 +238,28 @@ func renderASNCap(profile config.NetworkProfile, providers *adminProvidersRespon
 	}
 	sort.Strings(asns)
 
-	lines := []string{
-		dimStyle.Render(fmt.Sprintf("placement cap: floor(%d shards \u00d7 %.0f%%) = %d shard per ASN, per segment (FR-045, ADR-014)",
-			profile.TotalShards, profile.ASNCapFraction*percentageScale, shardCap)),
-		dimStyle.Render(fmt.Sprintf("enforced at assignment and repair; %d distinct ASNs required, %d present", profile.MinDistinctASNs, len(asns))),
-		dimStyle.Render("below: active chunks per ASN across ALL segments — a distribution, not a cap reading"),
+	// Severity here is about DIVERSITY, the property this panel can
+	// actually measure: too few ASNs carrying data is the real risk, not a
+	// large chunk count on any one of them. Meeting the requirement
+	// exactly is a healthy, fully-expected steady state at demo scale (5
+	// providers, 5 required ASNs) — it is NOT a warning, and treating it
+	// as one would paint this panel permanently amber for the length of
+	// an ordinary run, which is the same false-alarm shape F-18-1 already
+	// fixed once for this panel.
+	sev := severityOK
+	if len(asns) < profile.MinDistinctASNs {
+		sev = severityAlert
 	}
 
-	// Severity here is about DIVERSITY, the property this panel can actually
-	// measure: too few ASNs carrying data is the real risk, not a large
-	// chunk count on any one of them.
-	sev := severityOK
-	switch {
-	case len(asns) < profile.MinDistinctASNs:
-		sev = severityAlert
-	case len(asns) == profile.MinDistinctASNs:
-		sev = severityWarn
+	// [Trimmed, Session 18.1.3] The per-segment cap's full definition
+	// (FR-045/ADR-014) and the "this is a distribution, not a cap
+	// reading" caveat both moved to the '?' legend — this line keeps only
+	// the two numbers a glance actually needs. "per segment" stays inline
+	// (not just in the legend) because omitting it invites reading the
+	// chunk counts below as a cap violation, which is the exact
+	// misreading F-18-1 corrected.
+	lines := []string{
+		dimStyle.Render(fmt.Sprintf("cap %d/ASN per segment \u00b7 ASNs %d/%d", shardCap, len(asns), profile.MinDistinctASNs)),
 	}
 
 	if len(asns) == 0 {
@@ -253,7 +269,7 @@ func renderASNCap(profile config.NetworkProfile, providers *adminProvidersRespon
 		lines = append(lines, statusStyle(sev).Render(fmt.Sprintf("%-10s %d chunk(s)", asn, occ[asn])))
 	}
 
-	return panelStyle.Render(panelTitleStyle.Render(title) + "\n" + strings.Join(lines, "\n"))
+	return wrapPanel(title, strings.Join(lines, "\n"), sev)
 }
 
 // asnOccupancy sums live chunk counts per ASN, and registers EVERY ASN the
@@ -312,22 +328,18 @@ func renderRepair(profile config.NetworkProfile, rq *repairQueueAdminResponse) s
 		}
 	}
 
+	// [Trimmed, Session 18.1.3] The full explanation of what r0 means and
+	// why repairs fire immediately rather than batching (F-18-4's own
+	// wording) moved to the '?' legend. belowR0 itself is folded into the
+	// queued line rather than dropped — it is a real count, not prose.
 	lines := []string{
 		fmt.Sprintf("queued:     %d  (emergency %d, departure %d, pre-warning %d)",
 			rq.TotalQueued, rq.EmergencyQueued, rq.PermanentDepartureQueued, rq.PreWarningQueued),
 		fmt.Sprintf("in-flight:  %d", inFlight),
-		fmt.Sprintf("completed:  %d (this page)", completed),
-		// [Reworded, Session 18.1.2 — F-18-4] This line used to read
-		// "F-LTS-07: lazy-repair gate not yet built". That is a build-tracker
-		// tag, meaningless to anyone who has not read the finding log, and
-		// this panel sits in front of reviewers. The behaviour it describes is
-		// unchanged and still disclosed — repairs fire immediately rather than
-		// batching at the r0 threshold — just in words that stand on their own.
-		dimStyle.Render(fmt.Sprintf("repair threshold r0 = %d shards; repairs currently fire immediately rather than batching at r0. %d job(s) at/below r0",
-			profile.LazyRepairR0, belowR0)),
+		fmt.Sprintf("completed:  %d (this page), %d job(s) at/below r0", completed, belowR0),
 	}
 
-	return panelStyle.Render(panelTitleStyle.Render(title) + "\n" + strings.Join(lines, "\n"))
+	return wrapPanelNeutral(title, strings.Join(lines, "\n"))
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -343,28 +355,29 @@ func renderAudit(profile config.NetworkProfile, as *auditStatsAdminResponse, now
 	passRatePct := int(as.PassRate * percentageScale)
 	timeoutRatePct := int(as.TimeoutRate * percentageScale)
 
-	// [Fixed, Session 18.1.2 — F-18-5] This line used to render
-	// "next window in <d>", computed as WindowEnd + AuditPeriodDuration -
-	// now. The server sets window_end to its own now() on every request
-	// (internal/api/admin.go), so that expression collapses to exactly
-	// AuditPeriodDuration on every single refresh: a countdown that never
-	// counted down, sitting on screen reading "2m0s" forever. Anyone
-	// watching it for two minutes would notice, and the natural conclusion
-	// is that the console is frozen.
-	//
-	// The two real quantities are shown instead, both honestly labelled:
-	// the trailing window these counts are drawn from, and the cadence at
-	// which the dispatcher issues challenges.
+	// [Trimmed, Session 18.1.3] The window/cadence explanation (F-18-5's
+	// own fix, replacing a countdown that never counted down) moved to the
+	// '?' legend along with everything else. NFR-027 sets the same 5%
+	// timeout-rate threshold this panel's own alert border now watches for.
+	sev := severityOK
+	if timeoutRatePct > auditTimeoutAlertPct {
+		sev = severityAlert
+	}
+
 	lines := []string{
 		fmt.Sprintf("challenges: %d  (pass %d, fail %d, timeout %d, pending %d)",
 			as.Challenges, as.Results.Pass, as.Results.Fail, as.Results.Timeout, as.Results.Pending),
 		fmt.Sprintf("pass rate:  %d%%   timeout rate: %d%%", passRatePct, timeoutRatePct),
-		dimStyle.Render(fmt.Sprintf("counts cover the trailing %s; challenges dispatched every %s",
-			roundDuration(as.WindowEnd.Sub(as.WindowStart)), roundDuration(profile.AuditPeriodDuration))),
 	}
 
-	return panelStyle.Render(panelTitleStyle.Render(title) + "\n" + strings.Join(lines, "\n"))
+	return wrapPanel(title, strings.Join(lines, "\n"), sev)
 }
+
+// auditTimeoutAlertPct mirrors NFR-027's own trigger — a timeout rate above
+// 5% of challenges issued — so the Audit panel's border turns red for the
+// same reason the requirement itself would flag the network, not an
+// invented threshold.
+const auditTimeoutAlertPct = 5
 
 // ═══════════════════════════════════════════════════════════════════════
 // 6. Escrow & release
@@ -392,19 +405,20 @@ func renderEscrow(profile config.NetworkProfile) string {
 		nextRelease = roundDuration(profile.ReleaseComputationInterval)
 	}
 
+	// [Trimmed, Session 18.1.3] The full explanation (F-18-4's own fix,
+	// pointing at `operator payout` for real numbers) moved to the '?'
+	// legend. The word "(placeholder)" stays attached directly to each
+	// value line rather than following it into the legend — the one fact
+	// that must never be a click or a keypress away is that ₹0.00 here is
+	// not a real balance, and a reader who never opens the legend must
+	// still see that on the line itself.
 	lines := []string{
-		fmt.Sprintf("charged paise:  %s", formatPaise(0)),
-		fmt.Sprintf("released paise: %s", formatPaise(0)),
-		// [Reworded, Session 18.1.2 — F-18-4] Same reason as the repair panel:
-		// "Session 17.6.3's snapshot" names a build session, not a thing the
-		// reader can act on. The disclosure is identical in substance — these
-		// two totals are placeholders — and now also says where the real
-		// numbers live, which is the question the old wording provoked.
-		dimStyle.Render("the two totals above are placeholders, not live figures — run `operator payout` for the real per-provider split"),
+		fmt.Sprintf("charged paise:  %s (placeholder)", formatPaise(0)),
+		fmt.Sprintf("released paise: %s (placeholder)", formatPaise(0)),
 		fmt.Sprintf("next charge tick in %s, next release tick in %s", nextCharge, nextRelease),
 	}
 
-	return panelStyle.Render(panelTitleStyle.Render(title) + "\n" + strings.Join(lines, "\n"))
+	return wrapPanelNeutral(title, strings.Join(lines, "\n"))
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -418,10 +432,13 @@ const eventFeedDisplayDepth = 10
 // of zero lines is a panel that looks broken.
 const minEventFeedDisplayDepth = 3
 
-func renderEvents(events []eventFeedEntry, now time.Time) string {
-	return renderEventsWithin(events, now, eventFeedDisplayDepth)
-}
-
+// renderEventsWithin is the sole entry point; renderFleet's neighbours in
+// this file are called directly by name (renderReadiness, renderAudit, ...)
+// but the event feed's caller (model.go's View) always has an explicit line
+// budget to pass, computed from the terminal height, so there is no
+// default-depth wrapper here to keep in sync with it — a second, unused
+// entry point is exactly how the F-18-6 height bug went unnoticed as long
+// as it did.
 // renderEventsWithin renders the feed with an explicit line budget, so
 // View can shrink it to whatever the terminal actually has room for.
 //
@@ -444,7 +461,7 @@ func renderEvents(events []eventFeedEntry, now time.Time) string {
 func renderEventsWithin(events []eventFeedEntry, now time.Time, depth int) string {
 	const title = "Event feed"
 	if len(events) == 0 {
-		return panelStyle.Render(panelTitleStyle.Render(title) + "\n" + dimStyle.Render("no events yet"))
+		return wrapPanelNeutral(title, dimStyle.Render("no events yet"))
 	}
 	if depth < minEventFeedDisplayDepth {
 		depth = minEventFeedDisplayDepth
@@ -466,7 +483,7 @@ func renderEventsWithin(events []eventFeedEntry, now time.Time, depth int) strin
 		lines = append(lines, fmt.Sprintf("[%s ago] %s: %s%s", age, e.kind, e.message, suffix))
 	}
 
-	return panelStyle.Render(panelTitleStyle.Render(title) + "\n" + strings.Join(lines, "\n"))
+	return wrapPanelNeutral(title, strings.Join(lines, "\n"))
 }
 
 // collapsedEvent is a run of consecutive identical events. at is the run's
@@ -509,4 +526,57 @@ func shortID(id string) string {
 		return id
 	}
 	return id[:shortIDLen]
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Legend — the '?' overlay
+// ═══════════════════════════════════════════════════════════════════════
+
+// renderLegend holds every explanation Session 18.1.3 trimmed out of the
+// seven panel bodies themselves, plus the console's keybindings. It exists
+// so removing that prose from the main view (F-18-4/F-18-5's own
+// wording, and this session's own ASN/Repair/Audit trims) is a relocation,
+// not a deletion — a presenter can still surface any of it on demand
+// without it competing for space with the numbers on every single frame.
+func renderLegend(profile config.NetworkProfile) string {
+	shardCap := asnShardCap(profile)
+
+	return strings.Join([]string{
+		panelTitleStyle.Render("What each panel means"),
+		"",
+		"Readiness gate     Five server-side conditions checked before the network",
+		"                   accepts real uploads. READY/NOT READY is the coordinator's",
+		"                   own verdict, not this console's — trust it over the",
+		"                   fractions if --mode was ever passed wrong.",
+		"",
+		fmt.Sprintf("Provider fleet     PASSES shows consecutive audit passes against the %d-pass", profile.VettingMinPasses),
+		fmt.Sprintf("                   vetting gate while VETTING (also needs %s elapsed —", roundDuration(profile.VettingMinDuration)),
+		"                   both conditions, not either). HEARTBEAT turns amber past",
+		"                   half the departure threshold, red once overdue.",
+		"",
+		fmt.Sprintf("ASN diversity      No ASN may hold more than %d shard(s) of the SAME SEGMENT", shardCap),
+		"                   (FR-045, ADR-014). Chunk counts shown are lifetime totals",
+		"                   across every segment, not a per-segment cap reading — a",
+		"                   multi-segment file legitimately shows more than the cap",
+		fmt.Sprintf("                   per ASN. Meeting the %d required distinct ASNs exactly is", profile.MinDistinctASNs),
+		"                   healthy, not a warning.",
+		"",
+		fmt.Sprintf("Repair             r0 = %d shards. Repairs fire immediately once queued rather", profile.LazyRepairR0),
+		"                   than batching at r0 — this build has no batching gate yet.",
+		"",
+		"Audit              Counts cover a trailing 1-hour window; challenges dispatch",
+		fmt.Sprintf("                   every %s. Border turns red above a %d%% timeout rate,", roundDuration(profile.AuditPeriodDuration), auditTimeoutAlertPct),
+		"                   the same trigger NFR-027 itself defines.",
+		"",
+		"Escrow & release   Both totals are placeholders (marked inline) — no admin",
+		"                   endpoint yet exposes live escrow balances. Run",
+		"                   `operator payout` for the real per-provider split.",
+		"",
+		panelTitleStyle.Render("Keys"),
+		"  [1]-[7]        focus that panel full-size; same digit again to un-zoom",
+		"  [esc] or [0]   back to the grid",
+		"  [\u2191/\u2193] [j/k]     scroll    [PgUp/PgDn] page",
+		"  [?]            toggle this legend",
+		"  [q]            quit",
+	}, "\n")
 }
