@@ -135,7 +135,7 @@ func TestViewRendersAllSevenPanels(t *testing.T) {
 	out := m.View()
 
 	for _, title := range []string{
-		"Readiness gate", "Provider fleet", "ASN cap occupancy",
+		"Readiness gate", "Provider fleet", "ASN diversity",
 		"Repair", "Audit", "Escrow & release", "Event feed",
 	} {
 		if !strings.Contains(out, title) {

@@ -1,11 +1,16 @@
-// Tests for panels.go (M17-E Session 17.6.2).
+// Tests for panels.go (M17-E Session 17.6.2; extended Sessions 18.1.2, 18.1.3).
 //
 // Tests:
 //   - TestHeartbeatAgePastHalfThresholdRendersCountdown
-//   - TestASNCapPanelShowsZeroHeadroomAtDemoTopology
+//   - TestASNCapPanelDoesNotAlarmOnAggregateChunkCounts
+//   - TestFleetPanelShowsVettingAuditPassProgress
 //   - TestReadinessPanelReadsProfileThresholds
 //   - TestEffectiveDepartureThresholdMatchesProfile
 //   - TestRepairPanelFlagsJobsAtOrBelowR0
+//   - TestFleetRowFormatSurvivesLongestStatus
+//   - TestEventFeedCollapsesConsecutiveDuplicates
+//   - TestEventFeedNeverRendersFewerThanTheFloor
+//   - TestASNPanelKeepsASNsWithNoActiveProviders
 package main
 
 import (
@@ -228,8 +233,17 @@ func TestFleetRowFormatSurvivesLongestStatus(t *testing.T) {
 		t.Errorf("fleet header and row widths diverge with status %q (header %d, row %d) — the row will shift its own columns (F-18-2):\n%s\n%s",
 			longestStatus, len(header), len(row), header, row)
 	}
-	if strings.Index(row, "200") != strings.Index(header, "GB") {
-		t.Errorf("declared GB does not land under the GB header when status is %q (F-18-2):\n%s\n%s", longestStatus, header, row)
+	// GB is a %5s right-justified field, so "GB" (2 chars) and "200" (3
+	// chars) do NOT start at the same column even when correctly
+	// aligned — only their right edges coincide. Checking start-index
+	// equality here would fail on every correctly-aligned row whose
+	// value has a different length than its header, which is the normal
+	// case for a right-justified numeric column. The real invariant is
+	// that the field ENDS at the same position.
+	headerEnd := strings.Index(header, "GB") + len("GB")
+	rowEnd := strings.Index(row, "200") + len("200")
+	if headerEnd != rowEnd {
+		t.Errorf("declared GB's field does not end under the GB header's field when status is %q (F-18-2):\n%s\n%s", longestStatus, header, row)
 	}
 }
 
