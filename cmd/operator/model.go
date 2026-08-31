@@ -73,17 +73,25 @@ type readinessAdminResponse struct {
 }
 
 type providerAdminItem struct {
-	ProviderID        string     `json:"provider_id"`
-	PhoneNumber       string     `json:"phone_number"`
-	Status            string     `json:"status"`
-	ASN               string     `json:"asn"`
-	Region            string     `json:"region"`
-	LastHeartbeatTS   *time.Time `json:"last_heartbeat_ts"`
-	ScoreComposite    *float64   `json:"score_composite"`
-	StoredChunks      int        `json:"stored_chunks"`
-	Frozen            bool       `json:"frozen"`
-	DeclaredStorageGB int        `json:"declared_storage_gb"`
-	DepartedAt        *time.Time `json:"departed_at"`
+	ProviderID      string     `json:"provider_id"`
+	PhoneNumber     string     `json:"phone_number"`
+	Status          string     `json:"status"`
+	ASN             string     `json:"asn"`
+	Region          string     `json:"region"`
+	LastHeartbeatTS *time.Time `json:"last_heartbeat_ts"`
+	ScoreComposite  *float64   `json:"score_composite"`
+	StoredChunks    int        `json:"stored_chunks"`
+	// ConsecutiveAuditPasses — Session 18.1.2. GET /api/v1/admin/providers
+	// has always returned this field (internal/api/admin.go's
+	// adminProviderItem, selected straight from providers.consecutive_
+	// audit_passes); this struct simply never decoded it, so the fleet
+	// panel could not show how close a VETTING provider was to its
+	// VettingMinPasses gate. No server change was needed to add the
+	// column — only this field and renderFleet's use of it.
+	ConsecutiveAuditPasses int        `json:"consecutive_audit_passes"`
+	Frozen                 bool       `json:"frozen"`
+	DeclaredStorageGB      int        `json:"declared_storage_gb"`
+	DepartedAt             *time.Time `json:"departed_at"`
 }
 
 type adminProvidersResponse struct {
@@ -492,15 +500,19 @@ func (m watchModel) View() string {
 		return header + "\n\n" + dimStyle.Render("waiting for first fetch...") + "\n\n" + dimStyle.Render("press q to quit")
 	}
 
-	panels := []string{
+	// The six fixed-height panels are rendered first so the event feed —
+	// the only one whose height varies — can be given whatever budget is
+	// left. See renderEventsWithin's own note (F-18-6) for why an unbounded
+	// view produced both the cut-off feed and the duplicated footer.
+	fixed := []string{
 		renderReadiness(m.profile, m.snapshot.Readiness),
 		renderFleet(m.profile, m.snapshot.Providers, m.snapshot.Readiness, m.now),
 		renderASNCap(m.profile, m.snapshot.Providers),
 		renderRepair(m.profile, m.snapshot.RepairQueue),
 		renderAudit(m.profile, m.snapshot.AuditStats, m.now),
 		renderEscrow(m.profile),
-		renderEvents(m.events, m.now),
 	}
+	panels := append(fixed, renderEventsWithin(m.events, m.now, m.eventFeedBudget(fixed)))
 
 	var errLine string
 	if len(m.snapshot.FetchErrors) > 0 {
@@ -508,6 +520,34 @@ func (m watchModel) View() string {
 	}
 
 	return header + "\n" + strings.Join(panels, "\n") + errLine + "\n" + dimStyle.Render("press q to quit")
+}
+
+// eventFeedBudget returns how many event lines will fit under the panels
+// already rendered, given the terminal height last reported by
+// tea.WindowSizeMsg. m.height is 0 before the first resize message arrives
+// (and in every test, which never sends one), in which case the feed keeps
+// its full default depth — the previous behaviour exactly, so nothing that
+// works today changes on a terminal tall enough not to need trimming.
+func (m watchModel) eventFeedBudget(fixed []string) int {
+	if m.height <= 0 {
+		return eventFeedDisplayDepth
+	}
+
+	// One line for the header, one for the footer, one for a possible
+	// fetch-error line, plus the event panel's own border and title.
+	const chromeLines = 3
+	const eventPanelChrome = 3
+
+	used := chromeLines + eventPanelChrome
+	for _, p := range fixed {
+		used += strings.Count(p, "\n") + 1
+	}
+
+	budget := m.height - used
+	if budget > eventFeedDisplayDepth {
+		budget = eventFeedDisplayDepth
+	}
+	return budget
 }
 
 // percentageScale converts a 0..1 fraction to a whole-number percentage —
