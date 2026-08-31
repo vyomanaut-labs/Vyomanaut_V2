@@ -418,10 +418,6 @@ const eventFeedDisplayDepth = 10
 // of zero lines is a panel that looks broken.
 const minEventFeedDisplayDepth = 3
 
-func renderEvents(events []eventFeedEntry, now time.Time) string {
-	return renderEventsWithin(events, now, eventFeedDisplayDepth)
-}
-
 // renderEventsWithin renders the feed with an explicit line budget, so
 // View can shrink it to whatever the terminal actually has room for.
 //
