@@ -15,6 +15,8 @@ const (
 	colorDim     = lipgloss.Color("240") // muted gray — secondary text
 	colorAccent  = lipgloss.Color("39")  // blue — headings, panel titles
 	panelPadding = 1
+
+	legendHorizontalPadding = 2
 )
 
 var (
@@ -53,7 +55,7 @@ var (
 	legendStyle = lipgloss.NewStyle().
 			Border(lipgloss.DoubleBorder()).
 			BorderForeground(colorAccent).
-			Padding(1, 2).
+			Padding(1, legendHorizontalPadding).
 			MarginBottom(1)
 )
 
@@ -96,6 +98,8 @@ func wrapPanel(title, body string, sev severity) string {
 		border = colorAlert
 	case severityWarn:
 		border = colorWarn
+	case severityOK:
+		border = colorOK
 	}
 	return panelStyle.BorderForeground(border).Render(panelTitleStyle.Render(title) + "\n" + body)
 }

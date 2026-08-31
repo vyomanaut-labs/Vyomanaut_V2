@@ -588,6 +588,16 @@ func (m watchModel) View() string {
 	return header + "\n" + body + errLine + "\n" + footerStyle.Render(m.footerHint()+hint)
 }
 
+const (
+	focusReadiness = 1
+	focusFleet     = 2
+	focusASN       = 3
+	focusRepair    = 4
+	focusAudit     = 5
+	focusEscrow    = 6
+	focusEvents    = 7
+)
+
 // bodyForFocus renders either the full seven-panel grid (m.focus == 0) or
 // one panel alone at m.focus (1-7, in the same top-to-bottom reading order
 // the grid uses: Readiness, Fleet, ASN diversity, Repair, Audit, Escrow,
@@ -607,22 +617,21 @@ func (m watchModel) bodyForFocus() string {
 	escrow := renderEscrow(m.profile)
 
 	switch m.focus {
-	case 1:
+	case focusReadiness:
 		return readiness
-	case 2:
+	case focusFleet:
 		return fleet
-	case 3:
+	case focusASN:
 		return asn
-	case 4:
+	case focusRepair:
 		return repair
-	case 5:
+	case focusAudit:
 		return audit
-	case 6:
+	case focusEscrow:
 		return escrow
-	case 7:
+	case focusEvents:
 		return renderEventsWithin(m.events, m.now, m.focusedEventFeedBudget())
 	}
-
 	// Grid: two compact status panels side by side, the wide provider
 	// table on its own row, two more compact panels side by side, escrow
 	// on its own row (short, but not worth crowding against the others'
