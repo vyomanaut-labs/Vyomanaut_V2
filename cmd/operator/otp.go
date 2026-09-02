@@ -137,3 +137,55 @@ func mostRecentCodeForPhone(path, phone string) (code, sentAt string, err error)
 	}
 	return code, sentAt, nil
 }
+
+// resolveOtpDeliveryLog applies the same flag-then-environment fallback
+// dispatchOtp uses inline, so `operator watch --otp-delivery-log` and
+// `operator otp --otp-delivery-log` resolve identically. Returns "" when
+// neither is set — an absent path is not an error for watch, which simply
+// runs without the OTP feed (unlike `operator otp`, whose whole job it is).
+//
+// [Added, Session 18.1.4]
+func resolveOtpDeliveryLog(flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	return os.Getenv("VYOMANAUT_OTP_DELIVERY_LOG")
+}
+
+// otpLogEntry is one parsed delivery-log line.
+type otpLogEntry struct {
+	sentAt string
+	phone  string
+	code   string
+}
+
+// readOtpLog parses the whole delivery log, oldest first. It shares
+// mostRecentCodeForPhone's tolerance for malformed lines (skip, don't
+// fail) and its assumption that this file is a human-scale demo artifact —
+// re-reading it once per fetch cycle is cheap at the handful-of-lines
+// scale it actually reaches, and avoids holding a file handle open across
+// the console's whole run.
+//
+// A missing file is not an error: the microservice creates the log lazily
+// on the first OTP, so "not there yet" is the normal state for the first
+// minute of every run.
+//
+// [Added, Session 18.1.4]
+func readOtpLog(path string) []otpLogEntry {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = f.Close() }()
+
+	var out []otpLogEntry
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) != otpLogFields {
+			continue
+		}
+		out = append(out, otpLogEntry{sentAt: fields[0], phone: fields[1], code: fields[2]})
+	}
+	return out
+}
