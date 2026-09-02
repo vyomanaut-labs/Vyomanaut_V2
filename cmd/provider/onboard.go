@@ -134,6 +134,44 @@ var onboardPhonePattern = regexp.MustCompile(`^\+[1-9]\d{1,14}$`)
 // onboardOtpCodePattern mirrors internal/api/otp.go's otpCodePattern.
 var onboardOtpCodePattern = regexp.MustCompile(`^\d{6}$`)
 
+// bareIndianMobilePattern matches a ten-digit Indian mobile number with no
+// country code — the form people actually say out loud and type.
+var bareIndianMobilePattern = regexp.MustCompile(`^[6-9]\d{9}$`)
+
+// normalizePhone canonicalises what a person typed into the E.164 form
+// onboardPhonePattern (and internal/api/otp.go's phoneNumberPattern)
+// require, so "+91" stops being something a volunteer has to remember at a
+// live demo.
+//
+// [Added, Session 18.1.4] Three accepted inputs, one output:
+//
+//	+919876500001  -> unchanged (already E.164)
+//	9876500001     -> +919876500001 (bare 10-digit Indian mobile)
+//	 98765 00001   -> +919876500001 (spaces and dashes stripped first)
+//
+// Anything else is returned UNCHANGED so the existing validator rejects it
+// with its own message. This function never widens what the server will
+// accept — it only saves a keystroke on the one country code this demo
+// actually uses. A leading 0 (the Indian domestic trunk prefix) is
+// deliberately NOT stripped: 09876500001 is eleven digits, fails
+// bareIndianMobilePattern, and falls through to the validator, because
+// silently reinterpreting a number the caller may have meant differently
+// is worse than asking them to retype it.
+//
+// The same function exists in cmd/client (account_cmds.go) with identical
+// semantics. It is duplicated rather than shared because it is input
+// normalisation at the wiring layer — turning keystrokes into the form an
+// existing validator already demands — and a new internal/ package for
+// twelve lines would need its own depguard rule for no behavioural gain.
+func normalizePhone(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	compact := strings.NewReplacer(" ", "", "-", "", "(", "", ")", "").Replace(trimmed)
+	if bareIndianMobilePattern.MatchString(compact) {
+		return "+91" + compact
+	}
+	return compact
+}
+
 // resolveStorageGB returns the declared storage allocation: flagValue if
 // positive (--storage-gb was given), otherwise prompts on prompt and reads
 // one line from in. Requirement 11's user-facing choice: the person
@@ -269,8 +307,9 @@ func runOnboard(ctx context.Context, flags onboardFlags, out io.Writer, in io.Re
 	if flags.microserviceURL == "" {
 		return registrationRecord{}, fmt.Errorf("--microservice-url is required")
 	}
+	flags.phone = normalizePhone(flags.phone)
 	if !onboardPhonePattern.MatchString(flags.phone) {
-		return registrationRecord{}, fmt.Errorf("--phone must be E.164 format, e.g. +919876500001")
+		return registrationRecord{}, fmt.Errorf("--phone must be E.164 format, e.g. +919876500001 (a bare 10-digit Indian number is also accepted and gets +91 prepended)")
 	}
 
 	storageGB, err := resolveStorageGB(flags.storageGB, out, in)

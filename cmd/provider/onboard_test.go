@@ -124,3 +124,38 @@ func TestOnboardNeverWritesTheCodeToDisk(t *testing.T) {
 		t.Fatalf("walk data dir: %v", walkErr)
 	}
 }
+
+// TestNormalizePhoneAcceptsBareIndianMobile mirrors the identical test in
+// cmd/client (account_cmds_test.go). The two normalizePhone functions are
+// deliberate duplicates — input normalisation at the wiring layer, where a
+// shared internal/ package for twelve lines would need its own depguard
+// rule for no behavioural gain — so both are pinned separately and must
+// stay in agreement.
+func TestNormalizePhoneAcceptsBareIndianMobile(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"9790000001", "+919790000001"},
+		{"  97900 00001  ", "+919790000001"},
+		{"97900-00001", "+919790000001"},
+		{"+919790000001", "+919790000001"},
+		{"+14155552671", "+14155552671"},
+		{"09790000001", "09790000001"}, // trunk prefix NOT stripped
+		{"5790000001", "5790000001"},   // invalid Indian prefix, untouched
+		{"", ""},
+		{"abc", "abc"},
+	}
+
+	for _, c := range cases {
+		if got := normalizePhone(c.in); got != c.want {
+			t.Errorf("normalizePhone(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	// Every value this function CLAIMS to canonicalise must satisfy the
+	// validator that runs immediately after it in runOnboard — otherwise
+	// the normalisation is cosmetic and the caller still gets rejected.
+	for _, in := range []string{"9790000001", "97900-00001", "+919790000001"} {
+		if !onboardPhonePattern.MatchString(normalizePhone(in)) {
+			t.Errorf("normalizePhone(%q) produced a value onboardPhonePattern rejects", in)
+		}
+	}
+}
