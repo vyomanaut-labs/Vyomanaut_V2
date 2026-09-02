@@ -25,6 +25,21 @@ func dispatchWatch(args []string, out, errOut io.Writer) int {
 	fs.SetOutput(errOut)
 	var g globalFlags
 	addGlobalFlags(fs, &g)
+	// [Added, Session 18.1.4] Optional. When set AND the profile is demo,
+	// the console surfaces each OTP as it is issued, in the event feed,
+	// beside the phone number that asked for it — so a volunteer running
+	// join.sh can read their own code off the shared screen instead of the
+	// operator running `operator otp` in a second terminal.
+	//
+	// GATED TO DEMO DELIBERATELY (Karma's ruling, Session 18.1.4). An OTP
+	// on a projector is a real weakening: anyone watching can complete a
+	// registration for a number they do not control. That is an acceptable
+	// trade for a room the presenter controls, and unacceptable anywhere
+	// else, so the gate is on the PROFILE rather than on the flag — passing
+	// the flag under --mode=prod is refused below rather than silently
+	// ignored, because silently ignoring it is how someone concludes it is
+	// safe to leave in a launch script.
+	deliveryLog := fs.String("otp-delivery-log", "", "Demo mode only. Path to cmd/microservice's FileOtpSender delivery log; when set, OTP codes appear in the event feed beside the requesting phone number. Falls back to VYOMANAUT_OTP_DELIVERY_LOG.")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -37,13 +52,21 @@ func dispatchWatch(args []string, out, errOut io.Writer) int {
 	profile := config.SelectProfile(g.mode)
 	client := newAdminClient(g.microserviceURL, g.adminAPIKey)
 
+	otpLogPath := resolveOtpDeliveryLog(*deliveryLog)
+	if otpLogPath != "" && !profile.IsDemoMode {
+		fprintln(errOut, "vyomanaut operator watch: --otp-delivery-log is demo-mode only; surfacing OTP codes on a shared console is not permitted outside --mode=demo")
+		return exitUsage
+	}
+
 	// --json: one snapshot, then exit — task item 5's own wording, so
 	// Session 17.8.2 can assert on the console's view without a terminal.
 	if g.json {
 		return runWatchJSONSnapshot(client, out, errOut)
 	}
 
-	program := tea.NewProgram(newWatchModel(client, profile), tea.WithAltScreen())
+	model := newWatchModel(client, profile)
+	model.otpLogPath = otpLogPath
+	program := tea.NewProgram(model, tea.WithAltScreen())
 	if _, err := program.Run(); err != nil {
 		fprintf(errOut, "vyomanaut operator watch: %v\n", err)
 		return 1
