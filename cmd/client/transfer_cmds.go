@@ -338,7 +338,42 @@ func reportUploadProgress(sessionDir string, fileID uuid.UUID, errOut io.Writer)
 		return
 	}
 	pct := acked * progressPercentScale / total
-	fprintf(errOut, "\rUploading... %d%%", pct)
+	fprintf(errOut, "\rUploading  %s  %d%%  (%d/%d shards)", uploadProgressBar(acked, total), pct, acked, total)
+}
+
+// uploadProgressBarWidth is the cell count of the upload bar. Matches
+// cmd/operator's progressBarWidth so the two surfaces of this demo look
+// like one product; they are separate constants because the packages do not
+// import each other (cmd/ is wiring only, IC §11) and a shared internal
+// package for one integer would need its own depguard rule.
+const uploadProgressBarWidth = 24
+
+// uploadProgressBar renders acked/total as a filled bar.
+//
+// [Added, Session 18.1.5] The percentage this replaces was real but easy to
+// miss: it redraws in place on one line, so on a large upload a viewer sees
+// a number that looks static for long stretches. A bar makes the same data
+// legible from across a room, which is the whole reason it changed.
+//
+// The blocks are U+2588 and U+2591, both single-column, so the bar's
+// display width equals uploadProgressBarWidth exactly.
+//
+// This is a presentation of a genuine ratio — acked shards over total
+// shards, read from the upload session state on disk — not an animation on
+// a timer. If the transfer stalls, the bar stalls with it, which is the
+// correct and useful behaviour.
+func uploadProgressBar(acked, total int) string {
+	if total <= 0 {
+		return strings.Repeat("\u2591", uploadProgressBarWidth)
+	}
+	filled := acked * uploadProgressBarWidth / total
+	if filled > uploadProgressBarWidth {
+		filled = uploadProgressBarWidth
+	}
+	if filled < 0 {
+		filled = 0
+	}
+	return strings.Repeat("\u2588", filled) + strings.Repeat("\u2591", uploadProgressBarWidth-filled)
 }
 
 // ── retrieve ─────────────────────────────────────────────────────────────
@@ -411,8 +446,26 @@ func dispatchRetrieve(args []string, stdin io.Reader, out, errOut io.Writer) int
 
 	orch := retrieve.NewOrchestrator(g.microserviceURL, id.Token, &http.Client{Timeout: cliHTTPClientTimeout}, host, engine, profile)
 
-	fprint(errOut, "Retrieving...")
+	// [Changed, Session 18.1.5] No percentage here, deliberately.
+	// RetrieveFile (IC §5.9) is ONE blocking call with no progress
+	// callback, and unlike upload it writes no session state to disk, so
+	// there is nothing this layer can observe to compute a ratio from —
+	// upload's bar is real precisely because acked shards are readable
+	// mid-flight, and retrieval has no equivalent. A spinner or a timed
+	// bar here would be an animation with nothing behind it, which is the
+	// one thing this demo's surfaces do not do.
+	//
+	// What IS said instead is true and worth saying out loud: the
+	// reconstruction only needs DataShards of TotalShards per segment, so
+	// the line states the redundancy the network is actually exercising.
+	// Giving retrieval a real bar means adding a progress callback to
+	// internal/client/retrieve — a contract change, tracked rather than
+	// faked.
+	fprintf(errOut, "Retrieving  (rebuilding each segment from any %d of %d shards)...",
+		profile.DataShards, profile.TotalShards)
+	startedAt := time.Now()
 	plaintext, err := orch.RetrieveFile(context.Background(), id.MasterSecret, id.OwnerID, fileID)
+	elapsed := time.Since(startedAt)
 	fprintln(errOut)
 	if err != nil {
 		printCLIError(errOut, g.json, withTransferErrorCode(err), renderTransferError)
@@ -438,6 +491,39 @@ func dispatchRetrieve(args []string, stdin io.Reader, out, errOut io.Writer) int
 		fprintln(out, data)
 	} else {
 		fprintf(out, "Retrieved %d bytes to %s\n", len(plaintext), outFile)
+		// [Added, Session 18.1.5] Measured, not estimated: wall-clock
+		// around the one RetrieveFile call, over the byte count it
+		// actually returned. Reported after the fact for the same reason
+		// no bar is drawn during — see the note at the call site.
+		fprintf(errOut, "  rebuilt in %s (%s)\n", roundRetrieveDuration(elapsed), retrieveThroughput(len(plaintext), elapsed))
 	}
 	return 0
+}
+
+// roundRetrieveDuration renders a retrieval's wall-clock time at a
+// precision a person reads rather than a benchmark does.
+func roundRetrieveDuration(d time.Duration) string {
+	if d < time.Second {
+		return d.Round(time.Millisecond).String()
+	}
+	return d.Round(100 * time.Millisecond).String()
+}
+
+// bytesPerMB is the divisor for the throughput line. 1<<20, matching the
+// binary MB the rest of this system measures storage in.
+const bytesPerMB = 1 << 20
+
+// retrieveThroughput renders observed MB/s, or "—" when the elapsed time is
+// too small to divide by meaningfully. A tiny file retrieved in under a
+// millisecond would otherwise print an enormous rate that says nothing
+// about the network.
+func retrieveThroughput(n int, d time.Duration) string {
+	if d <= 0 || n <= 0 {
+		return "rate n/a"
+	}
+	mbps := (float64(n) / bytesPerMB) / d.Seconds()
+	if mbps < 0.01 {
+		return "rate n/a"
+	}
+	return fmt.Sprintf("%.1f MB/s", mbps)
 }

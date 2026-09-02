@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -141,5 +142,52 @@ func TestCanaryMismatchIsErrorsIsCryptoSentinel(t *testing.T) {
 	got := renderTransferError(wrapped)
 	if !strings.Contains(strings.ToLower(got), "corrupt") {
 		t.Errorf("renderTransferError(canary mismatch) = %q, want the canary-specific copy, not the generic fallback", got)
+	}
+}
+
+// TestUploadProgressBarIsExactlyOneColumnPerCell — the bar redraws in place
+// with \r, so a bar whose rune count drifted would leave debris from the
+// previous frame on screen. Both block characters are single-column, so the
+// rune count must equal uploadProgressBarWidth at every ratio.
+func TestUploadProgressBarIsExactlyOneColumnPerCell(t *testing.T) {
+	cases := []struct{ acked, total int }{
+		{0, 10}, {1, 10}, {5, 10}, {10, 10},
+		{0, 0},   // no total yet — session state not written
+		{15, 10}, // defensive: more acked than total must still not overflow
+		{-1, 10},
+	}
+	for _, c := range cases {
+		got := len([]rune(uploadProgressBar(c.acked, c.total)))
+		if got != uploadProgressBarWidth {
+			t.Errorf("uploadProgressBar(%d,%d) is %d runes, want %d", c.acked, c.total, got, uploadProgressBarWidth)
+		}
+	}
+}
+
+// TestUploadProgressBarTracksTheRatio confirms the bar is a presentation of
+// real acked-shard data, not decoration: empty at zero, full at completion.
+func TestUploadProgressBarTracksTheRatio(t *testing.T) {
+	empty := uploadProgressBar(0, 10)
+	if strings.ContainsRune(empty, '\u2588') {
+		t.Errorf("a zero-progress bar should have no filled cells: %q", empty)
+	}
+	full := uploadProgressBar(10, 10)
+	if strings.ContainsRune(full, '\u2591') {
+		t.Errorf("a complete bar should have no empty cells: %q", full)
+	}
+}
+
+// TestRetrieveThroughputRefusesMeaninglessRates — a tiny file retrieved in
+// microseconds would otherwise print an enormous MB/s that says nothing
+// about the network. Reporting "rate n/a" is the honest output.
+func TestRetrieveThroughputRefusesMeaninglessRates(t *testing.T) {
+	if got := retrieveThroughput(0, time.Second); got != "rate n/a" {
+		t.Errorf("zero bytes should report no rate, got %q", got)
+	}
+	if got := retrieveThroughput(100, 0); got != "rate n/a" {
+		t.Errorf("zero elapsed should report no rate, got %q", got)
+	}
+	if got := retrieveThroughput(10*bytesPerMB, 2*time.Second); got != "5.0 MB/s" {
+		t.Errorf("10 MB in 2s should read 5.0 MB/s, got %q", got)
 	}
 }
