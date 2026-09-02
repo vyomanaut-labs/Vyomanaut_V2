@@ -157,7 +157,7 @@ func TestReadinessPanelReadsProfileThresholds(t *testing.T) {
 		},
 	}
 
-	out := renderReadiness(profile, resp)
+	out := renderReadiness(profile, resp, vettingForecast{})
 
 	for _, want := range []string{"1 / 42", "1 / 17", "1 / 9", "1 / 3", "1 / 55"} {
 		if !strings.Contains(out, want) {
@@ -226,8 +226,8 @@ func TestRepairPanelFlagsJobsAtOrBelowR0(t *testing.T) {
 func TestFleetRowFormatSurvivesLongestStatus(t *testing.T) {
 	const longestStatus = "PENDING_ONBOARDING"
 
-	header := fmt.Sprintf(fleetRowFormat, "ID", "ASN", "STATUS", "HEARTBEAT", "GB", "CHUNKS", "PASSES", "SCORE")
-	row := fmt.Sprintf(fleetRowFormat, "699c248a", "SIM-AS4", longestStatus, "16s", "200", "0", "0", "-")
+	header := fmt.Sprintf(fleetRowFormat, "ID", "PHONE", "ASN", "STATUS", "HEARTBEAT", "GB", "CHUNKS", "PASSES", "SCORE")
+	row := fmt.Sprintf(fleetRowFormat, "699c248a", "+919790000001", "SIM-AS4", longestStatus, "16s", "200", "0", "0", "-")
 
 	if len(header) != len(row) {
 		t.Errorf("fleet header and row widths diverge with status %q (header %d, row %d) — the row will shift its own columns (F-18-2):\n%s\n%s",
@@ -314,5 +314,193 @@ func TestASNPanelKeepsASNsWithNoActiveProviders(t *testing.T) {
 	}
 	if !strings.Contains(out, "SIM-AS2    0 chunk(s)") {
 		t.Errorf("a VETTING-only ASN should read as zero chunks, not be omitted (F-18-3):\n%s", out)
+	}
+}
+
+// TestFleetPanelShowsProviderPhoneNumber pins the PHONE column added in
+// Session 18.1.4. GET /api/v1/admin/providers has always returned
+// phone_number; the console simply never decoded it. It is the only field
+// in the fleet table an audience can tie back to a person — when a
+// volunteer runs join.sh and reads their number aloud, that number appears
+// here.
+func TestFleetPanelShowsProviderPhoneNumber(t *testing.T) {
+	profile := config.DemoProfile
+	now := time.Now()
+
+	providers := &adminProvidersResponse{Providers: []providerAdminItem{
+		{ProviderID: "1", Status: "ACTIVE", ASN: "AS1", PhoneNumber: "+919790000001"},
+		{ProviderID: "2", Status: "ACTIVE", ASN: "AS2", PhoneNumber: ""},
+	}}
+
+	out := renderFleet(profile, providers, nil, now)
+
+	if !strings.Contains(out, "PHONE") {
+		t.Errorf("renderFleet is missing the PHONE column header:\n%s", out)
+	}
+	if !strings.Contains(out, "+919790000001") {
+		t.Errorf("renderFleet did not render the provider's phone number:\n%s", out)
+	}
+}
+
+// TestPhoneOrDashPadsByDisplayWidth guards the byte-vs-column trap. fmt pads
+// %-14s to a BYTE count while a terminal aligns by display columns, so a
+// three-byte one-column em dash here would silently shift every column to
+// its right — the same failure F-18-2 fixed for STATUS. The placeholder must
+// therefore stay single-byte.
+func TestPhoneOrDashPadsByDisplayWidth(t *testing.T) {
+	got := phoneOrDash("   ")
+	if len(got) != 1 {
+		t.Errorf("phoneOrDash placeholder is %d bytes (%q); a multi-byte rune under-pads the fixed-width PHONE column", len(got), got)
+	}
+	if kept := phoneOrDash("+919790000001"); kept != "+919790000001" {
+		t.Errorf("phoneOrDash altered a real number: got %q", kept)
+	}
+}
+
+// TestVettingForecastWaitsForBothGates is the correctness property the
+// whole ETA rests on. Promotion needs consecutive audit passes AND elapsed
+// vetting time; a provider with all its passes but its duration floor still
+// running is NOT nearly done, and a bar reading 100% while the audience
+// waits four more minutes would be worse than no bar at all.
+func TestVettingForecastWaitsForBothGates(t *testing.T) {
+	profile := config.DemoProfile
+	now := time.Now()
+
+	providers := &adminProvidersResponse{}
+	since := map[string]time.Time{}
+	for i := 0; i < profile.MinActiveProviders; i++ {
+		id := strconv.Itoa(i)
+		providers.Providers = append(providers.Providers, providerAdminItem{
+			ProviderID:             id,
+			Status:                 "VETTING",
+			ConsecutiveAuditPasses: profile.VettingMinPasses, // passes gate fully cleared
+		})
+		// but only one minute into a five-minute duration floor
+		since[id] = now.Add(-1 * time.Minute)
+	}
+
+	f := forecastVetting(profile, providers, since, now)
+
+	if !f.Estimated {
+		t.Fatalf("forecast should be estimable with %d vetting providers", profile.MinActiveProviders)
+	}
+	if f.Fraction >= 1 {
+		t.Errorf("fraction %.2f claims done while the duration floor is still running — the passes gate must not alone drive the bar", f.Fraction)
+	}
+	if f.ETA <= 0 {
+		t.Errorf("ETA should be positive while the duration floor has time left, got %v", f.ETA)
+	}
+}
+
+// TestVettingForecastIsNotEstimableBelowQuorum guards against offering a
+// countdown to something that cannot happen. Fewer vetting providers than
+// MinActiveProviders means the gate cannot clear from the current fleet at
+// all, so no ETA is honest.
+func TestVettingForecastIsNotEstimableBelowQuorum(t *testing.T) {
+	profile := config.DemoProfile
+	now := time.Now()
+
+	providers := &adminProvidersResponse{Providers: []providerAdminItem{
+		{ProviderID: "1", Status: "VETTING", ConsecutiveAuditPasses: 4},
+		{ProviderID: "2", Status: "VETTING", ConsecutiveAuditPasses: 4},
+	}}
+
+	f := forecastVetting(profile, providers, map[string]time.Time{}, now)
+
+	if f.Estimated {
+		t.Errorf("forecast claimed an ETA with only %d providers against a required %d", len(providers.Providers), profile.MinActiveProviders)
+	}
+}
+
+// TestVettingForecastTracksTheNthProvider confirms the estimate follows the
+// provider that will clear the gate LAST among those needed, not the one
+// furthest ahead — the gate opens on the fifth provider, not the first.
+func TestVettingForecastTracksTheNthProvider(t *testing.T) {
+	profile := config.DemoProfile
+	now := time.Now()
+
+	providers := &adminProvidersResponse{}
+	since := map[string]time.Time{}
+	// Four nearly done, one barely started.
+	for i := 0; i < profile.MinActiveProviders-1; i++ {
+		id := strconv.Itoa(i)
+		providers.Providers = append(providers.Providers, providerAdminItem{
+			ProviderID: id, Status: "VETTING", ConsecutiveAuditPasses: profile.VettingMinPasses,
+		})
+		since[id] = now.Add(-profile.VettingMinDuration)
+	}
+	providers.Providers = append(providers.Providers, providerAdminItem{
+		ProviderID: "laggard", Status: "VETTING", ConsecutiveAuditPasses: 0,
+	})
+	since["laggard"] = now
+
+	f := forecastVetting(profile, providers, since, now)
+
+	if f.Fraction > 0.1 {
+		t.Errorf("fraction %.2f followed the leaders; it must follow the %dth provider, which has barely started", f.Fraction, profile.MinActiveProviders)
+	}
+}
+
+// TestReadyNetworkOffersNoCountdown — once the gate is met there is nothing
+// left to wait for, so Estimated must be false rather than counting down to
+// an event that already happened.
+func TestReadyNetworkOffersNoCountdown(t *testing.T) {
+	profile := config.DemoProfile
+	now := time.Now()
+
+	providers := &adminProvidersResponse{}
+	for i := 0; i < profile.MinActiveProviders; i++ {
+		providers.Providers = append(providers.Providers, providerAdminItem{
+			ProviderID: strconv.Itoa(i), Status: "ACTIVE",
+		})
+	}
+
+	f := forecastVetting(profile, providers, map[string]time.Time{}, now)
+
+	if f.Active != profile.MinActiveProviders {
+		t.Errorf("active count = %d, want %d", f.Active, profile.MinActiveProviders)
+	}
+	if f.Estimated {
+		t.Errorf("a ready network should offer no ETA")
+	}
+	if f.Fraction != 1 {
+		t.Errorf("a ready network should read 100%%, got %.2f", f.Fraction)
+	}
+}
+
+// TestProgressBarIsExactlyOneColumnPerCell guards the same byte-vs-column
+// trap phoneOrDash documents: these bars sit inside side-by-side bordered
+// panels, so a multi-column glyph would push the neighbouring panel off the
+// row. Both block characters used must be single-column, which for a rune
+// count means the bar's rune length equals progressBarWidth exactly.
+func TestProgressBarIsExactlyOneColumnPerCell(t *testing.T) {
+	for _, fraction := range []float64{0, 0.33, 0.5, 1, 1.5, -1} {
+		out := renderProgressBar(fraction, severityOK)
+		bar := strings.SplitN(out, "  ", 2)[0]
+		if got := len([]rune(bar)); got != progressBarWidth {
+			t.Errorf("renderProgressBar(%.2f) bar is %d runes, want %d", fraction, got, progressBarWidth)
+		}
+	}
+	if !strings.Contains(renderProgressBar(1, severityOK), "100%") {
+		t.Errorf("a full bar should read 100%%")
+	}
+	if !strings.Contains(renderProgressBar(0, severityOK), "0%") {
+		t.Errorf("an empty bar should read 0%%")
+	}
+}
+
+// TestIndeterminateBarClaimsNoPercentage — the indeterminate bar exists for
+// work whose completion ratio this console cannot observe. If it ever grew
+// a percentage it would be fabricating one.
+func TestIndeterminateBarClaimsNoPercentage(t *testing.T) {
+	out := renderIndeterminateBar(3, severityWarn)
+	if strings.Contains(out, "%") {
+		t.Errorf("indeterminate bar must not claim a percentage: %q", out)
+	}
+	if !strings.Contains(out, "3 running") {
+		t.Errorf("indeterminate bar should state its count: %q", out)
+	}
+	if idle := renderIndeterminateBar(0, severityOK); !strings.Contains(idle, "idle") {
+		t.Errorf("zero active work should read idle: %q", idle)
 	}
 }
