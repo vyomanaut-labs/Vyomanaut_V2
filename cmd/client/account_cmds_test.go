@@ -133,3 +133,33 @@ func TestPromptLineRejectsImmediateEOF(t *testing.T) {
 		t.Errorf("error %q should name which prompt was waiting for input, to make this diagnosable", err.Error())
 	}
 }
+
+// TestNormalizePhoneAcceptsBareIndianMobile pins Session 18.1.4's input
+// normalisation. "+91" was something a data owner had to remember while
+// standing in front of an audience; a bare ten-digit number now works.
+//
+// The negative cases matter more than the positive ones: this function must
+// never widen what the server accepts, only save a keystroke on the one
+// country code the demo uses. A leading 0 (the Indian domestic trunk
+// prefix) is deliberately passed through unchanged rather than stripped —
+// silently reinterpreting a number the caller may have meant differently is
+// worse than making them retype it.
+func TestNormalizePhoneAcceptsBareIndianMobile(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"9571276889", "+919571276889"},      // bare ten-digit
+		{"  95712 76889  ", "+919571276889"}, // spaces stripped first
+		{"95712-76889", "+919571276889"},     // dashes stripped first
+		{"+919571276889", "+919571276889"},   // already E.164, untouched
+		{"+14155552671", "+14155552671"},     // other country code, untouched
+		{"09571276889", "09571276889"},       // trunk prefix NOT stripped
+		{"5571276889", "5571276889"},         // invalid Indian prefix, untouched
+		{"", ""},                             // empty stays empty
+		{"abc", "abc"},                       // garbage passes to the validator
+	}
+
+	for _, c := range cases {
+		if got := normalizePhone(c.in); got != c.want {
+			t.Errorf("normalizePhone(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

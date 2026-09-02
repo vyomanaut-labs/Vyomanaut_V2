@@ -42,6 +42,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -136,12 +137,13 @@ func runRegister(ctx context.Context, cfg registerConfig, in *bufio.Reader, out,
 	phone := cfg.phone
 	if phone == "" {
 		var err error
-		phone, err = promptLine(out, in, "Phone number (E.164, e.g. +91XXXXXXXXXX): ")
+		phone, err = promptLine(out, in, "Phone number (10 digits, or full E.164 e.g. +91XXXXXXXXXX): ")
 		if err != nil {
 			printCLIError(errOut, cfg.g.json, err, renderError)
 			return 1
 		}
 	}
+	phone = normalizePhone(phone)
 
 	if err := account.SendOTP(ctx, cfg.g.microserviceURL, cfg.httpClient, phone, account.OTPPurposeOwnerRegister); err != nil {
 		printCLIError(errOut, cfg.g.json, err, renderError)
@@ -383,12 +385,13 @@ func runNetworkRecover(ctx context.Context, cfg recoverConfig, masterSecretFor f
 	phone := cfg.phone
 	if phone == "" {
 		var err error
-		phone, err = promptLine(out, in, "Phone number (E.164, e.g. +91XXXXXXXXXX): ")
+		phone, err = promptLine(out, in, "Phone number (10 digits, or full E.164 e.g. +91XXXXXXXXXX): ")
 		if err != nil {
 			printCLIError(errOut, cfg.g.json, err, renderError)
 			return 1
 		}
 	}
+	phone = normalizePhone(phone)
 
 	if err := account.SendOTP(ctx, cfg.g.microserviceURL, cfg.httpClient, phone, account.OTPPurposeLogin); err != nil {
 		printCLIError(errOut, cfg.g.json, err, renderError)
@@ -477,4 +480,40 @@ func promptLine(out io.Writer, in *bufio.Reader, label string) (string, error) {
 		return "", fmt.Errorf("cmd/client: read input for prompt %q: %w (input source closed or exhausted before a response was given)", label, err)
 	}
 	return strings.TrimSpace(line), nil
+}
+
+// bareIndianMobilePattern matches a ten-digit Indian mobile number with no
+// country code — the form people actually say out loud and type.
+var bareIndianMobilePattern = regexp.MustCompile(`^[6-9]\d{9}$`)
+
+// normalizePhone canonicalises what a person typed into the E.164 form
+// internal/api/otp.go's phoneNumberPattern requires, so "+91" stops being
+// something a data owner has to remember at a live demo.
+//
+// [Added, Session 18.1.4] Three accepted inputs, one output:
+//
+//	+919876500001  -> unchanged (already E.164)
+//	9876500001     -> +919876500001 (bare 10-digit Indian mobile)
+//	 98765 00001   -> +919876500001 (spaces and dashes stripped first)
+//
+// Anything else is returned UNCHANGED so the server rejects it with its own
+// message. This never widens what the server accepts — it only saves a
+// keystroke on the one country code this demo actually uses. A leading 0
+// (the Indian domestic trunk prefix) is deliberately NOT stripped:
+// 09876500001 is eleven digits, fails the pattern, and is passed through,
+// because silently reinterpreting a number the caller may have meant
+// differently is worse than asking them to retype it.
+//
+// The same function exists in cmd/provider (onboard.go) with identical
+// semantics. It is duplicated rather than shared because it is input
+// normalisation at the wiring layer — turning keystrokes into the form an
+// existing validator already demands — and a new internal/ package for
+// twelve lines would need its own depguard rule for no behavioural gain.
+func normalizePhone(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	compact := strings.NewReplacer(" ", "", "-", "", "(", "", ")", "").Replace(trimmed)
+	if bareIndianMobilePattern.MatchString(compact) {
+		return "+91" + compact
+	}
+	return compact
 }
