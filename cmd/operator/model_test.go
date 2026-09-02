@@ -8,6 +8,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -178,5 +180,78 @@ func TestAppendDerivedEventsTracksStatusTransitions(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("no status_transition event found for VETTING -> ACTIVE; events = %+v", wm2.events)
+	}
+}
+
+// TestAppendOtpEventsAnnouncesEachCodeExactlyOnce pins Session 18.1.4's OTP
+// feed. The delivery log is re-read on every fetch cycle (once a second),
+// so the announce-once property is the whole correctness question: without
+// it the feed would refill with the same codes every tick and drown
+// everything else.
+func TestAppendOtpEventsAnnouncesEachCodeExactlyOnce(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "otp.log")
+
+	write := func(lines ...string) {
+		if err := os.WriteFile(logPath, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+			t.Fatalf("write log: %v", err)
+		}
+	}
+
+	m := newWatchModel(newAdminClient("http://example.invalid", "key"), config.DemoProfile)
+	m.otpLogPath = logPath
+	now := time.Now()
+
+	// No log file yet — the microservice creates it lazily on the first
+	// OTP, so "not there" is the normal state for the first minute.
+	m.appendOtpEvents(now)
+	if len(m.events) != 0 {
+		t.Fatalf("a missing delivery log should produce no events, got %d", len(m.events))
+	}
+
+	write("2026-09-01T12:00:00Z  +919571276889  722874")
+	m.appendOtpEvents(now)
+	if len(m.events) != 1 {
+		t.Fatalf("expected 1 event after the first OTP, got %d", len(m.events))
+	}
+	if !strings.Contains(m.events[0].Message, "722874") || !strings.Contains(m.events[0].Message, "+919571276889") {
+		t.Errorf("event should carry both the code and the requesting number, got %q", m.events[0].Message)
+	}
+
+	// Re-reading the unchanged log must not re-announce anything.
+	m.appendOtpEvents(now)
+	if len(m.events) != 1 {
+		t.Errorf("an unchanged log re-announced its codes: %d events, want 1", len(m.events))
+	}
+
+	// A new line produces exactly one new event.
+	write(
+		"2026-09-01T12:00:00Z  +919571276889  722874",
+		"2026-09-01T12:01:00Z  +919596253928  120412",
+	)
+	m.appendOtpEvents(now)
+	if len(m.events) != 2 {
+		t.Fatalf("expected 2 events after a second OTP, got %d", len(m.events))
+	}
+	if !strings.Contains(m.events[1].Message, "120412") {
+		t.Errorf("second event missing its code: %q", m.events[1].Message)
+	}
+
+	// Truncation mid-run must re-baseline, not replay the whole log.
+	write("2026-09-01T12:02:00Z  +919999999999  555555")
+	m.appendOtpEvents(now)
+	if len(m.events) != 2 {
+		t.Errorf("a truncated log replayed history: %d events, want 2 (re-baseline, no replay)", len(m.events))
+	}
+}
+
+// TestAppendOtpEventsIsInertWithoutALogPath confirms the feature is off
+// unless explicitly enabled. watch.go refuses --otp-delivery-log outside
+// demo mode, so an empty path here is what every prod-profile run sees.
+func TestAppendOtpEventsIsInertWithoutALogPath(t *testing.T) {
+	m := newWatchModel(newAdminClient("http://example.invalid", "key"), config.DemoProfile)
+	m.appendOtpEvents(time.Now())
+	if len(m.events) != 0 {
+		t.Errorf("OTP events were produced with no delivery-log path set: %d", len(m.events))
 	}
 }
