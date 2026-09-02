@@ -21,6 +21,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -276,6 +277,24 @@ type watchModel struct {
 	focus        int
 	showHelp     bool
 	scrollOffset int
+
+	// otpLogPath is cmd/microservice's FileOtpSender delivery log, set only
+	// under --mode=demo (watch.go refuses it otherwise). Empty disables the
+	// OTP feed entirely. otpSeen counts how many log lines have already
+	// been turned into event-feed entries, so each OTP is announced exactly
+	// once no matter how often the log is re-read.
+	otpLogPath string
+	otpSeen    int
+
+	// vettingSince records, per provider ID, the first moment THIS console
+	// observed that provider in VETTING. It is not the server's own
+	// vetting_started_at — no admin endpoint exposes one — so every
+	// estimate derived from it is scoped to "since this console started
+	// watching" and is labelled that way on screen. Starting the console
+	// after providers have already been vetting for a while makes the
+	// estimate pessimistic, never optimistic, which is the right direction
+	// for a number an audience is watching a clock against.
+	vettingSince map[string]time.Time
 }
 
 func newWatchModel(client *adminClient, profile config.NetworkProfile) watchModel {
@@ -489,6 +508,200 @@ func (m *watchModel) applyFetchResult(msg fetchResultMsg) {
 	}
 
 	m.appendDerivedEvents(msg.at)
+	m.appendOtpEvents(msg.at)
+	m.trackVettingStarts(msg.at)
+}
+
+// trackVettingStarts stamps the first time this console saw each provider in
+// VETTING, and forgets providers that have left that state. See
+// watchModel.vettingSince on why this is an observation rather than the
+// server's own record.
+//
+// [Added, Session 18.1.5]
+func (m *watchModel) trackVettingStarts(at time.Time) {
+	if m.snapshot.Providers == nil {
+		return
+	}
+	if m.vettingSince == nil {
+		m.vettingSince = map[string]time.Time{}
+	}
+
+	seen := map[string]bool{}
+	for _, p := range m.snapshot.Providers.Providers {
+		if p.Status != "VETTING" {
+			continue
+		}
+		seen[p.ProviderID] = true
+		if _, known := m.vettingSince[p.ProviderID]; !known {
+			m.vettingSince[p.ProviderID] = at
+		}
+	}
+	// Drop anyone no longer VETTING so a provider that vets, departs, and
+	// re-vets is timed from its NEW entry rather than its first one.
+	for id := range m.vettingSince {
+		if !seen[id] {
+			delete(m.vettingSince, id)
+		}
+	}
+}
+
+// vettingForecast is the Readiness panel's "when can the first upload
+// land?" estimate. Fields are deliberately explicit about what is measured
+// versus estimated: Active and Required are counts the server reported,
+// Fraction and ETA are derived here and carry Estimated to say so.
+type vettingForecast struct {
+	Active    int
+	Required  int
+	Fraction  float64
+	ETA       time.Duration
+	Estimated bool // false when the network is already ready, or nothing is measurable yet
+}
+
+// forecastVetting estimates progress toward MinActiveProviders providers
+// being ACTIVE — the gate that has to clear before any upload is accepted,
+// and therefore the single number an audience is actually waiting on.
+//
+// [Added, Session 18.1.5] Promotion needs BOTH of two conditions, so each
+// provider's progress is the WORSE of the two: consecutive audit passes
+// against VettingMinPasses, and elapsed vetting time against
+// VettingMinDuration. Taking the minimum is what keeps a provider showing
+// 100% while it still has four minutes of duration floor left from being a
+// lie.
+//
+// The network's overall progress is then the Nth-best provider's, where N
+// is MinActiveProviders: the gate clears when the FIFTH provider clears it,
+// not when the first does, so the fifth-ranked provider is the one the
+// estimate must track.
+//
+// The ETA is a floor, not a promise — MVP §3.6's own timeline gives
+// promotion as a window because the transition applies on the next
+// audit-dispatch tick after both conditions hold, which this console cannot
+// predict. The panel renders it with a "~" for that reason.
+func forecastVetting(profile config.NetworkProfile, providers *adminProvidersResponse, vettingSince map[string]time.Time, now time.Time) vettingForecast {
+	required := profile.MinActiveProviders
+	f := vettingForecast{Required: required}
+	if providers == nil {
+		return f
+	}
+
+	type cand struct {
+		progress float64
+		remain   time.Duration
+	}
+	var cands []cand
+
+	for _, p := range providers.Providers {
+		if p.Status == "ACTIVE" {
+			f.Active++
+			cands = append(cands, cand{progress: 1, remain: 0})
+			continue
+		}
+		if p.Status != "VETTING" {
+			continue
+		}
+
+		passFrac, passRemain := 1.0, time.Duration(0)
+		if profile.VettingMinPasses > 0 {
+			missing := profile.VettingMinPasses - p.ConsecutiveAuditPasses
+			if missing < 0 {
+				missing = 0
+			}
+			passFrac = float64(p.ConsecutiveAuditPasses) / float64(profile.VettingMinPasses)
+			passRemain = time.Duration(missing) * profile.AuditPeriodDuration
+		}
+
+		durFrac, durRemain := 1.0, time.Duration(0)
+		if since, known := vettingSince[p.ProviderID]; known && profile.VettingMinDuration > 0 {
+			elapsed := now.Sub(since)
+			durFrac = float64(elapsed) / float64(profile.VettingMinDuration)
+			durRemain = profile.VettingMinDuration - elapsed
+			if durRemain < 0 {
+				durRemain = 0
+			}
+		}
+
+		// Both gates must clear: progress is the worse of the two, and the
+		// wait is the longer of the two.
+		progress := passFrac
+		if durFrac < progress {
+			progress = durFrac
+		}
+		if progress > 1 {
+			progress = 1
+		}
+		remain := passRemain
+		if durRemain > remain {
+			remain = durRemain
+		}
+		cands = append(cands, cand{progress: progress, remain: remain})
+	}
+
+	if f.Active >= required {
+		f.Fraction = 1
+		return f // already ready; nothing to estimate
+	}
+	if len(cands) == 0 {
+		return f
+	}
+
+	sort.Slice(cands, func(i, j int) bool { return cands[i].progress > cands[j].progress })
+
+	// The gate clears when the Nth-best provider clears it. Fewer than N
+	// candidates means it cannot clear at all from the current fleet — no
+	// honest ETA exists, so none is offered.
+	if len(cands) < required {
+		f.Fraction = 0
+		return f
+	}
+	nth := cands[required-1]
+	f.Fraction = nth.progress
+	f.ETA = nth.remain
+	f.Estimated = true
+	return f
+}
+
+// appendOtpEvents turns any delivery-log lines not yet announced into event
+// feed entries, so a volunteer can read their own code off the shared
+// console instead of the operator running `operator otp` in a second
+// terminal.
+//
+// [Added, Session 18.1.4 — demo mode only; watch.go enforces that gate.]
+// Only entries PAST otpSeen are emitted, which is what makes this
+// announce-once rather than re-announcing the whole log every cycle. The
+// counter is a length, not a set: the delivery log is append-only, so a
+// line's index is stable and no per-entry identity is needed.
+//
+// The code is deliberately shown in full. Half the point is that the
+// volunteer standing in the room can read it without the operator
+// relaying it — a masked code would keep the security posture and lose
+// the entire feature.
+func (m *watchModel) appendOtpEvents(at time.Time) {
+	if m.otpLogPath == "" {
+		return
+	}
+
+	entries := readOtpLog(m.otpLogPath)
+	if len(entries) <= m.otpSeen {
+		// A shorter log than last time means it was rotated or truncated
+		// mid-run. Re-baseline rather than replaying from zero, which
+		// would dump every historical code onto the screen at once.
+		if len(entries) < m.otpSeen {
+			m.otpSeen = len(entries)
+		}
+		return
+	}
+
+	for _, e := range entries[m.otpSeen:] {
+		m.events = append(m.events, eventFeedEntry{
+			At:      at,
+			Kind:    "otp",
+			Message: "code " + e.code + " sent to " + e.phone,
+		})
+		if len(m.events) > maxEventFeedEntries {
+			m.events = m.events[len(m.events)-maxEventFeedEntries:]
+		}
+	}
+	m.otpSeen = len(entries)
 }
 
 // appendDerivedEvents diffs m.prevSnap against m.snapshot to produce
@@ -588,16 +801,6 @@ func (m watchModel) View() string {
 	return header + "\n" + body + errLine + "\n" + footerStyle.Render(m.footerHint()+hint)
 }
 
-const (
-	focusReadiness = 1
-	focusFleet     = 2
-	focusASN       = 3
-	focusRepair    = 4
-	focusAudit     = 5
-	focusEscrow    = 6
-	focusEvents    = 7
-)
-
 // bodyForFocus renders either the full seven-panel grid (m.focus == 0) or
 // one panel alone at m.focus (1-7, in the same top-to-bottom reading order
 // the grid uses: Readiness, Fleet, ASN diversity, Repair, Audit, Escrow,
@@ -609,7 +812,7 @@ const (
 // focused, it IS the screen, so it gets everything but the chrome around it
 // (focusedEventFeedBudget).
 func (m watchModel) bodyForFocus() string {
-	readiness := renderReadiness(m.profile, m.snapshot.Readiness)
+	readiness := renderReadiness(m.profile, m.snapshot.Readiness, forecastVetting(m.profile, m.snapshot.Providers, m.vettingSince, m.now))
 	fleet := renderFleet(m.profile, m.snapshot.Providers, m.snapshot.Readiness, m.now)
 	asn := renderASNCap(m.profile, m.snapshot.Providers)
 	repair := renderRepair(m.profile, m.snapshot.RepairQueue)
@@ -617,21 +820,22 @@ func (m watchModel) bodyForFocus() string {
 	escrow := renderEscrow(m.profile)
 
 	switch m.focus {
-	case focusReadiness:
+	case 1:
 		return readiness
-	case focusFleet:
+	case 2:
 		return fleet
-	case focusASN:
+	case 3:
 		return asn
-	case focusRepair:
+	case 4:
 		return repair
-	case focusAudit:
+	case 5:
 		return audit
-	case focusEscrow:
+	case 6:
 		return escrow
-	case focusEvents:
+	case 7:
 		return renderEventsWithin(m.events, m.now, m.focusedEventFeedBudget())
 	}
+
 	// Grid: two compact status panels side by side, the wide provider
 	// table on its own row, two more compact panels side by side, escrow
 	// on its own row (short, but not worth crowding against the others'
