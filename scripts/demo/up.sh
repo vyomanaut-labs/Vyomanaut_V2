@@ -180,11 +180,24 @@ if ! curl -sf -o /dev/null "http://127.0.0.1:$PORT/api/v1/admin/readiness" -H "X
 fi
 
 # ── persist state for down.sh / a human re-running join.sh by hand ────────
+# [Extended, Session 18.1.4] STATE_DIR, DATA_DIR, OWNER_DIR and PID_FILE are
+# exported too. Every one of them was previously something the operator had
+# to redefine by hand in each new terminal, and a mistyped or unset one is
+# not a harmless typo: `kill "$(sed -n "$((N+1))p" "$STATE_DIR/pids")"` with
+# N unset evaluates to line 1, which is the MICROSERVICE, so a hand-set
+# variable going missing takes the whole coordinator down mid-demo. Shipping
+# them in the env file removes the class of mistake rather than documenting
+# around it. OWNER_DIR does not exist until `client register` creates it —
+# it is a path, not a promise that the directory is there.
 cat > "$ENV_FILE" <<EOF
 MICROSERVICE_URL=$MICROSERVICE_URL
 ADMIN_API_KEY=$ADMIN_API_KEY
 OTP_LOG=$OTP_LOG
 BIN_DIR=$BIN_DIR
+STATE_DIR=$STATE_DIR
+DATA_DIR=$DATA_DIR
+OWNER_DIR=$DATA_DIR/owner
+PID_FILE=$PID_FILE
 PGHOST=$PGHOST
 PGPORT=$PGPORT
 PGDATABASE=$PGDATABASE
