@@ -60,7 +60,7 @@ func waitingPanel(title string) string {
 // 1. Readiness gate
 // ═══════════════════════════════════════════════════════════════════════
 
-func renderReadiness(profile config.NetworkProfile, r *readinessAdminResponse) string {
+func renderReadiness(profile config.NetworkProfile, r *readinessAdminResponse, f vettingForecast) string {
 	const title = "Readiness gate"
 	if r == nil {
 		return waitingPanel(title)
@@ -96,8 +96,42 @@ func renderReadiness(profile config.NetworkProfile, r *readinessAdminResponse) s
 	}
 	lines = append(lines, "", statusStyle(overallSev).Render(overall))
 
+	// [Added, Session 18.1.5] The gate above answers "are we there?" with a
+	// yes or no. This answers "how much longer?", which is the question an
+	// audience watching a five-to-nine-minute vetting window is actually
+	// asking, and the reason that window previously read as a frozen
+	// screen. Both lines are derived from data already on this panel — see
+	// forecastVetting for how, and for why the ETA carries a "~".
+	lines = append(lines, "", statusStyle(overallSev).Render(
+		fmt.Sprintf("Active providers  %d / %d", f.Active, f.Required)))
+
+	switch {
+	case r.AllConditionsMet:
+		lines = append(lines,
+			renderProgressBar(1, severityOK),
+			dimStyle.Render("accepting uploads"))
+	case f.Estimated:
+		sev := severityWarn
+		if f.Fraction >= almostReadyFraction {
+			sev = severityOK
+		}
+		lines = append(lines,
+			renderProgressBar(f.Fraction, sev),
+			dimStyle.Render(fmt.Sprintf("first upload accepted in ~%s", roundDuration(f.ETA))))
+	default:
+		lines = append(lines,
+			renderProgressBar(f.Fraction, severityAlert),
+			dimStyle.Render("not enough providers to reach the gate yet"))
+	}
+
 	return wrapPanel(title, strings.Join(lines, "\n"), overallSev)
 }
+
+// almostReadyFraction is where the vetting bar turns from amber to green —
+// close enough that a presenter can say "any moment now" without being
+// wrong. Not a threshold anything in the system acts on; purely a reading
+// aid on a bar an audience is watching.
+const almostReadyFraction = 0.9
 
 // ═══════════════════════════════════════════════════════════════════════
 // 2. Provider fleet
@@ -117,7 +151,16 @@ func renderReadiness(profile config.NetworkProfile, r *readinessAdminResponse) s
 // GB and CHUNKS are passed as pre-formatted strings, not ints, for the same
 // reason: one format string cannot serve both a %d row and a %s header, and
 // having two near-identical formats is exactly how the drift above happened.
-const fleetRowFormat = "%-10s %-8s %-19s %-24s %5s %7s %7s %6s"
+//
+// [Extended, Session 18.1.4] A PHONE column was added between ID and ASN.
+// GET /api/v1/admin/providers has always returned phone_number (see
+// internal/api/admin.go's adminProviderItem); as with PASSES in 18.1.2, the
+// console simply never decoded it. It earns its width because it is the
+// only field in this table an audience can tie back to a person: when a
+// volunteer runs join.sh and reads their number aloud, that number appears
+// here. Width is 14 to hold a full E.164 Indian number (+91 plus ten
+// digits, 13 chars) with a separating space.
+const fleetRowFormat = "%-10s %-14s %-8s %-19s %-24s %5s %7s %7s %6s"
 
 func renderFleet(profile config.NetworkProfile, providers *adminProvidersResponse, readiness *readinessAdminResponse, now time.Time) string {
 	const title = "Provider fleet"
@@ -133,7 +176,7 @@ func renderFleet(profile config.NetworkProfile, providers *adminProvidersRespons
 	// anywhere turns the whole panel's border red, not just its own row.
 	worstSev := severityOK
 
-	lines := []string{dimStyle.Render(fmt.Sprintf(fleetRowFormat, "ID", "ASN", "STATUS", "HEARTBEAT", "GB", "CHUNKS", "PASSES", "SCORE"))}
+	lines := []string{dimStyle.Render(fmt.Sprintf(fleetRowFormat, "ID", "PHONE", "ASN", "STATUS", "HEARTBEAT", "GB", "CHUNKS", "PASSES", "SCORE"))}
 	for _, p := range providers.Providers {
 		heartbeatCol := "\u2014"
 		style := dimStyle
@@ -158,13 +201,31 @@ func renderFleet(profile config.NetworkProfile, providers *adminProvidersRespons
 			worstSev = rowSev
 		}
 		row := fmt.Sprintf(fleetRowFormat,
-			shortID(p.ProviderID), p.ASN, p.Status, heartbeatCol,
+			shortID(p.ProviderID), phoneOrDash(p.PhoneNumber), p.ASN, p.Status, heartbeatCol,
 			strconv.Itoa(p.DeclaredStorageGB), strconv.Itoa(p.StoredChunks),
 			auditPassLabel(profile, p), scoreLabel(p.ScoreComposite))
 		lines = append(lines, style.Render(row))
 	}
 
 	return wrapPanel(title, strings.Join(lines, "\n"), worstSev)
+}
+
+// phoneOrDash renders a provider's phone number, or a dash when the admin
+// endpoint returned none. A provider always has one in practice
+// (registration requires it), so the dash is a "this field did not arrive"
+// signal rather than a real state — worth distinguishing from a blank cell,
+// which would read as a rendering bug.
+//
+// The dash is ASCII "-", not the em dash used elsewhere in this file, and
+// deliberately so: fmt's %-14s pads to a BYTE count, while a terminal aligns
+// by DISPLAY columns. An em dash is three bytes and one column, so it would
+// leave this cell two columns short and shift the rest of the row — the same
+// class of misalignment F-18-2 fixed for STATUS.
+func phoneOrDash(phone string) string {
+	if strings.TrimSpace(phone) == "" {
+		return "-"
+	}
+	return phone
 }
 
 // auditPassLabel renders a provider's consecutive audit passes.
@@ -337,6 +398,28 @@ func renderRepair(profile config.NetworkProfile, rq *repairQueueAdminResponse) s
 			rq.TotalQueued, rq.EmergencyQueued, rq.PermanentDepartureQueued, rq.PreWarningQueued),
 		fmt.Sprintf("in-flight:  %d", inFlight),
 		fmt.Sprintf("completed:  %d (this page), %d job(s) at/below r0", completed, belowR0),
+	}
+
+	// [Added, Session 18.1.5] Repair is the most dramatic thing this system
+	// does and it used to be three static numbers. When jobs are moving the
+	// panel now says so at a glance.
+	//
+	// The two bars measure different things and are deliberately not the
+	// same widget. Once a batch has finished, completed/(completed+
+	// outstanding) is a genuine ratio and gets a real percentage. While
+	// work is outstanding with nothing finished yet, no completion ratio
+	// exists — the admin API reports a job as IN_PROGRESS with no byte
+	// counter — so it gets the indeterminate bar, which states a count and
+	// claims no percentage. Inventing one here is exactly the kind of
+	// fabricated animation the rest of this console refuses to draw.
+	outstanding := rq.TotalQueued + inFlight
+	switch {
+	case outstanding == 0 && completed == 0:
+		lines = append(lines, dimStyle.Render(strings.Repeat("\u2591", progressBarWidth)+"  no repair activity"))
+	case completed > 0:
+		lines = append(lines, renderProgressBar(float64(completed)/float64(completed+outstanding), severityOK))
+	default:
+		lines = append(lines, renderIndeterminateBar(outstanding, severityWarn))
 	}
 
 	return wrapPanelNeutral(title, strings.Join(lines, "\n"))
@@ -561,8 +644,18 @@ func renderLegend(profile config.NetworkProfile) string {
 		fmt.Sprintf("                   per ASN. Meeting the %d required distinct ASNs exactly is", profile.MinDistinctASNs),
 		"                   healthy, not a warning.",
 		"",
+		"                   The bar estimates when the FIFTH provider clears both",
+		"                   gates, since that is when uploads open. It is timed from",
+		"                   when THIS console first saw each provider vetting, so",
+		"                   starting the console late makes it pessimistic, never",
+		"                   optimistic. The ~ is because the transition applies on the",
+		"                   next audit tick after both gates clear, which is a window.",
+		"",
 		fmt.Sprintf("Repair             r0 = %d shards. Repairs fire immediately once queued rather", profile.LazyRepairR0),
 		"                   than batching at r0 — this build has no batching gate yet.",
+		"                   A solid bar is a real completed/total ratio. A shaded bar",
+		"                   means jobs are running with no completion ratio available",
+		"                   — it states a count and claims no percentage.",
 		"",
 		"Audit              Counts cover a trailing 1-hour window; challenges dispatch",
 		fmt.Sprintf("                   every %s. Border turns red above a %d%% timeout rate,", roundDuration(profile.AuditPeriodDuration), auditTimeoutAlertPct),
