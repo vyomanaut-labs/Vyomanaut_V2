@@ -6,7 +6,12 @@
 // [REF: ADR-084 D-2; build_M17E.md Phase 17.6 Session 17.6.2]
 package main
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/charmbracelet/lipgloss"
+)
 
 const (
 	colorOK      = lipgloss.Color("42")  // green — satisfied / healthy
@@ -15,8 +20,6 @@ const (
 	colorDim     = lipgloss.Color("240") // muted gray — secondary text
 	colorAccent  = lipgloss.Color("39")  // blue — headings, panel titles
 	panelPadding = 1
-
-	legendHorizontalPadding = 2
 )
 
 var (
@@ -55,7 +58,7 @@ var (
 	legendStyle = lipgloss.NewStyle().
 			Border(lipgloss.DoubleBorder()).
 			BorderForeground(colorAccent).
-			Padding(1, legendHorizontalPadding).
+			Padding(1, 2).
 			MarginBottom(1)
 )
 
@@ -98,8 +101,6 @@ func wrapPanel(title, body string, sev severity) string {
 		border = colorAlert
 	case severityWarn:
 		border = colorWarn
-	case severityOK:
-		border = colorOK
 	}
 	return panelStyle.BorderForeground(border).Render(panelTitleStyle.Render(title) + "\n" + body)
 }
@@ -111,4 +112,61 @@ func wrapPanel(title, body string, sev severity) string {
 // as everything else in the console, just not tied to a severity.
 func wrapPanelNeutral(title, body string) string {
 	return panelStyle.BorderForeground(colorAccent).Render(panelTitleStyle.Render(title) + "\n" + body)
+}
+
+// ── Progress bars ────────────────────────────────────────────────────────
+//
+// [Added, Session 18.1.5] Several things this console reports are waits:
+// vetting before the first upload can land, a repair rebuilding a shard.
+// Reported as bare numbers they read as a frozen screen; reported as a bar
+// they read as a system doing work. Both are the same data — the bar is a
+// presentation of a real ratio, never an animation running on a timer with
+// nothing behind it.
+
+// progressBarWidth is the cell count of every bar in the console. Fixed
+// rather than proportional to terminal width: these bars sit inside
+// bordered panels laid out side by side, so a bar that grew with the window
+// would push its neighbour off the row.
+const progressBarWidth = 24
+
+// renderProgressBar draws `fraction` (clamped to 0..1) as a filled bar with
+// a trailing percentage, coloured by sev.
+//
+// It uses U+2588 FULL BLOCK and U+2591 LIGHT SHADE, both single-column, so
+// the bar's display width equals progressBarWidth exactly — the same
+// byte-vs-column trap phoneOrDash documents, avoided here by construction
+// rather than by test.
+func renderProgressBar(fraction float64, sev severity) string {
+	if fraction < 0 {
+		fraction = 0
+	}
+	if fraction > 1 {
+		fraction = 1
+	}
+
+	filled := int(fraction*float64(progressBarWidth) + 0.5)
+	bar := strings.Repeat("\u2588", filled) + strings.Repeat("\u2591", progressBarWidth-filled)
+
+	return statusStyle(sev).Render(bar) + dimStyle.Render(fmt.Sprintf("  %3d%%", int(fraction*percentageScale+0.5)))
+}
+
+// renderIndeterminateBar is for work that is genuinely in flight but whose
+// completion ratio this console cannot compute — a repair job the admin API
+// reports as IN_PROGRESS with no byte counter behind it.
+//
+// It deliberately does NOT animate. A moving barber-pole would imply
+// progress the console cannot actually observe, and the whole point of this
+// panel set is that nothing on screen claims more than the data supports.
+// A static marked band plus a count says "running, N of them" without
+// inventing a percentage.
+func renderIndeterminateBar(active int, sev severity) string {
+	if active <= 0 {
+		return dimStyle.Render(strings.Repeat("\u2591", progressBarWidth) + "  idle")
+	}
+	marked := active
+	if marked > progressBarWidth {
+		marked = progressBarWidth
+	}
+	bar := strings.Repeat("\u2593", marked) + strings.Repeat("\u2591", progressBarWidth-marked)
+	return statusStyle(sev).Render(bar) + dimStyle.Render(fmt.Sprintf("  %d running", active))
 }
