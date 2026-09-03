@@ -51,6 +51,12 @@ var (
 	// read as meaningful.
 	footerStyle = lipgloss.NewStyle().Foreground(colorDim)
 
+	// legendPadV/legendPadH are the '?' overlay's inner padding. Named
+	// because mnd rightly flags bare numbers here: they are layout, and
+	// layout constants belong next to the style that uses them.
+	legendPadV = 1
+	legendPadH = 2
+
 	// legendStyle boxes the '?' overlay distinctly from the seven data
 	// panels — a double border marks it as "about the console" rather
 	// than "data from the network", so the two are never confused at a
@@ -58,7 +64,7 @@ var (
 	legendStyle = lipgloss.NewStyle().
 			Border(lipgloss.DoubleBorder()).
 			BorderForeground(colorAccent).
-			Padding(1, 2).
+			Padding(legendPadV, legendPadH).
 			MarginBottom(1)
 )
 
@@ -95,12 +101,14 @@ func statusStyle(s severity) lipgloss.Style {
 // looked identical from across a room. Borders now carry the same signal
 // the text inside them already did, readable before anyone reads a number.
 func wrapPanel(title, body string, sev severity) string {
-	border := colorOK
+	var border lipgloss.Color
 	switch sev {
 	case severityAlert:
 		border = colorAlert
 	case severityWarn:
 		border = colorWarn
+	case severityOK:
+		border = colorOK
 	}
 	return panelStyle.BorderForeground(border).Render(panelTitleStyle.Render(title) + "\n" + body)
 }
@@ -129,6 +137,12 @@ func wrapPanelNeutral(title, body string) string {
 // would push its neighbour off the row.
 const progressBarWidth = 24
 
+// roundToNearest converts Go's truncating float-to-int conversion into
+// round-half-up. Without it a bar at 99.9% would render one cell short of
+// full, which reads as "stuck just before done" on the one panel an
+// audience watches a clock against.
+const roundToNearest = 0.5
+
 // renderProgressBar draws `fraction` (clamped to 0..1) as a filled bar with
 // a trailing percentage, coloured by sev.
 //
@@ -144,10 +158,10 @@ func renderProgressBar(fraction float64, sev severity) string {
 		fraction = 1
 	}
 
-	filled := int(fraction*float64(progressBarWidth) + 0.5)
+	filled := int(fraction*float64(progressBarWidth) + roundToNearest)
 	bar := strings.Repeat("\u2588", filled) + strings.Repeat("\u2591", progressBarWidth-filled)
 
-	return statusStyle(sev).Render(bar) + dimStyle.Render(fmt.Sprintf("  %3d%%", int(fraction*percentageScale+0.5)))
+	return statusStyle(sev).Render(bar) + dimStyle.Render(fmt.Sprintf("  %3d%%", int(fraction*percentageScale+roundToNearest)))
 }
 
 // renderIndeterminateBar is for work that is genuinely in flight but whose
