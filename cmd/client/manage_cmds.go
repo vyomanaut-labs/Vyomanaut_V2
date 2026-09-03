@@ -73,7 +73,7 @@ func dispatchLs(args []string, stdin io.Reader, out, errOut io.Writer) int {
 	}
 
 	in := bufio.NewReader(stdin)
-	id, _, ok := unlockForReadOnly(g, *passphrase, *mnemonic, in, out, errOut)
+	id, profile, ok := unlockForReadOnly(g, *passphrase, *mnemonic, in, out, errOut)
 	if !ok {
 		return 1
 	}
@@ -113,10 +113,24 @@ func dispatchLs(args []string, stdin io.Reader, out, errOut io.Writer) int {
 	// AvailabilityLabel is already IC §14.2-mapped by manage.ListFiles —
 	// this table prints it verbatim and never re-derives or invents a
 	// label from the raw Availability enum itself.
+	// [Extended, Session 18.1.7] SEGMENTS/SHARDS/NEED are shown so an owner
+	// can see the redundancy their file actually has, which until now was
+	// only visible to the operator via `operator shards`.
+	//
+	// All three are DERIVED from the profile and the file size, not
+	// fetched: the owner's files endpoint returns no shard breakdown, and
+	// inventing an endpoint for arithmetic the client can already do
+	// exactly would be the wrong trade. deriveShardLayout documents the
+	// derivation and its one assumption.
 	tw := tabwriter.NewWriter(out, 0, tabWriterTabWidth, tabWriterPadding, ' ', 0)
-	fprintln(tw, "FILE_ID\tNAME\tSIZE\tMONTHLY_COST\tAVAILABILITY")
+	fprintln(tw, "FILE_ID\tNAME\tSIZE\tSEGMENTS\tSHARDS\tNEED\tSHARD_SIZE\tMONTHLY_COST\tAVAILABILITY")
 	for _, e := range entries {
-		fprintf(tw, "%s\t%s\t%d bytes\t%s\t%s\n", e.FileID, e.DisplayName, e.SizeBytes, formatPaise(e.MonthlyCostPaise), e.AvailabilityLabel)
+		segments, shards := deriveShardLayout(e.SizeBytes, profile)
+		fprintf(tw, "%s\t%s\t%d bytes\t%d\t%d\t%d of %d\t%d bytes\t%s\t%s\n",
+			e.FileID, e.DisplayName, e.SizeBytes,
+			segments, shards, profile.DataShards, profile.TotalShards,
+			profile.ShardSize,
+			formatPaise(e.MonthlyCostPaise), e.AvailabilityLabel)
 	}
 	if err := tw.Flush(); err != nil {
 		fprintf(errOut, "error writing table: %v\n", err)
@@ -326,4 +340,32 @@ func renderDepositOutput(amountPaise int64, info manage.DepositInfo, jsonMode bo
 	}
 	fprintf(&b, "QR code: %s", info.QRCodeURL)
 	return b.String()
+}
+
+// deriveShardLayout computes how a file of sizeBytes was split, from the
+// profile alone.
+//
+// [Added, Session 18.1.7] A segment holds exactly DataShards x ShardSize
+// bytes of plaintext (internal/client/upload/orchestrator.go's
+// plaintextSegmentSize), and each segment becomes TotalShards shards. So:
+//
+//	segments = ceil(sizeBytes / (DataShards x ShardSize))
+//	shards   = segments x TotalShards
+//
+// The one assumption is that the file was uploaded under THIS profile. That
+// holds on the demo track, where only one profile ever runs and the demo
+// repository is frozen at a single parameter set; it would not hold across
+// a profile change, which is why this is derived at display time and never
+// persisted as if it were a recorded fact.
+//
+// A zero-byte file yields zero segments rather than one — there is nothing
+// to store, and rounding it up to a full segment would overstate both the
+// redundancy and the cost.
+func deriveShardLayout(sizeBytes int64, profile config.NetworkProfile) (segments, shards int64) {
+	segmentBytes := int64(profile.DataShards) * int64(profile.ShardSize)
+	if sizeBytes <= 0 || segmentBytes <= 0 {
+		return 0, 0
+	}
+	segments = (sizeBytes + segmentBytes - 1) / segmentBytes
+	return segments, segments * int64(profile.TotalShards)
 }

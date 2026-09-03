@@ -199,6 +199,7 @@ func dispatchUpload(args []string, stdin io.Reader, out, errOut io.Writer) int {
 			printCLIError(errOut, g.json, withTransferErrorCode(err), renderTransferError)
 			return 1
 		}
+		finishUploadProgress(g.json, errOut)
 		printUploadResult(g.json, fileID, out)
 		return 0
 	}
@@ -220,8 +221,27 @@ func dispatchUpload(args []string, stdin io.Reader, out, errOut io.Writer) int {
 		printCLIError(errOut, g.json, withTransferErrorCode(err), renderTransferError)
 		return 1
 	}
+	finishUploadProgress(g.json, errOut)
 	printUploadResult(g.json, fileID, out)
 	return 0
+}
+
+// finishUploadProgress closes out the in-place progress line on success.
+//
+// [Added, Session 18.1.6] The bar redraws with \r and never emitted a
+// terminating newline, so the final frame an operator saw was whichever
+// poll happened to land last — for a fast upload, "0%" — and the shell
+// prompt then overwrote it. UploadFile returning nil means every shard was
+// acknowledged, so drawing a full bar here is reporting a completed fact,
+// not rounding one up.
+//
+// Suppressed under --json so machine-readable output stays clean; that is
+// also why this writes to errOut, like every other progress frame.
+func finishUploadProgress(jsonOut bool, errOut io.Writer) {
+	if jsonOut {
+		return
+	}
+	fprintf(errOut, "\rUploading  %s  100%%  complete\n", uploadProgressBar(1, 1))
 }
 
 func printUploadResult(jsonMode bool, fileID uuid.UUID, out io.Writer) {
@@ -334,7 +354,15 @@ func reportUploadProgress(sessionDir string, fileID uuid.UUID, errOut io.Writer)
 			}
 		}
 	}
+	// [Changed, Session 18.1.6 — F-18-9] A zero total means the session
+	// file exists but its AckStatus is not populated yet. Returning
+	// silently here is why a small upload printed no progress line at all
+	// and then left a bare blank line behind: the whole transfer finished
+	// inside the first 500ms poll, so the only observation ever made was
+	// this one. Render an empty bar instead — the upload IS at 0% at that
+	// instant, which is true and looks like a start rather than a fault.
 	if total == 0 {
+		fprintf(errOut, "\rUploading  %s    0%%", uploadProgressBar(0, 1))
 		return
 	}
 	pct := acked * progressPercentScale / total
@@ -506,12 +534,22 @@ func roundRetrieveDuration(d time.Duration) string {
 	if d < time.Second {
 		return d.Round(time.Millisecond).String()
 	}
-	return d.Round(100 * time.Millisecond).String()
+	return d.Round(retrieveDurationPrecision).String()
 }
 
 // bytesPerMB is the divisor for the throughput line. 1<<20, matching the
 // binary MB the rest of this system measures storage in.
 const bytesPerMB = 1 << 20
+
+// retrieveDurationPrecision is how finely a multi-second retrieval time is
+// reported. Tenths of a second: enough to compare two runs, not so fine it
+// implies benchmark accuracy from a single wall-clock measurement.
+const retrieveDurationPrecision = 100 * time.Millisecond
+
+// minReportableMBps is the floor below which a throughput figure says more
+// about timer granularity than about the network, so "rate n/a" is printed
+// instead.
+const minReportableMBps = 0.01
 
 // retrieveThroughput renders observed MB/s, or "—" when the elapsed time is
 // too small to divide by meaningfully. A tiny file retrieved in under a
@@ -522,7 +560,7 @@ func retrieveThroughput(n int, d time.Duration) string {
 		return "rate n/a"
 	}
 	mbps := (float64(n) / bytesPerMB) / d.Seconds()
-	if mbps < 0.01 {
+	if mbps < minReportableMBps {
 		return "rate n/a"
 	}
 	return fmt.Sprintf("%.1f MB/s", mbps)

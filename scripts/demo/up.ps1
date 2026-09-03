@@ -90,6 +90,13 @@ go build -o (Join-Path $BinDir "provider.exe") ./cmd/provider/
 if ($LASTEXITCODE -ne 0) { throw "go build provider failed" }
 go build -o (Join-Path $BinDir "operator.exe") ./cmd/operator/
 if ($LASTEXITCODE -ne 0) { throw "go build operator failed" }
+# [Added, Session 18.1.7] Parity with up.sh: cmd/client is the data owner's
+# own CLI (register/deposit/upload/retrieve/ls/rm/balance). It has no
+# dependency on internal/storage, so it needs neither BadgerDB nor CGO here
+# — it is built simply so the BIN_DIR this script advertises actually
+# contains every binary the demo script asks the operator to run.
+go build -o (Join-Path $BinDir "client.exe") ./cmd/client/
+if ($LASTEXITCODE -ne 0) { throw "go build client failed" }
 
 # ── start the microservice ────────────────────────────────────────────────
 function New-RandomHex([int]$bytes) {
@@ -160,11 +167,21 @@ if (-not $ready) {
     exit 1
 }
 
+# [Extended, Session 18.1.7] STATE_DIR/DATA_DIR/OWNER_DIR/PID_FILE are
+# exported here for the same reason up.sh exports them: every one of them
+# was otherwise a value the operator had to retype in each new terminal,
+# and on the Unix side an unset one silently resolved to the microservice's
+# own PID line and killed the coordinator mid-demo. OWNER_DIR is a path,
+# not a promise — `client register` creates it on first use.
 Set-Content -Path $EnvFile -Value @"
 MICROSERVICE_URL=$MicroserviceUrl
 ADMIN_API_KEY=$AdminApiKey
 OTP_LOG=$OtpLog
 BIN_DIR=$BinDir
+STATE_DIR=$StateDir
+DATA_DIR=$DataDir
+OWNER_DIR=$(Join-Path $DataDir "owner")
+PID_FILE=$PidFile
 PGHOST=$PgHost
 PGPORT=$PgPort
 PGDATABASE=$PgDatabase

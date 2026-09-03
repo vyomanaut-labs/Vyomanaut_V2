@@ -835,3 +835,26 @@ func TestResumeUploadCompletesRegistrationOnSuccess(t *testing.T) {
 		t.Fatalf("session state file still present at %s after a successful ResumeUpload", path)
 	}
 }
+
+// TestSessionCheckpointIntervalOutpacesTheProgressPoll pins the throttle
+// relationship F-18-9 depends on. cmd/client polls the session file every
+// 500ms to draw its upload bar; before this fix the only SaveSessionState
+// happened after every shard finished, so the file went 0 -> 100% in one
+// step and the bar showed 0% for an entire 117 MB upload.
+//
+// The interval must stay slower than one write per poll (so 750 shards
+// does not mean 750 whole-file rewrites while holding the transfer mutex)
+// but fast enough that a poll never waits more than a couple of intervals
+// for fresh data, or the bar visibly stalls on a healthy transfer.
+func TestSessionCheckpointIntervalOutpacesTheProgressPoll(t *testing.T) {
+	const clientProgressPoll = 500 * time.Millisecond // cmd/client's uploadProgressPollInterval
+
+	if sessionCheckpointInterval < clientProgressPoll {
+		t.Errorf("checkpoint interval %v is faster than the %v progress poll — rewriting the session file more often than anything reads it",
+			sessionCheckpointInterval, clientProgressPoll)
+	}
+	if sessionCheckpointInterval > 2*clientProgressPoll {
+		t.Errorf("checkpoint interval %v exceeds two poll periods (%v) — the upload bar will visibly stall between updates",
+			sessionCheckpointInterval, clientProgressPoll)
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/client/manage"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
 )
 
 func TestFormatPaiseRendersIntegerRupees(t *testing.T) {
@@ -133,5 +134,40 @@ func TestRemoveRequiresConfirmationWithoutYesFlag(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("dispatchRm did not return promptly on a declined confirmation — it must short-circuit before touching the network")
+	}
+}
+
+// TestDeriveShardLayoutMatchesTheUploadersOwnSplit pins the derivation
+// `client ls` uses for its SEGMENTS/SHARDS columns against the rule the
+// uploader actually applies: a segment carries exactly
+// DataShards x ShardSize plaintext bytes, and each segment becomes
+// TotalShards shards.
+//
+// The 117544938-byte case is the real demo video from a live run, which
+// operator shards independently reported as 750 shards — so this test ties
+// the owner-side derivation to an operator-side observation rather than to
+// its own arithmetic.
+func TestDeriveShardLayoutMatchesTheUploadersOwnSplit(t *testing.T) {
+	profile := config.DemoProfile
+	segmentBytes := int64(profile.DataShards) * int64(profile.ShardSize)
+
+	cases := []struct {
+		name             string
+		size             int64
+		wantSeg, wantShd int64
+	}{
+		{"empty file stores nothing", 0, 0, 0},
+		{"one byte still needs a whole segment", 1, 1, int64(profile.TotalShards)},
+		{"exactly one segment", segmentBytes, 1, int64(profile.TotalShards)},
+		{"one byte over rolls into a second", segmentBytes + 1, 2, 2 * int64(profile.TotalShards)},
+		{"the live 117MB demo video", 117544938, 150, 750},
+	}
+
+	for _, c := range cases {
+		seg, shd := deriveShardLayout(c.size, profile)
+		if seg != c.wantSeg || shd != c.wantShd {
+			t.Errorf("%s: deriveShardLayout(%d) = (%d segments, %d shards), want (%d, %d)",
+				c.name, c.size, seg, shd, c.wantSeg, c.wantShd)
+		}
 	}
 }

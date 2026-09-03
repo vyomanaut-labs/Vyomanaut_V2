@@ -76,6 +76,13 @@ const (
 // profiles" invariant scope.
 const maxUploadConcurrency = 16
 
+// sessionCheckpointInterval throttles the mid-transfer session-state writes
+// added for F-18-9. Chosen against cmd/client's own 500ms progress poll:
+// slightly slower than the reader, so every poll sees fresh data without
+// the writer rewriting the whole session JSON more often than the display
+// can consume it. At 750 shards this is a few dozen writes instead of 750.
+const sessionCheckpointInterval = 750 * time.Millisecond
+
 // shardUploadTask is one shard's worth of upload work.
 type shardUploadTask struct {
 	segmentIndex int
@@ -189,6 +196,10 @@ func (o *Orchestrator) uploadTasks(
 		anyExpired bool
 		anySuccess bool
 		lastErr    error
+		// lastCheckpoint is guarded by mu, like every other field here —
+		// it is only ever read or written inside the locked section of an
+		// upload goroutine.
+		lastCheckpoint time.Time
 	)
 
 	for _, task := range tasks {
@@ -215,6 +226,35 @@ func (o *Orchestrator) uploadTasks(
 			case status == uploadStatusOK || status == uploadStatusAlreadyStored:
 				sess.AckStatus[task.segmentIndex][task.shardIndex] = true
 				anySuccess = true
+				// [Added, Session 18.1.6 — F-18-9] Checkpoint the session
+				// mid-flight, throttled.
+				//
+				// Every shard of every segment is dispatched in ONE
+				// uploadTasks call, and the only SaveSessionState was
+				// after wg.Wait(). So the on-disk AckStatus went 0 ->
+				// 100% in a single step at the very end, and the file
+				// was then deleted on success. Anything reading it for
+				// progress — cmd/client's own upload bar does exactly
+				// that — could only ever observe 0%, which is precisely
+				// what a 117 MB upload showed for its entire run.
+				//
+				// FR-060's crash-recovery guarantee also quietly
+				// depended on that final write: a crash mid-transfer
+				// lost every ack, so a resume retransmitted shards the
+				// providers had already stored. Checkpointing fixes the
+				// progress display and narrows that window at once.
+				//
+				// Throttled rather than per-ack: 750 shards would mean
+				// 750 whole-file JSON rewrites while holding this mutex.
+				// A save error here is deliberately ignored — the
+				// authoritative write is still the one after wg.Wait(),
+				// which does return its error, so a transient failure
+				// costs progress resolution and nothing else.
+				if time.Since(lastCheckpoint) >= sessionCheckpointInterval {
+					if err := SaveSessionState(sessionDir, *sess); err == nil {
+						lastCheckpoint = time.Now()
+					}
+				}
 			default:
 				lastErr = fmt.Errorf("UploadResponse: status 0x%02x for shard %d of segment %d", status, task.shardIndex, task.segmentIndex)
 			}
@@ -223,6 +263,8 @@ func (o *Orchestrator) uploadTasks(
 	wg.Wait()
 
 	if anySuccess {
+		// Authoritative write: unlike the throttled checkpoints above,
+		// this one's error is returned.
 		if err := SaveSessionState(sessionDir, *sess); err != nil {
 			return anyExpired, fmt.Errorf("upload: uploadTasks: persist session state: %w", err)
 		}

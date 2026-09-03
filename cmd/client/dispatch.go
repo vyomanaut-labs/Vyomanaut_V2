@@ -68,10 +68,6 @@ func validateGlobalFlags(g globalFlags) error {
 // judgment once, not at each of this package's ~80 print calls. Any call
 // site that DOES need the write error (see promptLine below) keeps calling
 // fmt.Fprint directly instead.
-func fprint(w io.Writer, a ...any) {
-	_, _ = fmt.Fprint(w, a...)
-}
-
 func fprintln(w io.Writer, a ...any) {
 	_, _ = fmt.Fprintln(w, a...)
 }
