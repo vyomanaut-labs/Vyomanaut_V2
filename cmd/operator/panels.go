@@ -102,14 +102,46 @@ func renderReadiness(profile config.NetworkProfile, r *readinessAdminResponse, f
 	// asking, and the reason that window previously read as a frozen
 	// screen. Both lines are derived from data already on this panel — see
 	// forecastVetting for how, and for why the ETA carries a "~".
+	// [Corrected, Session 18.1.6 — F-18-8] This block previously claimed to
+	// count down to "first upload accepted", and drove its bar from
+	// r.AllConditionsMet. Both were wrong, and together they put a flat
+	// contradiction on screen: a full green 100% bar sitting directly under
+	// the line "Active providers 0 / 5".
+	//
+	// [Corrected again, Session 18.1.8] There are TWO gates on the upload
+	// path, and an earlier revision of this note wrongly claimed there was
+	// one. Both must clear before a file can be stored:
+	//
+	//  1. READINESS (upload.go check 1) — internal/api/readiness.go counts
+	//     providers with status IN ('VETTING','ACTIVE'), so this clears
+	//     around T+00:30-01:00, while everything is still vetting. Failing
+	//     it returns NETWORK_NOT_READY.
+	//
+	//  2. PROVIDER CAPACITY (upload.go's enforceProviderCapacity) —
+	//     eligibleActiveProviderCountAtOrUnder counts status = 'ACTIVE'
+	//     ONLY, and rejects when fewer than MinActiveProviders are
+	//     eligible. This is the gate that holds the first upload for the
+	//     full five-to-nine-minute vetting window. Failing it returns
+	//     INSUFFICIENT_PROVIDER_CAPACITY.
+	//
+	// readiness.go's own evaluateRazorpayAccountsReady comment names this
+	// split explicitly and calls gate 2 "the SEPARATE, stricter gate that
+	// genuinely requires status = 'ACTIVE'" — the two were once collapsed
+	// together and TestDemoTimeline caught the regression.
+	//
+	// So promotion to ACTIVE really is what the first upload waits on, and
+	// this bar really is a countdown to it. What the earlier revision got
+	// right is that the bar must never read 100% from AllConditionsMet:
+	// gate 1 clearing says nothing about gate 2, which is exactly how a
+	// full green bar came to sit above the line "Active providers 0 / 5".
 	lines = append(lines, "", statusStyle(overallSev).Render(
-		fmt.Sprintf("Active providers  %d / %d", f.Active, f.Required)))
+		fmt.Sprintf("Promoted to ACTIVE  %d / %d", f.Active, f.Required)))
 
 	switch {
-	case r.AllConditionsMet:
+	case f.Active >= f.Required:
 		lines = append(lines,
 			renderProgressBar(1, severityOK),
-			dimStyle.Render("accepting uploads"))
+			dimStyle.Render("uploads accepted \u00b7 full serving and repair capacity"))
 	case f.Estimated:
 		sev := severityWarn
 		if f.Fraction >= almostReadyFraction {
@@ -120,8 +152,8 @@ func renderReadiness(profile config.NetworkProfile, r *readinessAdminResponse, f
 			dimStyle.Render(fmt.Sprintf("first upload accepted in ~%s", roundDuration(f.ETA))))
 	default:
 		lines = append(lines,
-			renderProgressBar(f.Fraction, severityAlert),
-			dimStyle.Render("not enough providers to reach the gate yet"))
+			renderProgressBar(f.Fraction, severityWarn),
+			dimStyle.Render("waiting for enough providers to vet"))
 	}
 
 	return wrapPanel(title, strings.Join(lines, "\n"), overallSev)
