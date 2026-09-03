@@ -504,3 +504,50 @@ func TestIndeterminateBarClaimsNoPercentage(t *testing.T) {
 		t.Errorf("zero active work should read idle: %q", idle)
 	}
 }
+
+// TestReadinessBarNeverContradictsItsOwnCount pins F-18-8. The panel
+// previously drove its bar from AllConditionsMet while labelling the line
+// above it with the ACTIVE count, which put "Promoted to ACTIVE 0 / 5"
+// directly under a full green 100% bar on a real run.
+//
+// The premise was the bug: uploads gate on the readiness response, and
+// internal/api/readiness.go counts providers with status IN
+// ('VETTING','ACTIVE') deliberately, so the gate clears while every
+// provider is still vetting. The bar tracks promotion now, and must never
+// read full while the count above it is short.
+func TestReadinessBarNeverContradictsItsOwnCount(t *testing.T) {
+	profile := config.DemoProfile
+
+	// The exact observed state: gate satisfied, zero providers ACTIVE.
+	resp := &readinessAdminResponse{AllConditionsMet: true}
+	f := vettingForecast{Active: 0, Required: profile.MinActiveProviders, Fraction: 0, Estimated: true, ETA: 10 * time.Minute}
+
+	out := renderReadiness(profile, resp, f)
+
+	if strings.Contains(out, "100%") {
+		t.Errorf("bar reads 100%% while only %d of %d providers are ACTIVE (F-18-8):\n%s", f.Active, f.Required, out)
+	}
+	if !strings.Contains(out, "Promoted to ACTIVE") {
+		t.Errorf("the count should say what it actually measures:\n%s", out)
+	}
+	// The countdown to the first upload IS correct here: upload.go's
+	// enforceProviderCapacity counts status = 'ACTIVE' only, so promotion
+	// really is what the first upload waits on. What must never happen is
+	// the bar filling from AllConditionsMet, which is a different gate.
+	if !strings.Contains(out, "first upload accepted in") {
+		t.Errorf("the bar should count down to the first upload, which waits on ACTIVE promotion (upload.go enforceProviderCapacity):\n%s", out)
+	}
+}
+
+// TestReadinessBarFullOnlyWhenQuorumActive is the converse guard.
+func TestReadinessBarFullOnlyWhenQuorumActive(t *testing.T) {
+	profile := config.DemoProfile
+	resp := &readinessAdminResponse{AllConditionsMet: true}
+	f := vettingForecast{Active: profile.MinActiveProviders, Required: profile.MinActiveProviders, Fraction: 1}
+
+	out := renderReadiness(profile, resp, f)
+
+	if !strings.Contains(out, "100%") {
+		t.Errorf("bar should read 100%% once the ACTIVE quorum is met:\n%s", out)
+	}
+}
