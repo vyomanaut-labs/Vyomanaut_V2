@@ -234,6 +234,21 @@ const fetchTimeout = 5 * time.Second
 // past a whole panel, not just nudge past a couple of rows.
 const pageScrollLines = 10
 
+// Panel focus indices. These ARE the digits the operator presses, so they
+// are named rather than left as bare cases — the number and the panel are
+// one fact, and naming them keeps Update's key handler, bodyForFocus and
+// the footer hint from drifting apart.
+const (
+	panelGrid = iota // 0 — the full seven-panel grid
+	panelReadiness
+	panelFleet
+	panelASN
+	panelRepair
+	panelAudit
+	panelEscrow
+	panelEvents
+)
+
 type tickMsg time.Time
 
 // fetchResultMsg carries one fan-out cycle's results. Fields are pointers
@@ -417,15 +432,15 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// esc/0 always means "back to the grid", from focus, from
 			// help, or both at once — one key the audience never has to
 			// think about mid-demo.
-			m.focus = 0
+			m.focus = panelGrid
 			m.showHelp = false
 			m.scrollOffset = 0
 			return m, nil
 
-		case len(key) == 1 && key[0] >= '1' && key[0] <= '7':
+		case len(key) == 1 && key[0] >= '1' && key[0] <= '0'+panelEvents:
 			n := int(key[0] - '0')
 			if m.focus == n {
-				m.focus = 0 // pressing the same digit again un-zooms
+				m.focus = panelGrid // pressing the same digit again un-zooms
 			} else {
 				m.focus = n
 			}
@@ -820,19 +835,19 @@ func (m watchModel) bodyForFocus() string {
 	escrow := renderEscrow(m.profile)
 
 	switch m.focus {
-	case 1:
+	case panelReadiness:
 		return readiness
-	case 2:
+	case panelFleet:
 		return fleet
-	case 3:
+	case panelASN:
 		return asn
-	case 4:
+	case panelRepair:
 		return repair
-	case 5:
+	case panelAudit:
 		return audit
-	case 6:
+	case panelEscrow:
 		return escrow
-	case 7:
+	case panelEvents:
 		return renderEventsWithin(m.events, m.now, m.focusedEventFeedBudget())
 	}
 
