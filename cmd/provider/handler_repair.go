@@ -191,6 +191,7 @@ func (h *RepairDownloadHandler) HandleStream(s p2p.Stream) {
 		log.Printf("[REPAIR-DOWNLOAD] rejected (not authorised): remote peer %s does not match this provider's expected microservice peer %q (authorizer populated: %v)",
 			remotePeer, h.microservicePeerID, h.authorizer != nil)
 		h.writeStatusOnly(s, repairStatusNotAuthorised)
+		drainPendingInput(s)
 		return
 	}
 
@@ -295,6 +296,48 @@ func (h *RepairDownloadHandler) writeStatusOnly(s p2p.Stream, status byte) {
 	binary.BigEndian.PutUint32(frame[0:repairLengthPrefixSize], 1)
 	frame[repairLengthPrefixSize] = status
 	_, _ = s.Write(frame)
+}
+
+// drainPendingInputTimeout bounds drainPendingInput's read. Loopback
+// delivery of a frame the caller already wrote — the only realistic case
+// this exists for — completes in microseconds; 50ms is generous headroom,
+// not a real wait in the common case, and small enough that a caller who
+// genuinely never sends anything (nothing to drain) doesn't stall this
+// handler noticeably.
+const drainPendingInputTimeout = 50 * time.Millisecond
+
+// drainPendingInput performs one short, best-effort read of whatever the
+// remote peer already sent on s, discarding it, before a handler that
+// rejects a peer BEFORE reading its request returns and triggers the
+// deferred Close().
+//
+// [Added, M18 Stage 2 — Windows demo run, real finding from the first-ever
+// execution of this test suite on real Windows hardware]
+// TestRepairRejectsUnregisteredPeerBeforeLookup and (the identical pattern
+// in handler_vetting_gc.go) TestVettingGCRejectsUnauthorizedPeer both
+// reject a peer by identity alone, deliberately BEFORE reading any bytes
+// of the request (Step 1's whole point, per the comment above: don't
+// spend CPU parsing untrusted input from a peer this provider is never
+// going to service). But both tests write their request frame
+// unconditionally before trying to read a response — realistic client
+// behaviour — so by the time this handler writes its rejection and
+// returns, the caller's already-sent frame is still sitting UNREAD in
+// this stream's receive buffer. Closing a TCP socket with unread inbound
+// data pending is specified, identically on POSIX and Windows sockets, to
+// send an RST instead of performing a graceful FIN close — and that RST
+// can arrive at, or interleave with, the rejection frame this handler
+// just wrote, corrupting or truncating what the caller actually receives.
+// This race exists on every platform; it was never observed failing on
+// this project's own macOS/Linux CI history, and reliably reproduces on
+// Windows's real hardware because of that platform's different local-
+// loopback delivery/ACK timing — not because the race is Windows-specific
+// in principle. Draining removes the "unread data" precondition entirely,
+// so the ordinary graceful close this handler's own defer already
+// performs can proceed without racing an RST.
+func drainPendingInput(s p2p.Stream) {
+	_ = s.SetDeadline(time.Now().Add(drainPendingInputTimeout))
+	buf := make([]byte, 4096)
+	_, _ = s.Read(buf)
 }
 
 // writeSuccessFrame writes the 1+262144=262145-byte Frame 2 for status
