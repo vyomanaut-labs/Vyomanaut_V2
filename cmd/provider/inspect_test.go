@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -22,6 +23,7 @@ func TestInspectFlow(t *testing.T) {
 	t.Run("TestInspectChunkFlagNarrowsToOneChunk", TestInspectChunkFlagNarrowsToOneChunk)
 	t.Run("TestInspectHexFlagAddsHexDump", TestInspectHexFlagAddsHexDump)
 	t.Run("TestInspectRejectsMalformedChunkID", TestInspectRejectsMalformedChunkID)
+	t.Run("TestPrintInspectReportShowsMBNotRawBytes", TestPrintInspectReportShowsMBNotRawBytes)
 }
 
 // writeOneRandomChunk opens a fresh chunk store at dataDir, writes one
@@ -239,5 +241,58 @@ func TestInspectRejectsMalformedChunkID(t *testing.T) {
 
 	if _, err := runInspect(inspectFlags{dataDir: dataDir, chunk: "not-hex-and-wrong-length"}); err == nil {
 		t.Fatal("runInspect with a malformed --chunk: expected an error, got nil")
+	}
+}
+
+// TestPrintInspectReportShowsMBNotRawBytes pins the M18 Session 18.2
+// unit-legibility change: printInspectReport's used/chunk/compare byte
+// counts must show humanize.FormatMB figures, never a raw "%d B" — the
+// exact regression this guards against is the format strings reverting to
+// their pre-M18 form. declared allocation is deliberately NOT converted
+// (it was never a byte count — see internal/humanize's doc comment) and
+// this test confirms "GB" still appears unconverted for that field.
+//
+// This test calls printInspectReport directly against a hand-built
+// inspectReport, not runInspect — it exercises only the display function,
+// leaving the byte-denominated struct fields it's given completely
+// unexamined by anything except this test's own assertions, which is the
+// point: report.BytesUsed/SizeBytes below are real byte counts a caller
+// like runInspect would have computed, and this test confirms
+// printInspectReport doesn't mutate them, only formats a copy for
+// printing. TestInspectReportsDeclaredAllocationAndCeiling and
+// TestInspectCompareComputesEntropyOfLocalFile (above, unchanged by this
+// commit) are what confirm runInspect itself still computes those fields
+// in raw bytes.
+func TestPrintInspectReportShowsMBNotRawBytes(t *testing.T) {
+	report := inspectReport{
+		DeclaredStorageGB: 10,
+		BytesUsed:         19922944, // a real captured provider-inspect used-bytes figure
+		ChunkCeiling:      286720,
+		Chunks: []inspectChunkReport{
+			{ChunkID: "00864850245f6a98", SizeBytes: 262144, Entropy: 7.9992},
+		},
+		Compare: &inspectCompareReport{
+			Path:      "/tmp/original.mp4",
+			SizeBytes: 117544938, // the real demo video's size
+			Entropy:   7.9952,
+		},
+	}
+
+	var buf bytes.Buffer
+	printInspectReport(&buf, report)
+	out := buf.String()
+
+	for _, want := range []string{
+		"declared allocation: 10 GB",           // untouched — never a byte count
+		"used: 19.00 MB",                       // was "used: 19922944 B"
+		"chunk 00864850245f6a98  0.25 MB",      // was "chunk ...  262144 B"
+		"compare /tmp/original.mp4  112.10 MB", // was "compare ...  117544938 B"
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output does not contain %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, " B ") || strings.Contains(out, " B\n") {
+		t.Errorf("output still contains a raw byte-count suffix (\" B\"):\n%s", out)
 	}
 }

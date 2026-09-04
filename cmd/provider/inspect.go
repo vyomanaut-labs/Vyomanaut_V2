@@ -43,6 +43,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/humanize"
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/storage"
 )
 
@@ -243,18 +244,25 @@ func hexDump(data []byte) string {
 	return strings.TrimSuffix(b.String(), "\n")
 }
 
+// printInspectReport renders report as human-readable text. Every byte
+// count here goes through humanize.FormatMB — declared allocation stays in
+// GB (it was never a byte count; see that package's doc comment) but
+// used/chunk/compare sizes, all raw byte totals, are display-only MB
+// figures. The --json path (inspectCmd, below) never calls this function
+// and so is untouched: it encodes the report struct's real int64/int
+// fields directly, exactly as before this function existed.
 func printInspectReport(out io.Writer, report inspectReport) {
-	fprintf(out, "declared allocation: %d GB   used: %d B   NFR-044 chunk ceiling: %d chunks\n",
-		report.DeclaredStorageGB, report.BytesUsed, report.ChunkCeiling)
+	fprintf(out, "declared allocation: %d GB   used: %s   NFR-044 chunk ceiling: %d chunks\n",
+		report.DeclaredStorageGB, humanize.FormatMB(report.BytesUsed), report.ChunkCeiling)
 	for _, c := range report.Chunks {
-		fprintf(out, "chunk %s  %d B  entropy %.4f bits/byte\n", c.ChunkID, c.SizeBytes, c.Entropy)
+		fprintf(out, "chunk %s  %s  entropy %.4f bits/byte\n", c.ChunkID, humanize.FormatMB(int64(c.SizeBytes)), c.Entropy)
 		if c.HexDump != "" {
 			fprintln(out, c.HexDump)
 		}
 	}
 	if report.Compare != nil {
-		fprintf(out, "compare %s  %d B  entropy %.4f bits/byte\n",
-			report.Compare.Path, report.Compare.SizeBytes, report.Compare.Entropy)
+		fprintf(out, "compare %s  %s  entropy %.4f bits/byte\n",
+			report.Compare.Path, humanize.FormatMB(report.Compare.SizeBytes), report.Compare.Entropy)
 	}
 }
 
