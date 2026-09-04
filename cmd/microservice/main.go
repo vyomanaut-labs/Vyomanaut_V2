@@ -609,6 +609,22 @@ func runMicroservice(ctx context.Context, cfg startupConfig) (*app, error) {
 	// ──────────────────────────────────────────────────────────────────
 	go runBackgroundViewRefreshLoop(ctx, a.viewRefreshDB, profile)
 
+	// ── Step 23 (added post-hoc — M18 demo-freeze audit; resolves a build
+	// blocker found live: payment.RunChargeComputationLoop (ADR-061 Decision
+	// §4, internal/payment/charge.go) was fully implemented and fully
+	// tested in isolation, but no goroutine anywhere in this function ever
+	// started it — the exact same class of gap Step 22's own comment
+	// describes for the view-refresh loop, found the same way: a live run
+	// where `operator payout` printed a correctly-reconciling but entirely
+	// empty table, and `provider earnings` never showed a nonzero balance,
+	// on any run, ever. Uses db (the vyomanaut_app pool), matching this
+	// loop's own doc comment: unlike RunReleaseComputationLoop it takes no
+	// primaryDB, because the flat per-shard charge model (ADR-061) never
+	// reads mv_provider_scores, so there is no freshness-critical read here
+	// that would need the primary-replica connection Step 17 uses.
+	// ──────────────────────────────────────────────────────────────────
+	go payment.RunChargeComputationLoop(ctx, db, profile)
+
 	return a, nil
 }
 
