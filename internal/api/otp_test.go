@@ -28,6 +28,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -413,7 +414,28 @@ func TestFileOtpSenderAppendsOneLinePerSend(t *testing.T) {
 	}
 }
 
+// TestFileOtpSenderCreatesLogMode0600 verifies the OTP delivery log is
+// created with mode 0600 (owner-only read/write) — this file holds
+// plaintext OTP codes. Skipped on Windows, where POSIX file mode bits are
+// not meaningful (identical precedent: internal/p2p/identity_test.go's
+// TestIdentityFilePermissions).
+//
+// [Changed, M18 Stage 2 — Windows demo run, real finding from the
+// first-ever execution of this test on real Windows hardware] Was
+// unconditional until this session; failed with "delivery log mode = 666,
+// want 0600" — os.OpenFile's mode argument only maps to Windows' binary
+// read-only attribute, never to per-owner POSIX permission bits, so this
+// file's actual on-disk protection is genuinely weaker on Windows than on
+// macOS/Linux. Disclosed, not silently skipped: for the M18 demo (a
+// single physical machine, one operator, a transient rehearsal file) this
+// is low practical risk, but it is a real, standing platform gap worth
+// knowing about before this delivery-log mechanism is ever used somewhere
+// multi-user matters. Tracked in runbooks/windows.md §7, which flagged
+// this exact risk before it was ever caught by a real test run.
 func TestFileOtpSenderCreatesLogMode0600(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file permissions are not meaningful on Windows")
+	}
 	path := filepath.Join(t.TempDir(), "otp-delivery.log")
 	sender, err := NewFileOtpSender(path)
 	if err != nil {
