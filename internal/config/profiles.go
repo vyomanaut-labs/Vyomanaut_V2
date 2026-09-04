@@ -24,8 +24,12 @@ var ProductionProfile = NetworkProfile{
 	IsDemoMode: false,
 
 	// ── Storage pricing (build.md Milestone 11) ───────────────────────────────
-	// Identical to DemoProfile — pricing is profile-invariant (see
-	// network_profile.go's own note on this field).
+	// [Changed, M18 Session 18.2] No longer identical to DemoProfile — see
+	// DemoProfile's own comment on this field for why, and
+	// network_profile.go's updated field comment for the invariant this no
+	// longer falls under. This value (₹1/GB/month) remains the real
+	// placeholder pending actual product pricing; DemoProfile's value is a
+	// presentation-only demo figure, never meant to inform this one.
 	StorageRatePaisePerGBPerMonth: 100,
 
 	// ── Erasure coding (ADR-003) ──────────────────────────────────────────────
@@ -129,9 +133,24 @@ var DemoProfile = NetworkProfile{
 	IsDemoMode: true,
 
 	// ── Storage pricing (build.md Milestone 11) ───────────────────────────────
-	// Identical to ProductionProfile — pricing is profile-invariant (see
-	// network_profile.go's own note on this field).
-	StorageRatePaisePerGBPerMonth: 100,
+	// [Changed, M18 Session 18.2 — demo-freeze pass, Karma's own direction]
+	// 100000 paise (₹1000) per GB per month, NOT ProductionProfile's ₹1 —
+	// this field is deliberately no longer profile-invariant (see
+	// network_profile.go's updated field comment). A real charge cycle
+	// (payment.RunChargeComputationLoop, wired into cmd/microservice/main.go
+	// Step 23 this same session) now actually runs against whatever files
+	// are ACTIVE during a demo, and at ₹1/GB/month the live 117544938-byte
+	// demo video costs 11 paise a month split across up to 8 holders —
+	// correct, but a payout table of ₹0.01/₹0.02 rows does not read as
+	// money to a live audience. At ₹1000/GB/month the same file costs
+	// ₹109.47/month, which splits into legible per-provider rupee amounts
+	// in `operator payout` and `provider earnings` — see
+	// internal/payment/charge_test.go for the split-by-largest-remainder
+	// guarantee that makes the split exact regardless of rate. This number
+	// is a demo-legibility choice, not a pricing decision: it says nothing
+	// about what ProductionProfile's real rate should be once one exists,
+	// which is why it does not touch ProductionProfile's own value above.
+	StorageRatePaisePerGBPerMonth: 100000,
 
 	// ── Erasure coding (ADR-003) ──────────────────────────────────────────────
 	DataShards:   3,

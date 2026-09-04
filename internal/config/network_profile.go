@@ -193,11 +193,20 @@ type NetworkProfile struct {
 	// [Added, build.md Milestone 11 Phase 11.5/11.8] FR-057 and FileListItem's
 	// monthly_cost_paise both need a concrete storage rate, but ADR-024 only
 	// describes it as "a product decision, set at contract creation" — no ADR
-	// or FR anywhere in scope gives an actual figure. Profile-invariant
-	// (identical in both modes, per this struct's own INVARIANT note above):
-	// pricing is a business decision independent of demo/prod scale, not a
-	// performance threshold or infrastructure parameter. 100 paise (₹1) per
-	// GB per month is a placeholder pending real product pricing — flagged
-	// here rather than left unimplemented.
+	// or FR anywhere in scope gives an actual figure. 100 paise (₹1) per GB
+	// per month remains ProductionProfile's placeholder, pending real product
+	// pricing — flagged here rather than left unimplemented.
+	//
+	// [Changed, M18 Session 18.2 — demo-freeze pass] NO LONGER
+	// profile-invariant. DemoProfile deliberately diverges from
+	// ProductionProfile here — see DemoProfile's own field comment
+	// (profiles.go) for the reasoning — which supersedes this struct's own
+	// general INVARIANT note above for this one field. Every other field
+	// that note covers (ShardSize, ASNCapFraction, VettingCapFraction,
+	// DualWindowDrop) is still a genuine wire-format/protocol invariant and
+	// remains identical across both profiles; pricing was never a wire
+	// format, so nothing else in this codebase assumes the two profiles'
+	// rates match (payment.ComputeMonthlyCharges reads whichever profile it
+	// is passed; nothing reads both and compares them).
 	StorageRatePaisePerGBPerMonth int64
 }
