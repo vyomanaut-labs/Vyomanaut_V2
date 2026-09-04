@@ -176,7 +176,20 @@ func (h *AuditHandler) HandleStream(s p2p.Stream) {
 		// frame whose total declared length does not match the fixed
 		// chunk_id(32)+challenge_nonce(33)+server_challenge_ts_ms(8) layout
 		// cannot carry a well-formed 33-byte nonce.
+		//
+		// [Added, M18 Stage 2] drainPendingInput (handler_repair.go) —
+		// the caller already wrote its whole frame (length prefix +
+		// payload) in one Write() call, this handler only reads the
+		// length prefix before rejecting, and the payload bytes are still
+		// unread here. Same shape as the fix that closed
+		// TestRepairRejectsUnregisteredPeerBeforeLookup and
+		// TestVettingGCRejectsUnauthorizedPeer — see that function's doc
+		// comment for the full mechanism. Applied here proactively (no
+		// test caught this specific branch failing on Windows this
+		// session) because audit challenges run continuously during the
+		// live demo, and the failure mode is identical in shape.
 		h.writeStatusOnly(s, auditStatusInvalidNonce)
+		drainPendingInput(s)
 		return
 	}
 
