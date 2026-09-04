@@ -46,6 +46,7 @@ import (
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/crypto"
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/erasure"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/humanize"
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/p2p"
 )
 
@@ -518,7 +519,7 @@ func dispatchRetrieve(args []string, stdin io.Reader, out, errOut io.Writer) int
 		}{FileID: fileID.String(), OutputPath: outFile, Bytes: len(plaintext)})
 		fprintln(out, data)
 	} else {
-		fprintf(out, "Retrieved %d bytes to %s\n", len(plaintext), outFile)
+		fprintf(out, "%s\n", formatRetrievedLine(len(plaintext), outFile))
 		// [Added, Session 18.1.5] Measured, not estimated: wall-clock
 		// around the one RetrieveFile call, over the byte count it
 		// actually returned. Reported after the fact for the same reason
@@ -537,10 +538,6 @@ func roundRetrieveDuration(d time.Duration) string {
 	return d.Round(retrieveDurationPrecision).String()
 }
 
-// bytesPerMB is the divisor for the throughput line. 1<<20, matching the
-// binary MB the rest of this system measures storage in.
-const bytesPerMB = 1 << 20
-
 // retrieveDurationPrecision is how finely a multi-second retrieval time is
 // reported. Tenths of a second: enough to compare two runs, not so fine it
 // implies benchmark accuracy from a single wall-clock measurement.
@@ -551,6 +548,21 @@ const retrieveDurationPrecision = 100 * time.Millisecond
 // instead.
 const minReportableMBps = 0.01
 
+// formatRetrievedLine renders dispatchRetrieve's stdout success line for a
+// completed, non-JSON retrieval. Factored out (rather than inlined at the
+// one fprintf call site) purely so it is directly testable without a live
+// microservice/provider fleet — TestRetrievedLineShowsMBNotRawBytes calls
+// this function, not dispatchRetrieve itself.
+//
+// [Changed, M18 Session 18.2 — demo unit-legibility pass] n is rendered via
+// humanize.FormatMB, never as a raw "%d bytes" — the --json path
+// (dispatchRetrieve's own g.json branch, above) is untouched: it marshals
+// n directly as an int in its Bytes field, exactly as before this function
+// existed.
+func formatRetrievedLine(n int, outFile string) string {
+	return fmt.Sprintf("Retrieved %s to %s", humanize.FormatMB(int64(n)), outFile)
+}
+
 // retrieveThroughput renders observed MB/s, or "—" when the elapsed time is
 // too small to divide by meaningfully. A tiny file retrieved in under a
 // millisecond would otherwise print an enormous rate that says nothing
@@ -559,7 +571,7 @@ func retrieveThroughput(n int, d time.Duration) string {
 	if d <= 0 || n <= 0 {
 		return "rate n/a"
 	}
-	mbps := (float64(n) / bytesPerMB) / d.Seconds()
+	mbps := (float64(n) / humanize.BytesPerMB) / d.Seconds()
 	if mbps < minReportableMBps {
 		return "rate n/a"
 	}

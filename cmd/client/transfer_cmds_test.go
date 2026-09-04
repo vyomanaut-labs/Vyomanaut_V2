@@ -13,6 +13,7 @@ import (
 
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/client/upload"
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/crypto"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/humanize"
 )
 
 // TestUploadPrintsFileIDOnStdoutOnly proves stdout carries only the
@@ -187,7 +188,31 @@ func TestRetrieveThroughputRefusesMeaninglessRates(t *testing.T) {
 	if got := retrieveThroughput(100, 0); got != "rate n/a" {
 		t.Errorf("zero elapsed should report no rate, got %q", got)
 	}
-	if got := retrieveThroughput(10*bytesPerMB, 2*time.Second); got != "5.0 MB/s" {
+	if got := retrieveThroughput(10*humanize.BytesPerMB, 2*time.Second); got != "5.0 MB/s" {
 		t.Errorf("10 MB in 2s should read 5.0 MB/s, got %q", got)
+	}
+}
+
+// TestRetrievedLineShowsMBNotRawBytes pins the M18 Session 18.2
+// unit-legibility change: dispatchRetrieve's human-readable success line
+// must show a humanize.FormatMB figure, never a bare byte count with the
+// word "bytes" — the exact regression this guards against is
+// formatRetrievedLine's format string reverting to "%d bytes" (its pre-M18
+// form). The --json path's Bytes field is untouched by this change
+// (dispatchRetrieve marshals len(plaintext) directly there, never through
+// formatRetrievedLine), so this test only exercises the human-readable
+// helper.
+//
+// 3328987 bytes is the real demo photo's size (M18 Stage 1 live run) —
+// chosen so this test ties to an actual captured figure, not an arbitrary
+// round number.
+func TestRetrievedLineShowsMBNotRawBytes(t *testing.T) {
+	const demoPhotoBytes = 3328987
+	want := "Retrieved 3.17 MB to /tmp/out.jpg"
+	if got := formatRetrievedLine(demoPhotoBytes, "/tmp/out.jpg"); got != want {
+		t.Errorf("formatRetrievedLine(%d, ...) = %q, want %q", demoPhotoBytes, got, want)
+	}
+	if strings.Contains(formatRetrievedLine(demoPhotoBytes, "/tmp/out.jpg"), "bytes") {
+		t.Error(`formatRetrievedLine output contains the literal word "bytes" — it must show MB only, via humanize.FormatMB`)
 	}
 }
