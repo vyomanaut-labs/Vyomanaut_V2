@@ -21,6 +21,7 @@ import (
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/client/account"
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/client/manage"
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/humanize"
 )
 
 func buildManager(g globalFlags, id *unlockedIdentity) *manage.Manager {
@@ -122,15 +123,19 @@ func dispatchLs(args []string, stdin io.Reader, out, errOut io.Writer) int {
 	// inventing an endpoint for arithmetic the client can already do
 	// exactly would be the wrong trade. deriveShardLayout documents the
 	// derivation and its one assumption.
+	//
+	// [Changed, M18 Session 18.2 — demo unit-legibility pass] SIZE and
+	// SHARD_SIZE are now humanize.FormatMB(...) strings, not raw
+	// "%d bytes" — e.SizeBytes and profile.ShardSize themselves are
+	// unchanged, still passed to deriveShardLayout below in raw bytes
+	// exactly as before; only the two printed columns changed. See
+	// TestDeriveShardLayoutMatchesTheUploadersOwnSplit, which exercises
+	// deriveShardLayout directly and is untouched by this change, for the
+	// arithmetic-stays-in-bytes proof this file's own tests rely on.
 	tw := tabwriter.NewWriter(out, 0, tabWriterTabWidth, tabWriterPadding, ' ', 0)
 	fprintln(tw, "FILE_ID\tNAME\tSIZE\tSEGMENTS\tSHARDS\tNEED\tSHARD_SIZE\tMONTHLY_COST\tAVAILABILITY")
 	for _, e := range entries {
-		segments, shards := deriveShardLayout(e.SizeBytes, profile)
-		fprintf(tw, "%s\t%s\t%d bytes\t%d\t%d\t%d of %d\t%d bytes\t%s\t%s\n",
-			e.FileID, e.DisplayName, e.SizeBytes,
-			segments, shards, profile.DataShards, profile.TotalShards,
-			profile.ShardSize,
-			formatPaise(e.MonthlyCostPaise), e.AvailabilityLabel)
+		fprintln(tw, formatLsRow(e, profile))
 	}
 	if err := tw.Flush(); err != nil {
 		fprintf(errOut, "error writing table: %v\n", err)
@@ -368,4 +373,27 @@ func deriveShardLayout(sizeBytes int64, profile config.NetworkProfile) (segments
 	}
 	segments = (sizeBytes + segmentBytes - 1) / segmentBytes
 	return segments, segments * int64(profile.TotalShards)
+}
+
+// formatLsRow renders one tab-separated `client ls` row for e, in the
+// FILE_ID/NAME/SIZE/SEGMENTS/SHARDS/NEED/SHARD_SIZE/MONTHLY_COST/AVAILABILITY
+// column order dispatchLs's own header line declares. Factored out (rather
+// than inlined in dispatchLs's loop) so it is directly testable without a
+// live owner-files endpoint — TestFormatLsRowShowsMBNotRawBytes calls this
+// function, not dispatchLs itself.
+//
+// [Changed, M18 Session 18.2 — demo unit-legibility pass] SIZE and
+// SHARD_SIZE are humanize.FormatMB(...) strings, never raw "%d bytes".
+// e.SizeBytes and profile.ShardSize are passed to deriveShardLayout in raw
+// bytes exactly as before this function existed — see
+// TestDeriveShardLayoutMatchesTheUploadersOwnSplit, which exercises
+// deriveShardLayout directly and is untouched by this change, for the
+// arithmetic-stays-in-bytes proof this file's tests rely on.
+func formatLsRow(e manage.FileEntry, profile config.NetworkProfile) string {
+	segments, shards := deriveShardLayout(e.SizeBytes, profile)
+	return fmt.Sprintf("%s\t%s\t%s\t%d\t%d\t%d of %d\t%s\t%s\t%s",
+		e.FileID, e.DisplayName, humanize.FormatMB(e.SizeBytes),
+		segments, shards, profile.DataShards, profile.TotalShards,
+		humanize.FormatMB(int64(profile.ShardSize)),
+		formatPaise(e.MonthlyCostPaise), e.AvailabilityLabel)
 }

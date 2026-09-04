@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -134,6 +135,41 @@ func TestRemoveRequiresConfirmationWithoutYesFlag(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("dispatchRm did not return promptly on a declined confirmation — it must short-circuit before touching the network")
+	}
+}
+
+// TestFormatLsRowShowsMBNotRawBytes pins the M18 Session 18.2
+// unit-legibility change: `client ls`'s SIZE and SHARD_SIZE columns must
+// show humanize.FormatMB figures, never a raw byte count with the literal
+// word "bytes" — the exact regression this guards against is
+// formatLsRow's format string reverting to its pre-M18 "%d bytes" form.
+// The --json path (dispatchLs's own g.json branch) is untouched: it
+// marshals e.SizeBytes directly as an int64, never through formatLsRow.
+//
+// 117544938 bytes is the real demo video's size (M18 Stage 1 live run,
+// the same figure TestDeriveShardLayoutMatchesTheUploadersOwnSplit already
+// pins against 150 segments / 750 shards) — chosen so this test ties to an
+// actual captured figure, and so the SEGMENTS/SHARDS columns in the
+// assertion below are cross-checked against that existing test rather than
+// invented fresh.
+func TestFormatLsRowShowsMBNotRawBytes(t *testing.T) {
+	profile := config.DemoProfile
+	fileID := uuid.MustParse("01a06835-cd5b-73ad-b540-11aa3683cc23") // the real demo video's file_id
+	entry := manage.FileEntry{
+		FileID:            fileID,
+		DisplayName:       "original.mp4",
+		SizeBytes:         117544938,
+		MonthlyCostPaise:  10947, // ₹109.47 at the M18-bumped ₹1000/GB/month demo rate
+		AvailabilityLabel: "Available",
+	}
+
+	got := formatLsRow(entry, profile)
+	want := fmt.Sprintf("%s\toriginal.mp4\t112.10 MB\t150\t750\t3 of 5\t0.25 MB\t₹109.47\tAvailable", fileID)
+	if got != want {
+		t.Errorf("formatLsRow row =\n  %q\nwant\n  %q", got, want)
+	}
+	if strings.Contains(got, "bytes") {
+		t.Error(`formatLsRow output contains the literal word "bytes" — SIZE and SHARD_SIZE must show MB only, via humanize.FormatMB`)
 	}
 }
 
