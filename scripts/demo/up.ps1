@@ -46,7 +46,21 @@ $BinDir = Join-Path $StateDir "bin"
 $LogDir = Join-Path $StateDir "logs"
 $DataDir = Join-Path $StateDir "data"
 $PidFile = Join-Path $StateDir "pids"
-$EnvFile = Join-Path $StateDir "env"
+# [Changed, M18 Stage 2] Written as dot-sourceable PowerShell
+# ($env:KEY = "value" lines), not plain KEY=VALUE text. The previous form
+# matched up.sh's own env file byte-for-byte, but bash's `source
+# /tmp/vyomanaut-demo/env` and PowerShell's `. $EnvFile` are NOT the same
+# operation on the same file: bash's `source` interprets KEY=VALUE lines as
+# assignment statements directly, while PowerShell dot-sourcing executes a
+# file as PowerShell CODE — a plain-text `MICROSERVICE_URL=http://...` line
+# is not valid PowerShell and `. $EnvFile` on the old-format file would
+# fail immediately with a parser error. This was never caught because
+# nothing in this repository's own automation reads the env file back
+# (down.ps1 and join.ps1 both recompute StateDir independently) — only a
+# human, in a new terminal, ever needed to load it, and that path was
+# untested. Named env.ps1 (not the extension-less "env" up.sh uses) so it
+# is unambiguous that it must be dot-sourced, not executed directly.
+$EnvFile = Join-Path $StateDir "env.ps1"
 
 New-Item -ItemType Directory -Force -Path $BinDir, $LogDir, $DataDir | Out-Null
 Set-Content -Path $PidFile -Value ""
@@ -83,7 +97,19 @@ psql -v ON_ERROR_STOP=1 -h $PgHost -p $PgPort -U $PgMigratorUser -d $PgDatabase 
 if ($LASTEXITCODE -ne 0) { throw "psql: role passwords failed" }
 
 # ── build fresh binaries ────────────────────────────────────────────────
-Write-Log "building cmd/microservice, cmd/provider, cmd/operator"
+# [Added, M18 Stage 2] CGO_ENABLED=0 explicitly, matching
+# runbooks/windows.md's own documented claim that nothing on this
+# platform's build path needs cgo (internal/storage/engine_badger.go,
+# `//go:build windows`, is pure Go — see that file's header). Previously
+# unset here, which defaults to CGO_ENABLED=1: harmless as long as nothing
+# in the build graph actually contains cgo code for windows, but a single
+# future dependency that does would then silently require a C compiler
+# most fresh Windows machines don't have, and fail with a confusing linker
+# error instead of Go's own clear "cgo: C compiler not found" message.
+# Setting it to 0 explicitly makes that failure mode impossible rather than
+# merely unlikely.
+$env:CGO_ENABLED = "0"
+Write-Log "building cmd/microservice, cmd/provider, cmd/operator, cmd/client"
 go build -o (Join-Path $BinDir "microservice.exe") ./cmd/microservice/
 if ($LASTEXITCODE -ne 0) { throw "go build microservice failed" }
 go build -o (Join-Path $BinDir "provider.exe") ./cmd/provider/
@@ -173,18 +199,24 @@ if (-not $ready) {
 # and on the Unix side an unset one silently resolved to the microservice's
 # own PID line and killed the coordinator mid-demo. OWNER_DIR is a path,
 # not a promise — `client register` creates it on first use.
+#
+# [Changed, M18 Stage 2] Each line is now a real $env: assignment, so
+# `. $EnvFile` in a new PowerShell 7 terminal actually sets these as
+# environment variables, exactly as `source $ENV_FILE` does on the bash
+# side — see this file's own EnvFile comment above for why the previous
+# plain-text form could never have worked with PowerShell's dot-sourcing.
 Set-Content -Path $EnvFile -Value @"
-MICROSERVICE_URL=$MicroserviceUrl
-ADMIN_API_KEY=$AdminApiKey
-OTP_LOG=$OtpLog
-BIN_DIR=$BinDir
-STATE_DIR=$StateDir
-DATA_DIR=$DataDir
-OWNER_DIR=$(Join-Path $DataDir "owner")
-PID_FILE=$PidFile
-PGHOST=$PgHost
-PGPORT=$PgPort
-PGDATABASE=$PgDatabase
+`$env:MICROSERVICE_URL = "$MicroserviceUrl"
+`$env:ADMIN_API_KEY = "$AdminApiKey"
+`$env:OTP_LOG = "$OtpLog"
+`$env:BIN_DIR = "$BinDir"
+`$env:STATE_DIR = "$StateDir"
+`$env:DATA_DIR = "$DataDir"
+`$env:OWNER_DIR = "$(Join-Path $DataDir "owner")"
+`$env:PID_FILE = "$PidFile"
+`$env:PGHOST = "$PgHost"
+`$env:PGPORT = "$PgPort"
+`$env:PGDATABASE = "$PgDatabase"
 "@
 
 # ── start N local normal-mode providers (rehearsal fleet, F-D-3) ─────────
@@ -266,5 +298,24 @@ for ($i = 1; $i -le $Providers; $i++) {
     Add-Content -Path $PidFile -Value $runProc.Id
 }
 
-Write-Log "up. Logs under $LogDir. Try:"
-Write-Log "  $(Join-Path $BinDir 'operator.exe') watch --microservice-url=$MicroserviceUrl --admin-api-key=$AdminApiKey"
+Write-Log "up. Logs under $LogDir."
+Write-Log ""
+Write-Log "This run's actual values (also saved in $EnvFile):"
+Write-Log "  MICROSERVICE_URL = $MicroserviceUrl"
+Write-Log "  ADMIN_API_KEY    = $AdminApiKey"
+Write-Log "  OTP_LOG          = $OtpLog"
+Write-Log "  BIN_DIR          = $BinDir"
+Write-Log ""
+Write-Log "In any NEW PowerShell 7 terminal, load them by dot-sourcing that file"
+Write-Log "(note the leading dot and space — that is what makes this set"
+Write-Log "environment variables in YOUR terminal instead of a child process's):"
+Write-Log "  . $EnvFile"
+Write-Log ""
+Write-Log "Then, to watch the live console (--mode=demo matters — without it the"
+Write-Log "console computes its own readiness thresholds against the PROD profile"
+Write-Log "instead of demo's, and every number on screen will look wrong even"
+Write-Log "though the real system underneath is fine):"
+Write-Log "  & `"`$env:BIN_DIR\operator.exe`" watch --mode=demo --microservice-url=`$env:MICROSERVICE_URL --admin-api-key=`$env:ADMIN_API_KEY"
+Write-Log ""
+Write-Log "To read a volunteer's OTP code (join.ps1 tells them to ask you for it):"
+Write-Log "  & `"`$env:BIN_DIR\operator.exe`" otp --mode=demo --otp-delivery-log=`$env:OTP_LOG <their phone number>"
