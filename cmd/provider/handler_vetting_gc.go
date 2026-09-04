@@ -131,6 +131,7 @@ func (h *VettingGCHandler) handleOneFrame(s p2p.Stream) bool {
 		log.Printf("[VETTING-GC] rejected (not authorised): remote peer %s does not match this provider's expected microservice peer %q (authorizer populated: %v)",
 			remotePeer, h.microservicePeerID, h.authorizer != nil)
 		h.writeStatusOnly(s, vettingGCStatusNotAuthorised)
+		drainPendingInput(s)
 		return false
 	}
 
