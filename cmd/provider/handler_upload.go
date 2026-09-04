@@ -224,10 +224,35 @@ func (h *UploadHandler) HandleStream(s p2p.Stream) {
 	deadline := time.Now().Add(uploadStreamTimeout)
 	_ = s.SetDeadline(deadline)
 
-	// Pre-condition: DEPARTED providers reset the stream immediately, with
+	// Pre-condition: DEPARTED providers refuse the stream immediately, with
 	// no application response at all (IC §4.1 pre-conditions).
+	//
+	// [Changed, M18 Stage 2 — Windows demo run, real finding from the
+	// first-ever execution of this test on real Windows hardware] Was
+	// s.Reset() until this session. Reset() (internal/p2p/host.go's
+	// tlsStream.Reset) sets SO_LINGER=0 before closing — discard any
+	// not-yet-acknowledged outbound bytes and send an RST instead of a
+	// graceful FIN. The byte it was racing here isn't this handler's own
+	// output (it writes nothing in this branch) but the 1-byte negotiation
+	// ack the generic p2p layer (serveConn, internal/p2p/host.go) writes
+	// immediately before handing off to this handler in a new goroutine —
+	// SetLinger(0) firing before that ack has actually cleared the local
+	// send buffer discards it, and the caller's NewStream() then fails at
+	// "read negotiation ack" with a raw connection-abort error instead of
+	// the clean stream-open-then-read-failure IC §4.1 describes.
+	// TestUploadRejectsDepartedProvider only asserts that reading from the
+	// stream afterward fails (any error) — a plain Close() still satisfies
+	// that, still sends nothing IC §4.1 defines as a response, and (unlike
+	// Reset()) lets the OS flush what it already has queued instead of
+	// discarding it. internal/repair/errors.go's ErrReplacementUnreachable
+	// classifies ANY failure "before a wire status byte is ever read" —
+	// Reset's abort and Close's resulting EOF both land there identically,
+	// so this is not expected to change repair's retry behaviour. This was
+	// checked against that one caller, not exhaustively against every
+	// place in the codebase that might branch on the specific error text a
+	// reset produces — worth a second look before treating it as final.
 	if h.status != nil && h.status.Get() == providerStatusDeparted {
-		_ = s.Reset()
+		_ = s.Close()
 		return
 	}
 
