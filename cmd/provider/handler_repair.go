@@ -306,6 +306,8 @@ func (h *RepairDownloadHandler) writeStatusOnly(s p2p.Stream, status byte) {
 // handler noticeably.
 const drainPendingInputTimeout = 50 * time.Millisecond
 
+const drainBufferSize = 4096
+
 // drainPendingInput performs one short, best-effort read of whatever the
 // remote peer already sent on s, discarding it, before a handler that
 // rejects a peer BEFORE reading its request returns and triggers the
@@ -336,7 +338,7 @@ const drainPendingInputTimeout = 50 * time.Millisecond
 // performs can proceed without racing an RST.
 func drainPendingInput(s p2p.Stream) {
 	_ = s.SetDeadline(time.Now().Add(drainPendingInputTimeout))
-	buf := make([]byte, 4096)
+	buf := make([]byte, drainBufferSize)
 	_, _ = s.Read(buf)
 }
 
