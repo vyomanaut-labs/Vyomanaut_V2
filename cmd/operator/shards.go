@@ -19,8 +19,11 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"io"
 	"text/tabwriter"
+
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/humanize"
 )
 
 func dispatchShards(args []string, out, errOut io.Writer) int {
@@ -62,7 +65,10 @@ const (
 
 // renderShards writes resp to out. jsonOutput selects the same
 // machine-readable-vs-human-readable split every other cmd/*'s --json flag
-// already establishes (cmd/client, cmd/provider earnings.go).
+// already establishes (cmd/client, cmd/provider earnings.go). The JSON
+// branch encodes resp's own SizeBytes/OriginalSizeBytes fields directly and
+// is untouched by the M18 Session 18.2 change below — only the
+// human-readable branch's printed byte counts changed.
 func renderShards(out io.Writer, resp shardsAdminResponseBody, jsonOutput bool) {
 	if jsonOutput {
 		enc := json.NewEncoder(out)
@@ -72,7 +78,10 @@ func renderShards(out io.Writer, resp shardsAdminResponseBody, jsonOutput bool) 
 	}
 
 	fprintf(out, "File %s\n", resp.FileID)
-	fprintf(out, "  original size:  %d bytes\n", resp.OriginalSizeBytes)
+	// [Changed, M18 Session 18.2 — demo unit-legibility pass] humanize.FormatMB,
+	// not "%d bytes" — resp.OriginalSizeBytes itself is untouched, still the
+	// raw int64 the admin endpoint returned; only this print line changed.
+	fprintf(out, "  original size:  %s\n", humanize.FormatMB(resp.OriginalSizeBytes))
 	if resp.DisplayNameCiphertext != nil {
 		fprintf(out, "  display name:   %s  (display_name_ciphertext — AEAD ciphertext; the operator cannot read this, ADR-020)\n", *resp.DisplayNameCiphertext)
 	} else {
@@ -80,10 +89,26 @@ func renderShards(out io.Writer, resp shardsAdminResponseBody, jsonOutput bool) 
 	}
 	fprintf(out, "  shards:         %d\n\n", len(resp.Shards))
 
+	// [Changed, M18 Session 18.2] Column renamed SIZE_BYTES -> SIZE:
+	// leaving it named SIZE_BYTES while printing a MB figure under it would
+	// be actively wrong, not merely stale — every other renamed-unit column
+	// in this codebase (client ls's SIZE/SHARD_SIZE) carries its unit in the
+	// printed value, not the header, and this now matches that convention.
 	tw := tabwriter.NewWriter(out, 0, tableTabWidth, tablePadding, ' ', 0)
-	fprintln(tw, "SEGMENT_ID\tSHARD\tCHUNK_ID\tPROVIDER_ID\tASN\tSIZE_BYTES")
+	fprintln(tw, "SEGMENT_ID\tSHARD\tCHUNK_ID\tPROVIDER_ID\tASN\tSIZE")
 	for _, s := range resp.Shards {
-		fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%d\n", s.SegmentID, s.ShardIndex, s.ChunkID, s.ProviderID, s.ASN, s.SizeBytes)
+		fprintln(tw, formatShardRow(s))
 	}
 	_ = tw.Flush()
+}
+
+// formatShardRow renders one tab-separated shard-placement row for s, in
+// the SEGMENT_ID/SHARD/CHUNK_ID/PROVIDER_ID/ASN/SIZE column order
+// renderShards's own header line declares. Factored out (rather than
+// inlined in renderShards's loop) so it is directly testable without a
+// live admin endpoint — TestFormatShardRowShowsMBNotRawBytes calls this
+// function, not renderShards itself.
+func formatShardRow(s shardsAdminChunkItem) string {
+	return fmt.Sprintf("%s\t%d\t%s\t%s\t%s\t%s",
+		s.SegmentID, s.ShardIndex, s.ChunkID, s.ProviderID, s.ASN, humanize.FormatMB(int64(s.SizeBytes)))
 }

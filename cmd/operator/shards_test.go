@@ -4,6 +4,8 @@
 //   - TestShardsRendersCiphertextFilenameAsHexOnly
 //   - TestShardsNeverRendersPlaintextFilename
 //   - TestDispatchShardsCallsTheAdminEndpoint
+//   - TestFormatShardRowShowsMBNotRawBytes (M18 Session 18.2)
+//   - TestRenderShardsOriginalSizeShowsMBNotRawBytes (M18 Session 18.2)
 package main
 
 import (
@@ -124,5 +126,53 @@ func TestDispatchShardsCallsTheAdminEndpoint(t *testing.T) {
 	}
 	if gotKey != adminKey {
 		t.Errorf("X-Admin-API-Key = %q, want %q", gotKey, adminKey)
+	}
+}
+
+// TestFormatShardRowShowsMBNotRawBytes pins the M18 Session 18.2
+// unit-legibility change: the per-shard SIZE column must show a
+// humanize.FormatMB figure, never a raw byte count — the exact regression
+// this guards against is formatShardRow reverting to printing s.SizeBytes
+// as a bare integer under the old SIZE_BYTES header. 262144 is one shard
+// (this system's shared ShardSize), chosen so the expected "0.25 MB" ties
+// to a real, meaningful figure rather than an arbitrary number.
+func TestFormatShardRowShowsMBNotRawBytes(t *testing.T) {
+	s := shardsAdminChunkItem{
+		SegmentID: "seg-0", ShardIndex: 2, ChunkID: "abc123",
+		ProviderID: "prov-7", ASN: "AS12345", SizeBytes: 262144,
+	}
+	want := "seg-0\t2\tabc123\tprov-7\tAS12345\t0.25 MB"
+	if got := formatShardRow(s); got != want {
+		t.Errorf("formatShardRow = %q, want %q", got, want)
+	}
+}
+
+// TestRenderShardsOriginalSizeShowsMBNotRawBytes confirms the "original
+// size:" line goes through the same MB conversion, and that the table
+// header no longer claims SIZE_BYTES while printing MB under it — a header
+// still reading SIZE_BYTES over MB-formatted values would be actively
+// wrong, not merely stale, so this test checks both the value and the
+// corrected header text together.
+func TestRenderShardsOriginalSizeShowsMBNotRawBytes(t *testing.T) {
+	resp := shardsAdminResponseBody{
+		FileID:            "11111111-1111-1111-1111-111111111111",
+		OriginalSizeBytes: 117544938, // the real demo video's size
+		Shards: []shardsAdminChunkItem{
+			{ChunkID: "aa", SegmentID: "seg-0", ShardIndex: 0, ProviderID: "prov-0", ASN: "AS12345", SizeBytes: 262144},
+		},
+	}
+
+	var buf bytes.Buffer
+	renderShards(&buf, resp, false)
+	out := buf.String()
+
+	if !strings.Contains(out, "original size:  112.10 MB") {
+		t.Errorf("output does not show the original size as 112.10 MB:\n%s", out)
+	}
+	if strings.Contains(out, "SIZE_BYTES") {
+		t.Errorf("output still uses the stale SIZE_BYTES header over MB-formatted values:\n%s", out)
+	}
+	if !strings.Contains(out, "SIZE") {
+		t.Errorf("output is missing the SIZE column header entirely:\n%s", out)
 	}
 }
