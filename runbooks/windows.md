@@ -228,7 +228,7 @@ docker compose -f deployments\dev\docker-compose.yml up -d postgres
 ### 3.2 — Bring the network up
 
 ```powershell
-.\scripts\demo\up.ps1 --Providers 7
+.\scripts\demo\up.ps1 -Providers 7
 ```
 (or just `.\scripts\demo\up.ps1` — 7 is the default, and ADR-075's own finding is that
 7 is the canonical rehearsal fleet size, not an arbitrary round number; see that
@@ -353,7 +353,7 @@ Not required to close out Stage 2's own demo cycle above, but the actual reason 
 exists at all: a second machine (this Windows laptop, or another one) joining a
 coordinator running elsewhere.
 
-On the machine running `up.ps1`, pass `--AdvertiseAddr` explicitly rather than relying
+On the machine running `up.ps1`, pass `-AdvertiseAddr` explicitly rather than relying
 on autodetection if the two machines aren't on the same simple LAN segment (§7 covers
 why autodetection can guess wrong). On the joining machine:
 ```powershell
