@@ -466,60 +466,82 @@ func (h *ProviderRegisterHandler) resolveASN(ctx context.Context, req providerRe
 	if req.DemoASN != nil {
 		return *req.DemoASN, "", "", true
 	}
-	assigned, err := assignDemoASN(ctx, h.db, h.profile.MinDistinctASNs)
+	assigned, err := assignDemoASN(ctx, h.db)
 	if err != nil {
 		return "", "demo_asn", "failed to auto-assign a synthetic ASN", false
 	}
 	return assigned, "", "", true
 }
 
-// assignDemoASN picks the least-used value in the pool SIM-AS1..SIM-AS{n},
-// defaulting to SIM-AS1 when the pool is entirely unused so far.
-func assignDemoASN(ctx context.Context, db *sql.DB, n int) (string, error) {
-	if n <= 0 {
-		n = 1
-	}
-	usage := make(map[string]int, n)
-	for i := 1; i <= n; i++ {
-		usage[fmt.Sprintf("SIM-AS%d", i)] = 0
-	}
-	rows, err := db.QueryContext(ctx, `SELECT asn, COUNT(*) FROM providers WHERE asn ~ '^SIM-AS[0-9]+$' GROUP BY asn`)
+// assignDemoASN returns a synthetic ASN that no existing provider holds:
+// the lowest SIM-AS{N}, N >= 1, not already present in the providers table.
+// Demo mode only — production passes the caller's real BGP-derived ASN
+// through untouched (resolveASN, above, branches on profile.IsDemoMode).
+//
+// [Changed, ADR-088 — supersedes the allocation premise of ADR-075]
+// Previously this picked the LEAST-USED value from a fixed pool of exactly
+// SIM-AS1..SIM-AS{profile.MinDistinctASNs}, i.e. five values. That bound
+// the size of the synthetic-ASN namespace to the readiness MINIMUM, which
+// are two unrelated quantities: the readiness gate asks "are at least five
+// distinct ASNs represented?", while the pool size decides "how many
+// distinct ASNs CAN exist at all". Any demo network with more than
+// MinDistinctASNs providers therefore forced ASN sharing, and because
+// shard placement caps each ASN at floor(TotalShards x ASNCapFraction) = 1
+// shard per segment (internal/repair.SelectReplacementProvider, used by
+// BOTH upload and repair placement), two providers sharing an ASN cannot
+// both hold a shard of the same segment. That turned an operator's choice
+// of which machine to stop into a placement outcome: repair-replacement
+// succeeded only when the departing provider happened to have an ASN twin,
+// and failed with ErrNoEligibleReplacement otherwise.
+//
+// One provider per ASN makes the cap structurally non-binding rather than
+// disabled: "at most 1 shard per ASN per segment" collapses into the
+// (segment_id, provider_id) uniqueness the schema already enforces. The
+// cap, ASNCapFraction, MinDistinctASNs and asnWithinCap are all unchanged
+// and still enforced — they simply never have to reject a placement. See
+// ADR-088 for why raising ASNCapFraction instead was rejected: at demo
+// DataShards=3 a cap of 5 would permit one ASN to hold all five shards of
+// a segment, which is full plaintext reconstruction by a single party.
+//
+// Unbounded by design. There is no ceiling on N, so a demo network can
+// grow to any provider count without ever reintroducing sharing. Gaps are
+// reused: a departed provider's row is deleted, so its number becomes the
+// lowest free value again and is handed to the next joiner, which keeps
+// the numbers small and legible on the operator console across a long
+// session with churn.
+func assignDemoASN(ctx context.Context, db *sql.DB) (string, error) {
+	rows, err := db.QueryContext(ctx, `SELECT asn FROM providers WHERE asn ~ '^SIM-AS[0-9]+$'`)
 	if err != nil {
-		return "", fmt.Errorf("api: assignDemoASN: query usage: %w", err)
+		return "", fmt.Errorf("api: assignDemoASN: query existing: %w", err)
 	}
-
 	defer func() {
 		if err := rows.Close(); err != nil {
 			slog.Error("assignDemoASN: close rows", "error", err)
 		}
 	}()
 
+	used := make(map[int]bool)
 	for rows.Next() {
 		var asn string
-		var count int
-		if err := rows.Scan(&asn, &count); err != nil {
+		if err := rows.Scan(&asn); err != nil {
 			return "", fmt.Errorf("api: assignDemoASN: scan: %w", err)
 		}
-		if _, tracked := usage[asn]; tracked {
-			usage[asn] = count
+		// The regex above already guarantees the SIM-AS{digits} shape, so
+		// a parse failure here would mean the row changed underneath us;
+		// skip rather than fail the whole registration over one bad row.
+		if n, convErr := strconv.Atoi(strings.TrimPrefix(asn, "SIM-AS")); convErr == nil {
+			used[n] = true
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return "", fmt.Errorf("api: assignDemoASN: rows: %w", err)
 	}
 
-	keys := make([]string, 0, len(usage))
-	for k := range usage {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	best := keys[0]
-	for _, k := range keys {
-		if usage[k] < usage[best] {
-			best = k
+	for n := 1; ; n++ {
+		if !used[n] {
+			return fmt.Sprintf("SIM-AS%d", n), nil
 		}
 	}
-	return best, nil
 }
 
 // ═══════════════════════════════════════════════════════════════════════

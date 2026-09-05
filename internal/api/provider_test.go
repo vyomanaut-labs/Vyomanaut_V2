@@ -1463,3 +1463,97 @@ func TestProviderRegisterIgnoresModeStringForASNRules(t *testing.T) {
 		}
 	})
 }
+
+// TestAssignDemoASNGivesEveryProviderItsOwnASN is ADR-088's regression
+// test. It pins the property the whole decision rests on: no two providers
+// ever share a synthetic ASN, at any provider count, including counts above
+// profile.MinDistinctASNs — which is exactly where the old fixed-pool
+// allocator started handing out duplicates and, through the 1-shard-per-ASN
+// placement cap, made repair-replacement eligibility depend on which
+// machine an operator happened to stop.
+//
+// Live-DB test: skips cleanly when Postgres is unreachable, same harness as
+// every other DB-backed test in this package.
+func TestAssignDemoASNGivesEveryProviderItsOwnASN(t *testing.T) {
+	db := openVerifyDB(t)
+	ctx := context.Background()
+
+	// Isolate: this test asserts on the global SIM-AS namespace, so it must
+	// start from a known-empty providers table and put it back afterward.
+	if _, err := db.ExecContext(ctx, `DELETE FROM providers WHERE asn ~ '^SIM-AS[0-9]+$'`); err != nil {
+		t.Skipf("could not clear providers table, skipping: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM providers WHERE asn ~ '^SIM-AS[0-9]+$'`)
+	})
+
+	// Nine providers — deliberately more than DemoProfile.MinDistinctASNs
+	// (5) and more than the 7 the demo scripts default to, so the assertion
+	// covers the range the old allocator silently wrapped around in.
+	const providerCount = 9
+	seen := make(map[string]bool, providerCount)
+	for i := 0; i < providerCount; i++ {
+		asn, err := assignDemoASN(ctx, db)
+		if err != nil {
+			t.Fatalf("assignDemoASN #%d: %v", i+1, err)
+		}
+		if seen[asn] {
+			t.Fatalf("assignDemoASN returned %q twice — every provider must get its own synthetic ASN (ADR-088)", asn)
+		}
+		seen[asn] = true
+		if !demoASNPattern.MatchString(asn) {
+			t.Errorf("assignDemoASN returned %q, which does not match the server's own demo ASN pattern", asn)
+		}
+		// Persist it, so the next call actually sees this one as taken —
+		// the allocator reads the providers table, it holds no in-memory
+		// state between calls.
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO providers (provider_id, phone_number_hash, ed25519_public_key, asn, city, region, declared_storage_gb, status)
+			VALUES ($1, $2, $3, $4, 'Mumbai', 'Mumbai', 10, 'ACTIVE')`,
+			uuid.New(), fmt.Sprintf("hash-adr088-%d", i), fmt.Sprintf("key-adr088-%d", i), asn,
+		); err != nil {
+			t.Skipf("could not insert provider row (schema differs from expectation), skipping: %v", err)
+		}
+	}
+
+	if len(seen) != providerCount {
+		t.Errorf("got %d distinct ASNs across %d providers, want %d", len(seen), providerCount, providerCount)
+	}
+}
+
+// TestAssignDemoASNReusesAGapLeftByADepartedProvider pins the second half
+// of ADR-088's allocation rule: numbers are not monotonically increasing
+// forever, they are lowest-free. A long demo session with churn therefore
+// keeps its ASN numbers small and legible on the operator console instead
+// of drifting into SIM-AS40+ after a few rejoins.
+func TestAssignDemoASNReusesAGapLeftByADepartedProvider(t *testing.T) {
+	db := openVerifyDB(t)
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `DELETE FROM providers WHERE asn ~ '^SIM-AS[0-9]+$'`); err != nil {
+		t.Skipf("could not clear providers table, skipping: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM providers WHERE asn ~ '^SIM-AS[0-9]+$'`)
+	})
+
+	insert := func(asn string, tag string) {
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO providers (provider_id, phone_number_hash, ed25519_public_key, asn, city, region, declared_storage_gb, status)
+			VALUES ($1, $2, $3, $4, 'Mumbai', 'Mumbai', 10, 'ACTIVE')`,
+			uuid.New(), "hash-"+tag, "key-"+tag, asn,
+		); err != nil {
+			t.Skipf("could not insert provider row, skipping: %v", err)
+		}
+	}
+	insert("SIM-AS1", "gap-a")
+	insert("SIM-AS3", "gap-b") // SIM-AS2 deliberately absent
+
+	got, err := assignDemoASN(ctx, db)
+	if err != nil {
+		t.Fatalf("assignDemoASN: %v", err)
+	}
+	if got != "SIM-AS2" {
+		t.Errorf("assignDemoASN = %q, want %q — allocation must fill the lowest free number, not append after the highest", got, "SIM-AS2")
+	}
+}
