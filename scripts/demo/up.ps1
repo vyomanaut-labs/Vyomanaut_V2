@@ -257,7 +257,20 @@ for ($i = 1; $i -le $Providers; $i++) {
 
     $code = $null
     for ($attempt = 0; $attempt -lt 60; $attempt++) {
-        $otpOut = & (Join-Path $BinDir "operator.exe") otp $Phone --mode=demo --otp-delivery-log=$OtpLog 2>$null
+        # [Fixed, M18 Stage 2 — Windows demo run] $Phone MUST come after the
+        # flags, not before. This exact line had it backwards since before
+        # any of this session's changes (confirmed against this repo's very
+        # first commit) — Go's stdlib flag package stops parsing at the
+        # first non-flag token, so with $Phone first, --mode=demo and
+        # --otp-delivery-log=... are never parsed as flags at all; they
+        # land in otp.go's `rest` slice as extra positional arguments,
+        # tripping its own `len(rest) != 1` usage check on literally every
+        # attempt, for the full 60-attempt/30-second timeout, regardless of
+        # whether the microservice had already written the OTP or not. See
+        # up.sh's own version of this exact loop for the confirmed,
+        # already-fixed ordering this line now matches — that script's own
+        # comment documents catching and fixing the identical bug.
+        $otpOut = & (Join-Path $BinDir "operator.exe") otp --mode=demo --otp-delivery-log=$OtpLog $Phone 2>$null
         if ($LASTEXITCODE -eq 0 -and $otpOut) {
             $code = ($otpOut -split '\s+')[0]
             break
@@ -265,8 +278,21 @@ for ($i = 1; $i -le $Providers; $i++) {
         Start-Sleep -Milliseconds 500
     }
     if (-not $code) {
+        # [Added, M18 Stage 2] up.sh's equivalent failure message points to
+        # a redirected onboard_log file ("— see $onboard_log"); this
+        # process's stdout/stderr were redirected to in-memory pipes
+        # instead (RedirectStandardOutput/Error above), so the equivalent
+        # here is reading and printing those pipes directly rather than
+        # silently discarding them via Kill() with nothing read first —
+        # exactly the visibility this session's own argument-order bug
+        # (fixed just above) would otherwise have taken far longer to
+        # pin down without.
+        $onboardStdout = $onboardProc.StandardOutput.ReadToEnd()
+        $onboardStderr = $onboardProc.StandardError.ReadToEnd()
         $onboardProc.Kill()
         Write-Error "[up.ps1] provider ${i}: never saw an OTP for $Phone in $OtpLog"
+        if ($onboardStdout) { Write-Host "[up.ps1] provider ${i} onboard stdout:`n$onboardStdout" }
+        if ($onboardStderr) { Write-Host "[up.ps1] provider ${i} onboard stderr:`n$onboardStderr" }
         exit 1
     }
 
