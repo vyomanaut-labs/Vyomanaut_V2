@@ -1,0 +1,9 @@
+apiVersion: 1
+providers:
+  - name: vyomanaut
+    orgId: 1
+    folder: Vyomanaut
+    type: file
+    disableDeletion: false
+    options:
+      path: /etc/grafana/provisioning/dashboards
