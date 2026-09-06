@@ -82,6 +82,40 @@ type GCDelivery interface {
 	//
 	// Goroutine-safe: yes.
 	DeliverGCInstruction(ctx context.Context, providerID uuid.UUID) error
+
+	// DeliverOwnerDeletions erases REAL (non-vetting) chunks that a data
+	// owner has deleted, using the identical /vyomanaut/vetting-gc/1.0.0
+	// transport, framing, and gc_auth_sig as DeliverGCInstruction.
+	//
+	// [Added, M18 Stage 3] `client rm` previously set
+	// chunk_assignments.status = 'PENDING_DELETION' and files.status =
+	// 'DELETED' and stopped there. Nothing ever told a provider to erase
+	// the bytes: storage.ChunkStore.DeleteChunk had exactly one caller in
+	// the entire codebase — cmd/provider/handler_vetting_gc.go — and the
+	// only thing that ever reached it was the synthetic-chunk path, whose
+	// server-side query filters is_vetting_chunk = TRUE. internal/api's own
+	// comment claimed "the provider daemon picks up PENDING_DELETION
+	// assignments on its own next heartbeat"; no such code existed. So a
+	// deleted file's shards stayed on volunteer disks indefinitely.
+	//
+	// This method closes that gap WITHOUT a new protocol. The provider-side
+	// handler never restricted itself to vetting chunks — it deletes
+	// whatever chunk IDs a validly signed request names — so the entire
+	// restriction lived in one server-side WHERE clause. The only genuinely
+	// new thing here is which rows get loaded.
+	//
+	// Pre-conditions:
+	//   - rows exist with provider_id = providerID, is_vetting_chunk =
+	//     FALSE, status = 'PENDING_DELETION' (staged by `client rm`)
+	// Post-conditions (on nil error):
+	//   - every such row is 'DELETED' and the provider's store no longer
+	//     holds those chunks
+	// Error semantics:
+	//   - ErrProviderOffline: rows stay 'PENDING_DELETION' for retry on a
+	//     later tick — identical contract to DeliverGCInstruction
+	//
+	// Goroutine-safe: yes.
+	DeliverOwnerDeletions(ctx context.Context, providerID uuid.UUID) error
 }
 
 // vettingGCProtocolID is IC §4.5's protocol ID.
@@ -186,6 +220,87 @@ func (g *gcDelivery) DeliverGCInstruction(ctx context.Context, providerID uuid.U
 		}
 	}
 	return nil
+}
+
+// DeliverOwnerDeletions — see the GCDelivery interface for the full
+// contract and the history of why this exists.
+//
+// Deliberately shares deliverBatch, signGCAuthSig, the framing helpers and
+// the retry/staging semantics with DeliverGCInstruction rather than
+// duplicating them: a second, near-identical signing path is exactly how
+// two implementations drift until one of them silently fails verification.
+// The two differ in one place only — the query below.
+//
+// Note the absence of a staging step. DeliverGCInstruction stages
+// PENDING_DELETION itself because it is triggered by a status transition;
+// here `client rm` (internal/api/file.go) has already done it, and the rows
+// this loads ARE the staged set. Re-staging would be a no-op write.
+func (g *gcDelivery) DeliverOwnerDeletions(ctx context.Context, providerID uuid.UUID) error {
+	chunkIDs, err := loadPendingDeletionRealChunkIDs(ctx, g.db, providerID)
+	if err != nil {
+		return fmt.Errorf("vettingchunk: DeliverOwnerDeletions: %w", err)
+	}
+	if len(chunkIDs) == 0 {
+		return nil
+	}
+
+	peerID, addrs, err := resolveProviderPeer(ctx, g.db, providerID)
+	if err != nil {
+		return fmt.Errorf("vettingchunk: DeliverOwnerDeletions: resolve provider %s: %w: %v", providerID, ErrProviderOffline, err)
+	}
+	if err := g.host.Connect(ctx, peerID, addrs); err != nil {
+		return fmt.Errorf("vettingchunk: DeliverOwnerDeletions: connect to provider %s: %w: %v", providerID, ErrProviderOffline, err)
+	}
+	stream, err := g.host.NewStream(ctx, peerID, vettingGCProtocolID)
+	if err != nil {
+		return fmt.Errorf("vettingchunk: DeliverOwnerDeletions: open vetting-gc stream to provider %s: %w: %v", providerID, ErrProviderOffline, err)
+	}
+	defer func() { _ = stream.Close() }()
+
+	microservicePeerID := g.host.PeerID()
+	for start := 0; start < len(chunkIDs); start += gcMaxChunksPerFrame {
+		end := start + gcMaxChunksPerFrame
+		if end > len(chunkIDs) {
+			end = len(chunkIDs)
+		}
+		if err := g.deliverBatch(ctx, stream, providerID, chunkIDs[start:end], microservicePeerID); err != nil {
+			return fmt.Errorf("vettingchunk: DeliverOwnerDeletions: %w", err)
+		}
+	}
+	return nil
+}
+
+// loadPendingDeletionRealChunkIDs is loadActiveSyntheticChunkIDs' sibling
+// and its exact inverse on both filter columns: REAL chunks
+// (is_vetting_chunk = FALSE) that are already staged for deletion
+// (status = 'PENDING_DELETION'), rather than synthetic chunks still live
+// (is_vetting_chunk = TRUE, status = 'ACTIVE').
+//
+// The is_vetting_chunk = FALSE clause is load-bearing, not defensive: a
+// synthetic chunk left PENDING_DELETION by a failed vetting GC must stay
+// the vetting path's responsibility, so that a retry there still finds it.
+func loadPendingDeletionRealChunkIDs(ctx context.Context, db *sql.DB, providerID uuid.UUID) ([][32]byte, error) {
+	const query = `
+SELECT chunk_id FROM chunk_assignments
+WHERE is_vetting_chunk = FALSE AND provider_id = $1 AND status = 'PENDING_DELETION'
+ORDER BY chunk_id`
+	rows, err := db.QueryContext(ctx, query, providerID)
+	if err != nil {
+		return nil, fmt.Errorf("loadPendingDeletionRealChunkIDs: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out [][32]byte
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return nil, fmt.Errorf("loadPendingDeletionRealChunkIDs: scan: %w", err)
+		}
+		var id [32]byte
+		copy(id[:], raw)
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }
 
 // deliverBatch sends exactly one VettingGCRequest frame for batch (≤
