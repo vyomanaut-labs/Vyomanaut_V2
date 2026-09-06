@@ -1319,3 +1319,91 @@ func (h *AdminPayoutPreviewHandler) HandlePreview(w http.ResponseWriter, r *http
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// M18 Stage 3 — GET /api/v1/admin/escrow/summary (getEscrowSummary)
+//
+// [Added, M18 Stage 3] The operator console's "Escrow & release" panel
+// showed formatPaise(0) with a literal "(placeholder)" label because no
+// admin endpoint exposed escrow totals — the panel's own comment named
+// that gap and the NO_ADDITIONAL_ROUTES constraint that prevented closing
+// it in its own session. This is that endpoint.
+//
+// Reads the two append-only ledgers directly (owner_escrow_events,
+// escrow_events) rather than the mv_*_escrow_balance materialized views:
+// the views are per-party balances, this is a network-wide total, and
+// summing a matview that a background loop refreshes on its own cadence
+// would make the panel lag the ledger for no benefit. The ledgers are the
+// system of record (DM §3 Invariant 2 — append-only, insert is the only
+// permitted write), so a SUM over them is exact at read time by
+// construction.
+// ═══════════════════════════════════════════════════════════════════════
+
+type escrowSummaryResponseBody struct {
+	// ChargedPaise is the lifetime total of owner-side CHARGE events —
+	// what data owners have been billed for storage, ever.
+	ChargedPaise int64 `json:"charged_paise"`
+	// ReleasedPaise is the lifetime total of provider-side RELEASE events
+	// — what has actually been paid out to providers.
+	ReleasedPaise int64 `json:"released_paise"`
+	// HeldPaise is provider-side DEPOSIT minus RELEASE minus SEIZURE plus
+	// REVERSAL: money the network has accrued to providers but not yet
+	// released. This is the figure that makes the escrow model legible —
+	// charged money does not become provider money immediately, it is held
+	// across EscrowHoldWindow first.
+	HeldPaise int64 `json:"held_paise"`
+	// DepositedPaise is the lifetime total of owner-side DEPOSIT events,
+	// included so a reader can see charged-against-funded rather than a
+	// charge figure with no denominator.
+	DepositedPaise int64 `json:"deposited_paise"`
+}
+
+type EscrowSummaryHandler struct {
+	db *sql.DB
+}
+
+func NewEscrowSummaryHandler(db *sql.DB) *EscrowSummaryHandler {
+	return &EscrowSummaryHandler{db: db}
+}
+
+func (h *EscrowSummaryHandler) HandleSummary(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	var body escrowSummaryResponseBody
+
+	// COALESCE because SUM over zero matching rows is NULL, not 0 — an
+	// empty ledger is the normal state for the first minutes of every demo
+	// run, and must render as ₹0.00 rather than failing the scan.
+	err := h.db.QueryRowContext(ctx, `
+		SELECT
+			COALESCE(SUM(amount_paise) FILTER (WHERE event_type = 'CHARGE'), 0),
+			COALESCE(SUM(amount_paise) FILTER (WHERE event_type = 'DEPOSIT'), 0)
+		FROM owner_escrow_events`).Scan(&body.ChargedPaise, &body.DepositedPaise)
+	if err != nil {
+		slog.Error("escrow summary: owner ledger", "error", err)
+		WriteError(w, http.StatusInternalServerError, ErrInternal, "could not read the owner escrow ledger", nil, "", nil)
+		return
+	}
+
+	// Sign convention follows DM §4.8: the event_type carries the sign,
+	// amount_paise is always positive. So held = DEPOSIT + REVERSAL
+	// - RELEASE - SEIZURE, matching mv_provider_escrow_balance's own
+	// definition rather than inventing a second one here.
+	err = h.db.QueryRowContext(ctx, `
+		SELECT
+			COALESCE(SUM(amount_paise) FILTER (WHERE event_type = 'RELEASE'), 0),
+			  COALESCE(SUM(amount_paise) FILTER (WHERE event_type = 'DEPOSIT'), 0)
+			+ COALESCE(SUM(amount_paise) FILTER (WHERE event_type = 'REVERSAL'), 0)
+			- COALESCE(SUM(amount_paise) FILTER (WHERE event_type = 'RELEASE'), 0)
+			- COALESCE(SUM(amount_paise) FILTER (WHERE event_type = 'SEIZURE'), 0)
+		FROM escrow_events`).Scan(&body.ReleasedPaise, &body.HeldPaise)
+	if err != nil {
+		slog.Error("escrow summary: provider ledger", "error", err)
+		WriteError(w, http.StatusInternalServerError, ErrInternal, "could not read the provider escrow ledger", nil, "", nil)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(body)
+}
