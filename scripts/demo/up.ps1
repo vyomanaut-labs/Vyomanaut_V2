@@ -19,6 +19,19 @@ param(
     [int]$Providers = 7,
     [int]$StorageGB = 10,
     [string]$AdvertiseAddr = "",
+    # [Added, ADR-089] The address THIS MACHINE (the coordinator) prints as
+    # MICROSERVICE_URL for every other machine to dial — e.g. an
+    # overlay-mesh IP. Distinct from -AdvertiseAddr above, which only feeds
+    # the LOCAL REHEARSAL providers this script itself spawns.
+    # Get-LanIp below (gateway-based adapter detection) has no way to
+    # prefer an overlay-mesh adapter over a simultaneously-active
+    # Wi-Fi/Ethernet adapter — both usually have a valid IPv4 and a
+    # gateway, and PowerShell returns whichever Get-NetIPConfiguration
+    # happens to list first. On a machine running Tailscale/ZeroTier/etc.
+    # that choice is silently wrong until the first volunteer tries to
+    # connect. ALWAYS pass this explicitly outside a single-NIC machine —
+    # see ADR-089 and guides/operator_and_client_guide.md.
+    [string]$AdvertiseHost = "",
     [int]$Port = 8080
 )
 
@@ -165,17 +178,27 @@ $msProc = Start-Process -FilePath (Join-Path $BinDir "microservice.exe") `
     -PassThru -WindowStyle Hidden
 Add-Content -Path $PidFile -Value $msProc.Id
 
-# ── detect a LAN-reachable address for join.ps1's volunteer ──────────────
+# ── decide the address join.ps1's volunteer needs ────────────────────────
+# [Changed, ADR-089] -AdvertiseHost, if given, always wins outright and
+# Get-LanIp is not called at all — see that parameter's own comment above
+# for why gateway-based autodetection cannot be trusted to pick an
+# overlay-mesh adapter over an ordinary Wi-Fi/Ethernet one. Falls back to
+# the pre-existing best-effort autodetection, then to 127.0.0.1 with a
+# warning, unchanged from before.
 function Get-LanIp {
     try {
         $addr = (Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway -ne $null -and $_.NetAdapter.Status -eq "Up" } | Select-Object -First 1).IPv4Address.IPAddress
         return $addr
     } catch { return $null }
 }
-$LanIp = Get-LanIp
-if (-not $LanIp) {
-    Write-Log "warning: could not autodetect a LAN IP; the URL below defaults to 127.0.0.1 (unreachable from another desktop) — pass one explicitly if you have volunteers on other machines"
-    $LanIp = "127.0.0.1"
+if ($AdvertiseHost) {
+    $LanIp = $AdvertiseHost
+} else {
+    $LanIp = Get-LanIp
+    if (-not $LanIp) {
+        Write-Log "warning: could not autodetect a LAN IP; the URL below defaults to 127.0.0.1 (unreachable from another desktop) — pass -AdvertiseHost explicitly (ADR-089) if you have volunteers on other machines"
+        $LanIp = "127.0.0.1"
+    }
 }
 $MicroserviceUrl = "http://${LanIp}:$Port"
 
