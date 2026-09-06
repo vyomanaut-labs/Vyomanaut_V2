@@ -166,6 +166,26 @@ func (c *adminClient) fetchAuditStats(ctx context.Context) (auditStatsAdminRespo
 	return resp, err
 }
 
+// escrowSummaryAdminResponse mirrors GET /api/v1/admin/escrow/summary
+// (internal/api/admin.go's escrowSummaryResponseBody). All four figures are
+// int64 paise, never float — IC §11 / NFR-038's no-float-on-the-money-path
+// rule applies to the console exactly as it does to the server.
+//
+// [Added, M18 Stage 3] Replaces the hardcoded formatPaise(0) placeholder
+// renderEscrow carried while no endpoint existed.
+type escrowSummaryAdminResponse struct {
+	ChargedPaise   int64 `json:"charged_paise"`
+	ReleasedPaise  int64 `json:"released_paise"`
+	HeldPaise      int64 `json:"held_paise"`
+	DepositedPaise int64 `json:"deposited_paise"`
+}
+
+func (c *adminClient) fetchEscrowSummary(ctx context.Context) (escrowSummaryAdminResponse, error) {
+	var resp escrowSummaryAdminResponse
+	err := c.doGet(ctx, "/api/v1/admin/escrow/summary", &resp)
+	return resp, err
+}
+
 func (c *adminClient) fetchVettingStatus(ctx context.Context) (vettingStatusAdminResponse, error) {
 	var resp vettingStatusAdminResponse
 	err := c.doGet(ctx, "/api/v1/admin/vetting/status", &resp)
@@ -187,6 +207,7 @@ type watchSnapshot struct {
 	RepairQueue   *repairQueueAdminResponse   `json:"repair_queue,omitempty"`
 	AuditStats    *auditStatsAdminResponse    `json:"audit_stats,omitempty"`
 	VettingStatus *vettingStatusAdminResponse `json:"vetting_status,omitempty"`
+	EscrowSummary *escrowSummaryAdminResponse `json:"escrow_summary,omitempty"`
 	// FetchErrors: task item text gives no ADR-specified shape for
 	// reporting a partial fan-out failure, so this is this session's own
 	// design choice — one string per failed endpoint, rather than
@@ -219,11 +240,17 @@ const maxEventFeedEntries = 20
 const tickInterval = 1 * time.Second
 
 // fanOutEndpointCount is the number of admin endpoints fetchCmd polls
-// concurrently each cycle (task item 1's own five: readiness, providers,
-// repair queue, audit stats, vetting status) — named so wg.Add's argument
-// isn't a bare literal that could silently drift from the actual number of
-// goroutines launched below.
-const fanOutEndpointCount = 5
+// concurrently each cycle (readiness, providers, repair queue, audit stats,
+// vetting status, escrow summary) — named so wg.Add's argument isn't a bare
+// literal that could silently drift from the actual number of goroutines
+// launched below.
+//
+// [Changed 5 -> 6, M18 Stage 3] escrow summary added. This constant did
+// exactly the job it was created for: adding the sixth goroutine without
+// updating it panicked the whole console with "sync: negative WaitGroup
+// counter" on the first test run, rather than silently dropping one
+// endpoint's result. Keep it in step with the goroutine count below.
+const fanOutEndpointCount = 6
 
 // fetchTimeout bounds one fan-out cycle so a single unreachable endpoint
 // cannot stall the console indefinitely — five times tickInterval gives
@@ -261,6 +288,7 @@ type fetchResultMsg struct {
 	repairQueue   *repairQueueAdminResponse
 	auditStats    *auditStatsAdminResponse
 	vettingStatus *vettingStatusAdminResponse
+	escrowSummary *escrowSummaryAdminResponse
 	errs          []string
 }
 
@@ -391,6 +419,16 @@ func fetchCmd(client *adminClient) tea.Cmd {
 			mu.Unlock()
 			return nil
 		})
+		go fetch("escrow_summary", func() error {
+			resp, err := client.fetchEscrowSummary(ctx)
+			if err != nil {
+				return err
+			}
+			mu.Lock()
+			msg.escrowSummary = &resp
+			mu.Unlock()
+			return nil
+		})
 		go fetch("vetting_status", func() error {
 			resp, err := client.fetchVettingStatus(ctx)
 			if err != nil {
@@ -515,10 +553,13 @@ func (m *watchModel) applyFetchResult(msg fetchResultMsg) {
 	if msg.vettingStatus != nil {
 		next.VettingStatus = msg.vettingStatus
 	}
+	if msg.escrowSummary != nil {
+		next.EscrowSummary = msg.escrowSummary
+	}
 	m.snapshot = next
 
 	if msg.readiness != nil || msg.providers != nil || msg.repairQueue != nil ||
-		msg.auditStats != nil || msg.vettingStatus != nil {
+		msg.auditStats != nil || msg.vettingStatus != nil || msg.escrowSummary != nil {
 		m.haveData = true
 	}
 
@@ -832,7 +873,7 @@ func (m watchModel) bodyForFocus() string {
 	asn := renderASNCap(m.profile, m.snapshot.Providers)
 	repair := renderRepair(m.profile, m.snapshot.RepairQueue)
 	audit := renderAudit(m.profile, m.snapshot.AuditStats, m.now)
-	escrow := renderEscrow(m.profile)
+	escrow := renderEscrow(m.profile, m.snapshot.EscrowSummary)
 
 	switch m.focus {
 	case panelReadiness:
