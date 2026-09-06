@@ -1,0 +1,49 @@
+# Prometheus scrape configuration for the Vyomanaut Stage 3 rig.
+#
+# [Added, M18 Stage 3] LTS research needs timed metrics that only real
+# hardware produces. This scrapes the provider daemons' /metrics endpoints.
+#
+# TWO THINGS TO KNOW BEFORE YOU TRUST THIS FILE:
+#
+# 1. Each provider must be started with --metrics-addr=0.0.0.0:9091.
+#    The default bind is 127.0.0.1:9091 (NFR-026), which Prometheus on
+#    another host cannot reach. That endpoint has NO authentication, so
+#    opening it is only appropriate on the isolated, no-uplink rig.
+#
+# 2. THE COORDINATOR IS NOT SCRAPED, BECAUSE IT EXPOSES NOTHING.
+#    cmd/microservice registers no /metrics handler at all — verified, not
+#    assumed. So repair duration, audit cycle timing, charge computation
+#    latency and every other coordinator-side measurement are NOT collected
+#    by this file. What you get here is provider-side only. Closing that
+#    gap is a separate piece of work; see the M18 Stage 3 handoff.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    rig: vyomanaut-stage3
+
+scrape_configs:
+  - job_name: vyomanaut-providers
+    static_configs:
+      # One target per provider machine. Edit these to match your rig's
+      # actual addresses — the names are what appear in Grafana, so use
+      # the DESK-NN labels the runbook uses rather than bare IPs.
+      - targets: ['192.168.50.11:9091']
+        labels: { desk: DESK-01 }
+      - targets: ['192.168.50.12:9091']
+        labels: { desk: DESK-02 }
+      - targets: ['192.168.50.13:9091']
+        labels: { desk: DESK-03 }
+      - targets: ['192.168.50.14:9091']
+        labels: { desk: DESK-04 }
+      - targets: ['192.168.50.15:9091']
+        labels: { desk: DESK-05 }
+      - targets: ['192.168.50.16:9091']
+        labels: { desk: DESK-06 }
+      - targets: ['192.168.50.17:9091']
+        labels: { desk: DESK-07 }
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
