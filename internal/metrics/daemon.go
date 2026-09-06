@@ -131,19 +131,42 @@ var (
 // the underlying *http.Server so the daemon's own startup/shutdown sequence
 // can manage its lifecycle, plus a channel reporting a non-clean listen
 // failure.
+// StartDaemonMetricsServer binds daemonStatusAddr (127.0.0.1:9091).
+// Prefer this. It preserves NFR-026's loopback-only guarantee.
 func StartDaemonMetricsServer() (*http.Server, <-chan error) {
+	return StartDaemonMetricsServerOn(daemonStatusAddr)
+}
+
+// StartDaemonMetricsServerOn binds an explicitly supplied address.
+//
+// [Added, M18 Stage 3] Exists solely so a multi-machine rig can be scraped
+// by a Prometheus running on another host, which is impossible against a
+// loopback bind. It is deliberately a SEPARATE function with an explicit
+// argument rather than a mutable package variable, so that every caller
+// that leaves loopback behind is visible in a grep for this name.
+//
+// SECURITY — read before using it. daemonStatusAddr's own comment (above)
+// records why loopback is the default: this endpoint has NO authentication
+// of any kind, because IC defines no auth contract for daemon status. Any
+// address that is not loopback publishes this provider's audit response
+// timings, content-hash-failure history, and RAM pressure state to
+// everyone who can reach the host. On the isolated, no-uplink demo rig
+// that is an acceptable trade for real observability. On any network with
+// an uplink it is not, and nothing here enforces the difference — the
+// caller does, via an explicit opt-in flag the operator has to type.
+func StartDaemonMetricsServerOn(addr string) (*http.Server, <-chan error) {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 
 	srv := &http.Server{
-		Addr:    daemonStatusAddr,
+		Addr:    addr,
 		Handler: mux,
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errCh <- fmt.Errorf("metrics: daemon status server on %s: %w", daemonStatusAddr, err)
+			errCh <- fmt.Errorf("metrics: daemon status server on %s: %w", addr, err)
 			return
 		}
 		errCh <- nil
