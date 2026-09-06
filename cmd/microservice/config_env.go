@@ -56,6 +56,16 @@ type startupConfig struct {
 	// genuine incident waiting to happen in production.
 	OtpDeliveryLogPath string
 
+	// ExposePrometheusMetrics (M18 Stage 3): VYOMANAUT_EXPOSE_METRICS=1
+	// serves an UNAUTHENTICATED GET /metrics — see
+	// api.RouterConfig.ExposePrometheusMetrics's own doc comment for
+	// exactly which coordinator-side series that unlocks and why it
+	// defaults false. Not demo-mode-gated the way OtpDeliveryLogPath is:
+	// production has no equivalent secret-leakage concern an OTP log has
+	// (repair/scoring/escrow series, not credentials), but it is still
+	// unauthenticated, so it is opt-in everywhere, not just outside demo.
+	ExposePrometheusMetrics bool
+
 	// DepartureThresholdOverride (M17-E Session 17.7.1, ADR-084 §D-4): Go
 	// duration syntax (e.g. "90s"), from --departure-threshold or
 	// VYOMANAUT_DEPARTURE_THRESHOLD. Empty (the default) leaves
@@ -160,7 +170,8 @@ func loadStartupConfigFromEnv() startupConfig {
 		HTTPListenAddr: httpListenAddr,
 		P2PListenAddr:  os.Getenv("VYOMANAUT_P2P_LISTEN_ADDR"), // empty = outbound-only (HostConfig doc comment)
 
-		OtpDeliveryLogPath: os.Getenv("VYOMANAUT_OTP_DELIVERY_LOG"), // empty = NoopOtpSender (unchanged default)
+		OtpDeliveryLogPath:      os.Getenv("VYOMANAUT_OTP_DELIVERY_LOG"), // empty = NoopOtpSender (unchanged default)
+		ExposePrometheusMetrics: os.Getenv("VYOMANAUT_EXPOSE_METRICS") == "1",
 
 		// DepartureThresholdOverride: see this field's own doc comment.
 		// Empty leaves profile.DepartureThreshold untouched.
