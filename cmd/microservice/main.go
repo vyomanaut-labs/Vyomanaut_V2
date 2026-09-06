@@ -136,6 +136,7 @@ func main() {
 	modeFlag := flag.String("mode", "", "network profile: demo or prod (overrides VYOMANAUT_MODE)")
 	otpDeliveryLogFlag := flag.String("otp-delivery-log", "", "Path to a demo-mode OTP delivery log (overrides VYOMANAUT_OTP_DELIVERY_LOG). Empty = NoopOtpSender, no file. Demo mode only — ADR-084 D-3; fatal to set outside demo mode.")
 	departureThresholdFlag := flag.String("departure-threshold", "", "Override DepartureThreshold, Go duration syntax e.g. 90s (overrides VYOMANAUT_DEPARTURE_THRESHOLD). Empty leaves profile.DepartureThreshold unchanged. Demo mode only — ADR-084 D-4; fatal outside demo mode, and fatal below the derived safety floor even in demo mode.")
+	exposeMetricsFlag := flag.Bool("expose-metrics", false, "Serve an UNAUTHENTICATED GET /metrics with repair/audit/scoring/escrow/db-latency series (overrides VYOMANAUT_EXPOSE_METRICS=1). Off by default everywhere. Only appropriate on an isolated network with no uplink — see api.RouterConfig.ExposePrometheusMetrics.")
 	flag.Parse()
 
 	cfg := loadStartupConfigFromEnv()
@@ -146,6 +147,9 @@ func main() {
 	}
 	if *otpDeliveryLogFlag != "" {
 		cfg.OtpDeliveryLogPath = *otpDeliveryLogFlag
+	}
+	if *exposeMetricsFlag {
+		cfg.ExposePrometheusMetrics = true
 	}
 	if *departureThresholdFlag != "" {
 		cfg.DepartureThresholdOverride = *departureThresholdFlag
@@ -476,17 +480,18 @@ func runMicroservice(ctx context.Context, cfg startupConfig) (*app, error) {
 
 	// ── Step 8 ────────────────────────────────────────────────────────────
 	router := api.NewRouter(api.RouterConfig{
-		AdminAPIKey:        adminAPIKey,
-		DB:                 db,
-		JWTPublicKey:       jwtPub,
-		JWTPrivateKey:      jwtPriv,
-		JWTKeyID:           jwtKeyID,
-		OtpSender:          otpSender,
-		Readiness:          readinessEvaluator,
-		Profile:            profile,
-		PaymentProvider:    paymentProviderForRouter,
-		InFlightUploads:    api.NoInFlightUploadChecker{},
-		ClusterSecretCache: cache,
+		AdminAPIKey:             adminAPIKey,
+		DB:                      db,
+		JWTPublicKey:            jwtPub,
+		JWTPrivateKey:           jwtPriv,
+		JWTKeyID:                jwtKeyID,
+		OtpSender:               otpSender,
+		Readiness:               readinessEvaluator,
+		Profile:                 profile,
+		PaymentProvider:         paymentProviderForRouter,
+		InFlightUploads:         api.NoInFlightUploadChecker{},
+		ClusterSecretCache:      cache,
+		ExposePrometheusMetrics: cfg.ExposePrometheusMetrics,
 	})
 	httpServer := &http.Server{Addr: cfg.HTTPListenAddr, Handler: router}
 	a.httpServer = httpServer
@@ -595,6 +600,12 @@ func runMicroservice(ctx context.Context, cfg startupConfig) (*app, error) {
 
 	// ── Step 21 (added post-hoc, same session as Steps 19-20) ────────────
 	go runVettingGCLoop(ctx, db, vettingchunk.NewGCDelivery(db, p2pHost, jwtPriv))
+
+	// [Added, M18 Stage 3] Erases real chunks that `client rm` staged
+	// PENDING_DELETION. Same delivery mechanism, same protocol, same
+	// provider set — see runOwnerDeletionGCLoop for why this is a separate
+	// loop rather than an extra query inside the vetting one.
+	go runOwnerDeletionGCLoop(ctx, db, vettingchunk.NewGCDelivery(db, p2pHost, jwtPriv))
 
 	// ── Step 22 (added post-hoc — M17 CLI debugging session; resolves the
 	// build blocker found live: mv_owner_escrow_balance/
