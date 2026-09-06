@@ -226,13 +226,35 @@ func firstNonLoopbackIPv4(addrs []net.Addr) (string, bool) {
 	return "", false
 }
 
-// advertiseMultiaddr builds the /ip4/<host>/tcp/<port>/p2p/<peerID>
-// multiaddr string this daemon publishes to the network. Pure and
-// deterministic: called from exactly two sites in main.go
-// (runProviderInstance's registration and heartbeat blocks), both passing
-// the SAME advertiseHost resolved once by resolveAdvertiseHost — see that
-// function's doc comment and main.go's F-D-4 comments at both call sites
-// for why a single shared source matters.
+// advertiseMultiaddr builds the multiaddr string this daemon publishes to
+// the network: /ip4/<host>/tcp/<port>/p2p/<peerID> when host is a literal
+// IPv4 address (every case to date — autodetection and every documented
+// --advertise-addr example are all raw IPs), or /dns4/<host>/tcp/<port>/p2p/<peerID>
+// when it is not.
+//
+// [Added, ADR-089] Before this session, host was always assumed to already
+// be a dotted-quad IPv4 address and always assembled into an /ip4/ segment
+// — correct for every case actually exercised (autodetection returns one
+// from net.Interfaces(); every prior guide's --advertise-addr example is a
+// literal IP too), but silently wrong the moment it is not: ParseMultiaddr
+// (internal/p2p/types.go) accepts /dns4/<host>/tcp/<port> as one of its
+// five supported forms, yet nothing in this file ever produced that form,
+// so passing a hostname to --advertise-addr — an overlay-mesh MagicDNS
+// name, for instance, rather than that mesh's own IP — built a malformed
+// /ip4/<hostname>/... string no dialer downstream would ever parse
+// successfully. Pure and deterministic, same single-call-site contract as
+// before: called from exactly two sites in main.go (runProviderInstance's
+// registration and heartbeat blocks), both passing the SAME advertiseHost
+// resolved once by resolveAdvertiseHost.
 func advertiseMultiaddr(host string, port int, peerID p2p.PeerID) string {
-	return fmt.Sprintf("/ip4/%s/tcp/%d/p2p/%s", host, port, peerID)
+	// ip.To4() rather than a bare ParseIP() != nil check: this package's
+	// transport is IPv4-only (doc.go), so a literal IPv6 address is exactly
+	// as unusable a "family" as a hostname would be — either way /ip4/
+	// would be a lie about the address's shape, and /dns4/ is the closer
+	// of the two available forms since IPv6 is not a hostname either.
+	family := "dns4"
+	if ip := net.ParseIP(host); ip != nil && ip.To4() != nil {
+		family = "ip4"
+	}
+	return fmt.Sprintf("/%s/%s/tcp/%d/p2p/%s", family, host, port, peerID)
 }
