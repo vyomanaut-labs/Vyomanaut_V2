@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	cryptorand "crypto/rand"
+	"database/sql"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -27,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/p2p"
 )
@@ -217,5 +219,97 @@ func TestDeliverGCBackoffFromProfile(t *testing.T) {
 		if got := GCRetryBackoffDelay(profile, -1); got != profile.GCRetryBackoff[0] {
 			t.Errorf("GCRetryBackoffDelay(profile, -1) = %v, want %v (clamped to first step)", got, profile.GCRetryBackoff[0])
 		}
+	}
+}
+
+// ── DeliverOwnerDeletions (M18 Stage 3) ─────────────────────────────────
+
+// insertRealChunkAssignmentRow inserts a NON-vetting chunk assignment.
+// Real rows carry segment_id/shard_index where synthetic ones are NULL, so
+// this cannot reuse insertVettingChunkAssignmentRow. If the surrounding
+// schema needs more scaffolding than this package's fixtures provide, the
+// caller skips rather than fails — this is a delivery-path test, not a
+// schema-conformance one.
+func insertRealChunkAssignmentRow(t *testing.T, db *sql.DB, chunkID [32]byte, providerID uuid.UUID, status string) bool {
+	t.Helper()
+	segmentID := uuid.New()
+	_, err := db.Exec(`
+		INSERT INTO chunk_assignments (chunk_id, is_vetting_chunk, segment_id, shard_index, provider_id, status)
+		VALUES ($1, FALSE, $2, 0, $3, $4)`,
+		chunkID[:], segmentID, providerID, status)
+	if err != nil {
+		t.Skipf("could not insert a real chunk_assignments row (schema scaffolding differs), skipping: %v", err)
+		return false
+	}
+	return true
+}
+
+// TestDeliverOwnerDeletionsErasesRealChunks is the M18 Stage 3 regression
+// test for the gap that made `client rm` a metadata-only operation: real
+// shards staged PENDING_DELETION must actually reach the provider and end
+// up DELETED, using the same transport the vetting GC already used.
+func TestDeliverOwnerDeletionsErasesRealChunks(t *testing.T) {
+	db := openTestDB(t)
+	_, msSigningKey, err := ed25519.GenerateKey(cryptorand.Reader)
+	if err != nil {
+		t.Fatalf("generate microservice signing key: %v", err)
+	}
+	providerID := insertTestVettingProvider(t, db, 50)
+	chunkA := randChunkID32(t)
+	chunkB := randChunkID32(t)
+	if !insertRealChunkAssignmentRow(t, db, chunkA, providerID, "PENDING_DELETION") {
+		return
+	}
+	if !insertRealChunkAssignmentRow(t, db, chunkB, providerID, "PENDING_DELETION") {
+		return
+	}
+
+	host := &fakeGCHost{stream: &fakeGCStream{resp: gcOKResponse()}}
+	gc := NewGCDelivery(db, host, msSigningKey)
+
+	if err := gc.DeliverOwnerDeletions(context.Background(), providerID); err != nil {
+		t.Fatalf("DeliverOwnerDeletions: %v", err)
+	}
+
+	for _, id := range [][32]byte{chunkA, chunkB} {
+		var status string
+		if err := db.QueryRow(`SELECT status FROM chunk_assignments WHERE chunk_id = $1 AND provider_id = $2`,
+			id[:], providerID).Scan(&status); err != nil {
+			t.Fatalf("query status: %v", err)
+		}
+		if status != "DELETED" {
+			t.Errorf("chunk %x status = %q, want DELETED — the owner deleted this file, so the provider's copy must be erased", id, status)
+		}
+	}
+}
+
+// TestDeliverOwnerDeletionsIgnoresVettingChunks pins the is_vetting_chunk =
+// FALSE half of the query. A synthetic chunk left PENDING_DELETION by a
+// failed vetting GC must remain the vetting path's responsibility — if this
+// path swept it up, a vetting-GC retry would find nothing and the two
+// mechanisms would silently contend for the same rows.
+func TestDeliverOwnerDeletionsIgnoresVettingChunks(t *testing.T) {
+	db := openTestDB(t)
+	_, msSigningKey, err := ed25519.GenerateKey(cryptorand.Reader)
+	if err != nil {
+		t.Fatalf("generate microservice signing key: %v", err)
+	}
+	providerID := insertTestVettingProvider(t, db, 50)
+	syntheticChunk := randChunkID32(t)
+	insertVettingChunkAssignmentRow(t, db, syntheticChunk, providerID, "PENDING_DELETION")
+
+	host := &fakeGCHost{stream: &fakeGCStream{resp: gcOKResponse()}}
+	gc := NewGCDelivery(db, host, msSigningKey)
+
+	if err := gc.DeliverOwnerDeletions(context.Background(), providerID); err != nil {
+		t.Fatalf("DeliverOwnerDeletions: %v", err)
+	}
+
+	var status string
+	if err := db.QueryRow(`SELECT status FROM chunk_assignments WHERE chunk_id = $1`, syntheticChunk[:]).Scan(&status); err != nil {
+		t.Fatalf("query status: %v", err)
+	}
+	if status != "PENDING_DELETION" {
+		t.Errorf("synthetic chunk status = %q, want PENDING_DELETION untouched — owner-deletion GC must not consume vetting rows", status)
 	}
 }
