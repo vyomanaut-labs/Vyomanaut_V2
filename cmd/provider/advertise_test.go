@@ -183,3 +183,38 @@ func TestRegistrationAndHeartbeatShareOneAdvertisedAddress(t *testing.T) {
 		t.Fatalf("advertiseMultiaddr(...) = %q, want %q", registrationAddr, want)
 	}
 }
+
+// TestAdvertiseMultiaddrEmitsDNS4ForNonIPHost — [Added, ADR-089].
+// advertiseMultiaddr previously always emitted an /ip4/ segment regardless
+// of host's actual shape, which was correct for every case exercised to
+// date (autodetection and every documented --advertise-addr example are
+// literal IPv4 addresses) but produced a multiaddr no dialer could ever
+// parse the moment host was a hostname instead — e.g. an overlay-mesh
+// MagicDNS name passed to --advertise-addr by mistake. Confirms both
+// branches, and that the /dns4/ output actually round-trips through
+// p2p.ParseMultiaddr (types.go), the real consumer on the dialing side —
+// not just a string-shape assertion against advertiseMultiaddr in
+// isolation.
+func TestAdvertiseMultiaddrEmitsDNS4ForNonIPHost(t *testing.T) {
+	peerID := p2p.PeerID("test-peer")
+
+	ipAddr := advertiseMultiaddr("203.0.113.9", 4001, peerID)
+	if want := "/ip4/203.0.113.9/tcp/4001/p2p/test-peer"; ipAddr != want {
+		t.Fatalf("advertiseMultiaddr(IPv4) = %q, want %q", ipAddr, want)
+	}
+
+	hostAddr := advertiseMultiaddr("mymachine.tailnet-name.ts.net", 4001, peerID)
+	if want := "/dns4/mymachine.tailnet-name.ts.net/tcp/4001/p2p/test-peer"; hostAddr != want {
+		t.Fatalf("advertiseMultiaddr(hostname) = %q, want %q", hostAddr, want)
+	}
+
+	for _, addr := range []string{ipAddr, hostAddr} {
+		parsed, err := p2p.ParseMultiaddr(addr)
+		if err != nil {
+			t.Fatalf("p2p.ParseMultiaddr(%q) failed: %v", addr, err)
+		}
+		if hostport, ok := parsed.HostPort(); !ok || hostport == "" {
+			t.Fatalf("p2p.ParseMultiaddr(%q).HostPort() = (%q, %v), want a dialable host:port", addr, hostport, ok)
+		}
+	}
+}
