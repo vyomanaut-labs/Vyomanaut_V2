@@ -277,3 +277,35 @@ func TestBearerRoutesRejectWrongRole(t *testing.T) {
 		})
 	}
 }
+
+// TestPrometheusMetricsRouteIsOptIn pins the security property of
+// RouterConfig.ExposePrometheusMetrics: /metrics is unauthenticated, so it
+// must be absent unless explicitly switched on. A regression that made it
+// unconditional would silently publish repair, scoring and escrow series on
+// every deployment, which is exactly the failure this flag exists to make
+// impossible by default.
+func TestPrometheusMetricsRouteIsOptIn(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		expose   bool
+		wantCode int
+	}{
+		{"absent by default", false, 404},
+		{"served when explicitly enabled", true, 200},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, _, _ := testRouterConfig(t)
+			cfg.ExposePrometheusMetrics = tc.expose
+			mux := NewRouter(cfg)
+
+			req := httptest.NewRequest("GET", "/metrics", nil)
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantCode {
+				t.Errorf("GET /metrics with ExposePrometheusMetrics=%v returned %d, want %d",
+					tc.expose, rec.Code, tc.wantCode)
+			}
+		})
+	}
+}

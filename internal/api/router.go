@@ -26,7 +26,9 @@ import (
 	"encoding/hex"
 	"net/http"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/audit"
+
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/payment"
 )
@@ -106,6 +108,25 @@ type RouterConfig struct {
 	OtpSender OtpSender // NoopOtpSender{} until real SMS delivery exists
 
 	Readiness *ReadinessEvaluator
+
+	// ExposePrometheusMetrics opts this microservice into serving an
+	// UNAUTHENTICATED GET /metrics on the same listener as everything else.
+	//
+	// [Added, M18 Stage 3] internal/metrics already registers eight
+	// coordinator-side collectors (repair_queue_depth,
+	// repair_jobs_completed_total, audit_challenges_issued_total,
+	// audit_results_total, scoring_provider_score,
+	// payment_escrow_events_total, cluster_replica_count,
+	// db_read_latency_seconds) which were updated on every run and then
+	// exposed nowhere, because no /metrics handler existed. Those are the
+	// timing series LTS research actually needs — provider-side metrics
+	// alone cannot answer "how long did repair take".
+	//
+	// Defaults false, and must stay false anywhere with an uplink: this
+	// endpoint has no auth, and repair/scoring/escrow series describe the
+	// network's internal state. True is correct on the isolated Stage 3
+	// rig and nowhere else.
+	ExposePrometheusMetrics bool
 
 	Profile         config.NetworkProfile // Phase 11.5+
 	PaymentProvider payment.PaymentProvider
@@ -237,6 +258,9 @@ func NewRouter(cfg RouterConfig) *http.ServeMux {
 	repairQueueHandler := NewRepairQueueHandler(cfg.DB)
 	manualRepairTriggerHandler := NewManualRepairTriggerHandler(cfg.DB, cfg.Profile)
 	auditStatsHandler := NewAuditStatsHandler(cfg.DB)
+	// [Added, M18 Stage 3] Backs the operator console's "Escrow & release"
+	// panel, which showed a labelled placeholder until this endpoint existed.
+	escrowSummaryHandler := NewEscrowSummaryHandler(cfg.DB)
 	vettingStatusHandler := NewVettingStatusHandler(cfg.DB)
 	vettingGCRetryHandler := NewVettingGCRetryHandler(cfg.DB)
 	// M17-E Session 17.6.1, ADR-084 §D-2a: the one new admin endpoint that
@@ -255,10 +279,20 @@ func NewRouter(cfg RouterConfig) *http.ServeMux {
 	mux.Handle("POST /api/v1/admin/repair/trigger", admin(manualRepairTriggerHandler.HandleTrigger)) // triggerRepair
 	mux.Handle("GET /api/v1/admin/providers", admin(adminProvidersHandler.HandleList))               // listAdminProviders
 	mux.Handle("GET /api/v1/admin/audit/stats", admin(auditStatsHandler.HandleStats))                // getAuditStats
-	mux.Handle("GET /api/v1/admin/vetting/status", admin(vettingStatusHandler.HandleStatus))         // getVettingStatus
-	mux.Handle("POST /api/v1/admin/vetting/gc/retry", admin(vettingGCRetryHandler.HandleRetry))      // retryVettingGC
-	mux.Handle("GET /api/v1/admin/file/{file_id}/shards", admin(shardsHandler.HandleShards))         // getFileShards
-	mux.Handle("GET /api/v1/admin/payout/preview", admin(payoutPreviewHandler.HandlePreview))        // getPayoutPreview (M17-E 17.6.3, ADR-084 addendum A)
+	mux.Handle("GET /api/v1/admin/escrow/summary", admin(escrowSummaryHandler.HandleSummary))        // getEscrowSummary
+
+	// [Added, M18 Stage 3] Opt-in, unauthenticated — see
+	// RouterConfig.ExposePrometheusMetrics for why it is off by default and
+	// which coordinator-side series it unlocks. Registered outside the
+	// /api/v1 tree deliberately: Prometheus convention is a bare /metrics,
+	// and this is not part of the versioned API contract.
+	if cfg.ExposePrometheusMetrics {
+		mux.Handle("GET /metrics", promhttp.Handler())
+	}
+	mux.Handle("GET /api/v1/admin/vetting/status", admin(vettingStatusHandler.HandleStatus))    // getVettingStatus
+	mux.Handle("POST /api/v1/admin/vetting/gc/retry", admin(vettingGCRetryHandler.HandleRetry)) // retryVettingGC
+	mux.Handle("GET /api/v1/admin/file/{file_id}/shards", admin(shardsHandler.HandleShards))    // getFileShards
+	mux.Handle("GET /api/v1/admin/payout/preview", admin(payoutPreviewHandler.HandlePreview))   // getPayoutPreview (M17-E 17.6.3, ADR-084 addendum A)
 
 	// ── Webhook: signature auth (IC §7), confirmed absent from OAS by design ──
 	mux.HandleFunc("POST /webhooks/razorpay", stub501)
