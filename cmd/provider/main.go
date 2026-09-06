@@ -105,7 +105,13 @@ type providerFlags struct {
 	// independent port scheme (simBasePort) and never reads this field.
 	// advertiseAddr is resolved into a concrete host once per instance by
 	// resolveAdvertiseHost (advertise.go); empty means autodetect.
-	listenPort    int
+	listenPort int
+	// metricsAddr overrides the daemon status/metrics bind address. Empty
+	// means the loopback default (127.0.0.1:9091). See
+	// internal/metrics.StartDaemonMetricsServerOn for the security note —
+	// this endpoint is unauthenticated, so any non-loopback value publishes
+	// this provider's audit timings and RAM state to the whole network.
+	metricsAddr   string
 	advertiseAddr string
 
 	simCount     int
@@ -180,6 +186,7 @@ func parseProviderFlags(args []string) providerFlags {
 	fs.StringVar(&f.simDataDir, "sim-data-dir", "/tmp/vyomanaut-sim", "Root directory for simulation instance data.")
 	fs.IntVar(&f.simASNCount, "sim-asn-count", defaultSimASNCount, "Synthetic ASN count for simulation mode.")
 	fs.StringVar(&f.registrationBearerToken, "registration-bearer-token", "", "OTP-verify-issued registration bearer token for POST /api/v1/provider/register (see providerFlags.registrationBearerToken doc comment for why this is supplied externally rather than obtained by this daemon). Empty = skip registration.")
+	fs.StringVar(&f.metricsAddr, "metrics-addr", "", "Bind address for the daemon status/metrics endpoint. Default (empty) is 127.0.0.1:9091, loopback-only. Set e.g. 0.0.0.0:9091 to let a Prometheus on ANOTHER machine scrape this provider — the endpoint has no authentication, so only do this on a trusted, isolated network (M18 Stage 3 rig).")
 	fs.IntVar(&f.jwksFetchMaxAttempts, "jwks-fetch-max-attempts", defaultJWKSFetchMaxAttempts, "Retry attempts for fetching the microservice's JWKS public key at startup (F-17E-11) before falling back to fail-closed (repair-download/vetting-gc verification rejected) for this process's entire lifetime. <= 0 also falls back to the same default — see providerFlags.jwksFetchMaxAttempts doc comment.")
 	simOnlyIndexFlag := fs.Int("sim-only-index", -1, "If >= 0, run only this one instance index from the --sim-count group as its own OS process, computing the exact same dataDir/port/ASN it would have under a full single-process run. -1 (default) runs every instance in this process (original --sim-count behavior). Added post-Session-16.2.1: --sim-count's goroutines-in-one-process design has no way to terminate a single simulated instance without killing all of them, which demo_timeline_test.go's departure-detection check needs (Session 16.1.1).")
 	_ = fs.Parse(args)
@@ -319,7 +326,14 @@ func runCmd(args []string) {
 	// listener for the whole process makes sense here; starting it once
 	// per simulated instance would just fail every listener after the
 	// first with an address-in-use error.
-	if _, errCh := metrics.StartDaemonMetricsServer(); errCh != nil {
+	metricsStarter := metrics.StartDaemonMetricsServer
+	if flags.metricsAddr != "" {
+		log.Printf("[STARTUP] daemon metrics endpoint bound to %s (NOT loopback) — this endpoint is unauthenticated; only appropriate on a trusted isolated network", flags.metricsAddr)
+		metricsStarter = func() (*http.Server, <-chan error) {
+			return metrics.StartDaemonMetricsServerOn(flags.metricsAddr)
+		}
+	}
+	if _, errCh := metricsStarter(); errCh != nil {
 		go func() {
 			if err := <-errCh; err != nil {
 				log.Printf("[STARTUP] daemon status/metrics server error: %v", err)
