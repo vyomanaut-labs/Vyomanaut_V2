@@ -48,15 +48,28 @@ cd -- "$REPO_ROOT"
 PROVIDERS=7
 STORAGE_GB=10
 ADVERTISE_ADDR=""
+ADVERTISE_HOST=""
 PORT=8080
 
 usage() {
   cat <<'EOF'
-Usage: scripts/demo/up.sh [--providers N] [--storage-gb N] [--advertise-addr ADDR] [--port PORT]
+Usage: scripts/demo/up.sh [--providers N] [--storage-gb N] [--advertise-addr ADDR]
+                           [--advertise-host HOST] [--port PORT]
 
   --providers N        Number of local normal-mode provider processes to start (default 7).
   --storage-gb N       Storage each local provider declares, in GB (default 10).
-  --advertise-addr ADDR  IPv4 address local providers advertise. Empty = autodetect (F-D-4).
+  --advertise-addr ADDR  IPv4 address the LOCAL REHEARSAL providers this script itself
+                          starts advertise. Empty = autodetect (F-D-4). Irrelevant to a
+                          real multi-machine rig, where every volunteer sets their OWN
+                          address via join.sh/join.ps1's own --advertise-addr instead.
+  --advertise-host HOST  The address THIS MACHINE (the coordinator) prints as
+                          MICROSERVICE_URL for every other machine to dial — e.g. an
+                          overlay-mesh IP (ADR-089). Empty = autodetect a LAN address
+                          (best-effort; wrong or absent on a machine with more than one
+                          active network interface, which an overlay mesh adapter plus a
+                          Wi-Fi/Ethernet adapter both being up always is). ALWAYS pass
+                          this explicitly outside a single-NIC machine — see ADR-089 and
+                          guides/operator_and_client_guide.md.
   --port PORT          Microservice HTTP port (default 8080).
 EOF
 }
@@ -66,6 +79,7 @@ while [[ $# -gt 0 ]]; do
     --providers) PROVIDERS="$2"; shift 2 ;;
     --storage-gb) STORAGE_GB="$2"; shift 2 ;;
     --advertise-addr) ADVERTISE_ADDR="$2"; shift 2 ;;
+    --advertise-host) ADVERTISE_HOST="$2"; shift 2 ;;
     --port) PORT="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown flag: $1" >&2; usage; exit 2 ;;
@@ -150,20 +164,47 @@ VYOMANAUT_HTTP_LISTEN_ADDR=":$PORT" \
 MS_PID=$!
 echo "$MS_PID" >> "$PID_FILE"
 
-# ── detect a LAN-reachable address for the URL join.sh's volunteer needs ──
-# Best-effort only: `ip route get` is Linux-specific and may be absent.
-# Falling back to 127.0.0.1 with a warning matches this codebase's own
-# established convention (advertise.go's resolveAdvertiseHost) rather than
-# inventing a new fallback shape.
+# ── decide the address the URL join.sh's volunteer needs ──────────────────
+# [Changed, ADR-089] Three sources, in order, matching advertise.go's own
+# explicit-beats-autodetect-beats-fallback shape (resolveAdvertiseHost):
+#   1. --advertise-host, if given — the operator's choice always wins
+#      outright and autodetection is not attempted at all. Required on any
+#      machine running an overlay-mesh client (Tailscale/ZeroTier/etc.):
+#      autodetection below has no way to prefer a mesh adapter over a
+#      simultaneously-active Wi-Fi/Ethernet adapter, and picking the wrong
+#      one is silent until the first volunteer tries to connect.
+#   2. autodetection (detect_lan_ip) — best-effort, single-adapter LAN case.
+#   3. 127.0.0.1 with a loud warning, exactly as before.
+#
+# detect_lan_ip itself previously shelled out to `ip route get`, which does
+# not exist on macOS — it silently returned empty on the exact machine
+# (Karma's Mac) most likely to run this script as the coordinator, and
+# every run fell straight to the 127.0.0.1 warning. Added a macOS/BSD
+# branch using `route` + `ipconfig getifaddr`, the standard macOS idiom for
+# "what is my default-route interface's IPv4 address" (there is no `ip`
+# command on macOS to begin with). Still best-effort only, and still
+# irrelevant once --advertise-host is passed.
 detect_lan_ip() {
   if command -v ip >/dev/null 2>&1; then
     ip route get 1.1.1.1 2>/dev/null | awk '/src/ {for (i=1;i<=NF;i++) if ($i=="src") print $(i+1)}' | head -n1
+    return
+  fi
+  if command -v route >/dev/null 2>&1 && command -v ipconfig >/dev/null 2>&1; then
+    local iface
+    iface="$(route -n get default 2>/dev/null | awk '/interface:/ {print $2}')"
+    if [[ -n "$iface" ]]; then
+      ipconfig getifaddr "$iface" 2>/dev/null
+    fi
   fi
 }
-LAN_IP="$(detect_lan_ip || true)"
-if [[ -z "$LAN_IP" ]]; then
-  log "warning: could not autodetect a LAN IP; join.sh's URL below defaults to 127.0.0.1 (unreachable from another desktop) — pass one explicitly if you have volunteers on other machines"
-  LAN_IP="127.0.0.1"
+if [[ -n "$ADVERTISE_HOST" ]]; then
+  LAN_IP="$ADVERTISE_HOST"
+else
+  LAN_IP="$(detect_lan_ip || true)"
+  if [[ -z "$LAN_IP" ]]; then
+    log "warning: could not autodetect a LAN IP; join.sh's URL below defaults to 127.0.0.1 (unreachable from another desktop) — pass --advertise-host explicitly (ADR-089) if you have volunteers on other machines"
+    LAN_IP="127.0.0.1"
+  fi
 fi
 MICROSERVICE_URL="http://$LAN_IP:$PORT"
 
