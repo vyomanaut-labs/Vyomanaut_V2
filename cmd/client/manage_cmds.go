@@ -216,7 +216,23 @@ func dispatchRm(args []string, stdin io.Reader, out, errOut io.Writer) int {
 	if result.AlreadyDeleted {
 		fprintln(out, "Already deleted.")
 	} else {
-		fprintf(out, "Deleted. %d provider(s) notified, %d pending.\n", result.ProvidersNotified, result.ProvidersPending)
+		// [Changed, M18 Stage 3] Was: "Deleted. N provider(s) notified, M
+		// pending." That was inaccurate in both halves. Nothing is notified
+		// synchronously — this call only stages chunk_assignments as
+		// PENDING_DELETION — and the server's own "notified" figure is a
+		// last_heartbeat_ts recency proxy, not a count of providers that
+		// were actually contacted, as its own doc comment concedes.
+		//
+		// Erasure is real now (runOwnerDeletionGCLoop, added this session),
+		// but it is asynchronous and best-effort: a provider that is
+		// offline at this moment keeps its shards until it is reachable
+		// again. Saying so plainly is the whole point — the previous
+		// wording implied a completed distributed delete that had not
+		// happened and, before this session, never would.
+		fprintf(out, "Deleted. %d shard assignment(s) staged for erasure across %d provider(s).\n",
+			result.AssignmentsMarked, result.ProvidersNotified+result.ProvidersPending)
+		fprintln(out, "  Providers erase their copies when the coordinator next reaches them;")
+		fprintln(out, "  any that are offline right now are retried until they return.")
 	}
 	return 0
 }
