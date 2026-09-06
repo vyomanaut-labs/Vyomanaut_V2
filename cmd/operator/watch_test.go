@@ -53,6 +53,15 @@ func newFakeAdminServer(t *testing.T, cfg fakeAdminServer) *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(vettingStatusAdminResponse{})
 	})
+	// [Added, M18 Stage 3] Sixth fan-out endpoint. Without this the mux
+	// 404s and every snapshot test fails on a fetch_errors entry — which is
+	// the console correctly reporting a partial failure, not a product bug.
+	mux.HandleFunc("/api/v1/admin/escrow/summary", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(escrowSummaryAdminResponse{
+			ChargedPaise: 10947, DepositedPaise: 1000000, ReleasedPaise: 0, HeldPaise: 10947,
+		})
+	})
 	return httptest.NewServer(mux)
 }
 
