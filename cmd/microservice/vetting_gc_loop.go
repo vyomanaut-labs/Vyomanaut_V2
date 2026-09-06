@@ -101,3 +101,84 @@ WHERE p.status = 'ACTIVE'
 		}
 	}
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// M18 Stage 3 — owner-deletion GC
+// ═══════════════════════════════════════════════════════════════════════
+
+// runOwnerDeletionGCLoop blocks until ctx is cancelled, erasing REAL
+// (non-vetting) chunks that a data owner deleted via `client rm` from the
+// providers still holding them.
+//
+// [Added, M18 Stage 3] Before this loop, `client rm` was a metadata-only
+// operation: it set chunk_assignments.status = 'PENDING_DELETION' and
+// files.status = 'DELETED', and nothing ever acted on those rows. A
+// volunteer who lent a machine kept every shard of a deleted file on their
+// own disk forever. That is now genuinely erased.
+//
+// Shares vettingGCPollInterval with the vetting loop deliberately: both are
+// best-effort background delivery over the same protocol to the same set of
+// providers, and giving them independent cadences would mean two tunables
+// where the reasoning for the value is identical.
+func runOwnerDeletionGCLoop(ctx context.Context, db *sql.DB, gc vettingchunk.GCDelivery) {
+	ticker := time.NewTicker(vettingGCPollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			deliverOwnerDeletionsForPendingProviders(ctx, db, gc)
+		}
+	}
+}
+
+// deliverOwnerDeletionsForPendingProviders finds every provider holding at
+// least one real chunk staged PENDING_DELETION and calls
+// DeliverOwnerDeletions for each.
+//
+// Note it does NOT filter on p.status = 'ACTIVE', unlike its vetting
+// sibling. A DEPARTED or VETTING provider that still physically holds a
+// deleted owner's shards should still be told to erase them if it is
+// reachable — the owner's deletion intent does not depend on the provider's
+// standing in the network. Unreachable providers simply fail the connect
+// and are retried on a later tick, which is the same contract the vetting
+// path already has.
+func deliverOwnerDeletionsForPendingProviders(ctx context.Context, db *sql.DB, gc vettingchunk.GCDelivery) {
+	const query = `
+SELECT DISTINCT provider_id
+FROM chunk_assignments
+WHERE is_vetting_chunk = FALSE
+  AND status = 'PENDING_DELETION'`
+
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		log.Printf("[owner-deletion-gc] load providers with pending deletions: %v", err)
+		return
+	}
+
+	var providerIDs []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if scanErr := rows.Scan(&id); scanErr != nil {
+			log.Printf("[owner-deletion-gc] scan provider_id: %v", scanErr)
+			continue
+		}
+		providerIDs = append(providerIDs, id)
+	}
+	closeErr := rows.Close()
+	if err := rows.Err(); err != nil {
+		log.Printf("[owner-deletion-gc] iterate providers: %v", err)
+		return
+	}
+	if closeErr != nil {
+		log.Printf("[owner-deletion-gc] close providers query: %v", closeErr)
+	}
+
+	for _, providerID := range providerIDs {
+		if err := gc.DeliverOwnerDeletions(ctx, providerID); err != nil {
+			log.Printf("[owner-deletion-gc][%s] DeliverOwnerDeletions: %v", providerID, err)
+		}
+	}
+}
