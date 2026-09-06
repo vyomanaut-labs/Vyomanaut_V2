@@ -1,0 +1,39 @@
+# Prometheus + Grafana for the Stage 3 rig. Runs on DESK-00 alongside the
+# existing Postgres compose file — deliberately a SEPARATE file so demo
+# teardown (`docker compose -f deployments/dev/... down -v`) does not
+# destroy collected metrics, which are the whole point of running it.
+#
+#   docker compose -f deployments/observability/docker-compose.yml up -d
+#
+# Grafana: http://localhost:3000  (admin / admin on first login)
+# Prometheus: http://localhost:9090
+services:
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      # 30d so a rig run stays queryable well after the machines are gone.
+      - '--storage.tsdb.retention.time=30d'
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    depends_on:
+      - prometheus
+
+volumes:
+  prometheus-data:
+  grafana-data:
