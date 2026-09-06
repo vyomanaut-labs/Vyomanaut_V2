@@ -498,18 +498,28 @@ const auditTimeoutAlertPct = 5
 // 6. Escrow & release
 // ═══════════════════════════════════════════════════════════════════════
 
-// renderEscrow — charged/released paise and the per-provider split have no
-// live data source in this session: no admin endpoint exposes escrow
-// balances yet (mv_owner_escrow_balance/mv_provider_escrow_balance exist
-// in the schema, DM §7, but nothing refreshes them, and NO_ADDITIONAL_ROUTES
-// forbids this session from adding one), and Session 17.6.3's own `operator
-// payout` snapshot — the data source ADR-084's panel table names — does
-// not exist yet. formatPaise(0) is shown rather than a blank string
-// specifically so the formatter itself, and its column alignment, are
-// visibly exercised now; the dimmed line beneath says plainly that the
-// number is not live. The next-tick countdowns ARE real: both intervals
-// come straight from profile fields with no other data needed.
-func renderEscrow(profile config.NetworkProfile) string {
+// renderEscrow shows the network's escrow position: what data owners have
+// been charged, what has actually been released to providers, and what is
+// held in between.
+//
+// [Changed, M18 Stage 3] These were hardcoded formatPaise(0) with a literal
+// "(placeholder)" label, because at the time no admin endpoint exposed
+// escrow totals and that session was forbidden from adding one. GET
+// /api/v1/admin/escrow/summary now exists and sums the two append-only
+// ledgers (owner_escrow_events, escrow_events) directly, so these are real.
+//
+// summary may still be nil — that endpoint is one of six fanned out per
+// refresh and any one may fail independently without blanking the console
+// (watchSnapshot.FetchErrors). A nil summary renders an explicit
+// "unavailable" line rather than ₹0.00, because showing a zero balance for
+// a failed fetch would be a fabricated number, which is exactly what the
+// old placeholder label existed to avoid claiming.
+//
+// The held figure is the one worth narrating: charged money does not become
+// provider money immediately, it sits across EscrowHoldWindow first. A
+// reader seeing charged > 0 with released still 0 is looking at the escrow
+// model working, not at a stalled payout.
+func renderEscrow(profile config.NetworkProfile, summary *escrowSummaryAdminResponse) string {
 	const title = "Escrow & release"
 
 	nextCharge, nextRelease := "\u2014", "\u2014"
@@ -520,18 +530,21 @@ func renderEscrow(profile config.NetworkProfile) string {
 		nextRelease = roundDuration(profile.ReleaseComputationInterval)
 	}
 
-	// [Trimmed, Session 18.1.3] The full explanation (F-18-4's own fix,
-	// pointing at `operator payout` for real numbers) moved to the '?'
-	// legend. The word "(placeholder)" stays attached directly to each
-	// value line rather than following it into the legend — the one fact
-	// that must never be a click or a keypress away is that ₹0.00 here is
-	// not a real balance, and a reader who never opens the legend must
-	// still see that on the line itself.
-	lines := []string{
-		fmt.Sprintf("charged paise:  %s (placeholder)", formatPaise(0)),
-		fmt.Sprintf("released paise: %s (placeholder)", formatPaise(0)),
-		fmt.Sprintf("next charge tick in %s, next release tick in %s", nextCharge, nextRelease),
+	var lines []string
+	if summary == nil {
+		lines = []string{
+			"charged:  unavailable (escrow endpoint did not respond this refresh)",
+			"released: unavailable",
+			"held:     unavailable",
+		}
+	} else {
+		lines = []string{
+			fmt.Sprintf("charged:  %s   of %s deposited", formatPaise(summary.ChargedPaise), formatPaise(summary.DepositedPaise)),
+			fmt.Sprintf("released: %s   to providers", formatPaise(summary.ReleasedPaise)),
+			fmt.Sprintf("held:     %s   accrued, not yet released", formatPaise(summary.HeldPaise)),
+		}
 	}
+	lines = append(lines, fmt.Sprintf("next charge tick in %s, next release tick in %s", nextCharge, nextRelease))
 
 	return wrapPanelNeutral(title, strings.Join(lines, "\n"))
 }
