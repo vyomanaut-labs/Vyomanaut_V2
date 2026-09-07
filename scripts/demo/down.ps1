@@ -29,35 +29,32 @@ $pids = Get-Content $PidFile | Where-Object { $_.Trim() -ne "" }
 # up.ps1, so reversing the file's line order stops them before it.
 [array]::Reverse($pids)
 
+# [Changed — confirmed, not just flagged, this session] The previous version
+# of this script attempted CloseMainWindow() here as a "graceful" first
+# step, with its own comment already admitting it was unconfirmed and
+# needed a real Windows rig to check. Now checked, against Microsoft's own
+# documented behavior (Process.CloseMainWindow: "returns false if the
+# associated process does not have a main window"): every process this
+# script can ever encounter is one up.ps1 itself started, and up.ps1 starts
+# every one of them with -WindowStyle Hidden plus redirected
+# stdout/stderr — neither has a GUI window to send a close message to, so
+# CloseMainWindow() was returning false and doing nothing on every single
+# call, every time, unconditionally. The 6-second "grace period" that
+# followed it was therefore pure wasted wait on Windows specifically —
+# down.sh's SIGTERM genuinely reaches cmd/microservice's own signal
+# handler on macOS/Linux; this script's equivalent attempt never had a
+# mechanism to reach anything. Going straight to Stop-Process -Force:
+# still a real, unconditional teardown (that part was never in question —
+# only the pretense of a grace period before it was), just without paying
+# 6 seconds for an attempt that could not have worked. If a real graceful
+# stop is ever wanted here, it needs a P/Invoke GenerateConsoleCtrlEvent
+# helper (no built-in PowerShell equivalent exists) — out of scope for
+# this fix.
 foreach ($pidStr in $pids) {
     $procId = [int]$pidStr
     $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
     if ($proc) {
-        # [Flagged] Windows has no direct scriptable equivalent to POSIX
-        # SIGTERM for an arbitrary console process short of a native
-        # GenerateConsoleCtrlEvent call, which PowerShell does not expose
-        # without a compiled helper. CloseMainWindow() is a best-effort
-        # attempt at the same "ask nicely first" shutdown down.sh's SIGTERM
-        # step performs — it is NOT confirmed equivalent to how
-        # cmd/microservice/main.go's own signal.Notify(os.Interrupt,
-        # syscall.SIGTERM) behaves under a Windows console-control event,
-        # only exercised and confirmed by Karma on an actual Windows rig.
-        # Stop-Process -Force below is the mechanism this script actually
-        # relies on for a guaranteed teardown either way.
-        Write-Log "stopping pid $procId (graceful close attempt)"
-        $proc.CloseMainWindow() | Out-Null
-    }
-}
-
-# Give every process a real chance at a clean shutdown (the microservice's
-# own shutdownTimeout is 5s, cmd/microservice/main.go) before escalating.
-Start-Sleep -Seconds 6
-
-foreach ($pidStr in $pids) {
-    $procId = [int]$pidStr
-    $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
-    if ($proc) {
-        Write-Log "pid $procId still alive — forcing stop"
+        Write-Log "stopping pid $procId (force)"
         Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
     }
 }
