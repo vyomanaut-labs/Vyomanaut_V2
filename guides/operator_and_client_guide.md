@@ -138,10 +138,26 @@ volunteer (§5.3).
 
 ## 4. Get the code and verify the build
 
-```
+```bash
 cd ~
 git clone https://github.com/vyomanaut-labs/Vyomanaut_V2.git
 cd Vyomanaut_V2
+```
+
+Next for **macOS** set up the CGO flags (not for windows):
+
+```bash
+export CGO_CFLAGS="-I$HOME/rocksdb/include"
+export CGO_LDFLAGS="-L$HOME/rocksdb/lib -L$(brew --prefix)/lib -L$(brew --prefix snappy)/lib \
+  -Wl,-rpath,$HOME/rocksdb/lib -Wl,-rpath,$(brew --prefix)/lib -Wl,-rpath,$(brew --prefix snappy)/lib \
+  -lrocksdb -lstdc++ -lm -lz -lbz2 -lsnappy -llz4 -lzstd"
+export DYLD_LIBRARY_PATH="$HOME/rocksdb/lib:$(brew --prefix)/lib:$(brew --prefix snappy)/lib:$DYLD_LIBRARY_PATH"
+
+```
+
+Then test everything working well:
+
+```bash
 go vet ./...
 go build ./...
 ```
@@ -151,13 +167,30 @@ Once this is clean, you already know what `$MSURL` will be — `http://<your mes
 network is actually up (§5), so they can start `provider_guide.md`'s §2–§5 (mesh through
 join) in parallel with yours.
 
+Inside the terminal share the two export:
+**macOS / Linux:**
+
+```bash
+export MSURL="http://100.126.233.20:8080"
+export MY_IP="100.126.233.20"
+```
+
+For windows:
+**Windows (PowerShell 7):**
+
+```pwsh
+$env:MSURL = "http://100.126.233.20:8080"
+$env:MyIp = "100.126.233.20:8080"
+```
+
 ---
 
 ## 5. Start the network
 
 ### 5.1 Postgres — once, not before every retry
 
-```
+```bash
+docker compose -f deployments/dev/docker-compose.yml down -v
 docker compose -f deployments/dev/docker-compose.yml up -d postgres
 ```
 
@@ -167,13 +200,7 @@ on every single invocation (`up.sh`'s own Postgres-reset step), so tearing the c
 itself down and recreating it before every retry is redundant work that also adds a real
 race: a freshly-recreated container needs a moment before Postgres inside it is actually
 accepting connections, and `up.sh`/`up.ps1` don't wait for that, only for the *microservice*
-they start afterward to come up. Only reach for the heavier reset below if you want a
-genuinely fresh container — a new day's session, or if something seems actually corrupted:
-
-```
-docker compose -f deployments/dev/docker-compose.yml down -v
-docker compose -f deployments/dev/docker-compose.yml up -d postgres
-```
+they start afterward to come up.
 
 **Postgres holds metadata only** — who the providers are, which chunk went where, the
 ledger. It never sees chunk contents; every shard lives on its own provider's local disk.
@@ -186,14 +213,17 @@ frequent than, the Postgres container above) — skipping it is the single most 
 of "database is being accessed by other users" or a hung port 8080 on the next attempt:
 
 **macOS / Linux:**
+
 ```bash
 scripts/demo/down.sh
 scripts/demo/up.sh --providers 0 --advertise-host "$MY_IP"
 ```
+
 **Windows (PowerShell 7):**
+
 ```powershell
 .\scripts\demo\down.ps1
-.\scripts\demo\up.ps1 -Providers 0 -AdvertiseHost $MyIp
+.\scripts\demo\up.ps1 -Providers 0 -AdvertiseHost $env:MyIp
 ```
 
 **`--providers 0` / `-Providers 0`** — resets the database (see §5.1 — this happens inside
@@ -222,47 +252,21 @@ their own guide while you continue.
 
 ---
 
-## 6. Providers join
-
-Give each volunteer your coordinator address and a phone number to use
-(`+919790000001`, `+919790000002`, …). They run `join.sh` / `join.ps1` per their guide,
-passing **their own** mesh address as `--advertise-addr` / `-AdvertiseAddr`.
-
-When one asks for their code, in a terminal on your machine:
-
-**macOS / Linux:**
-```bash
-source /tmp/vyomanaut-demo/env
-"$BIN_DIR/operator" otp --mode=demo --otp-delivery-log="$OTP_LOG" "+919790000001"
-```
-**Windows (PowerShell 7):**
-```powershell
-. $env:TEMP\vyomanaut-demo\env.ps1
-& "$env:BIN_DIR\operator.exe" otp --mode=demo --otp-delivery-log=$env:OTP_LOG +919790000001
-```
-
-**Flags before the phone number, always.** The flag parser stops at the first non-flag
-argument — put the number first and every flag after it is silently ignored. On Windows,
-note the leading `. ` (dot, space) when loading `env.ps1` — PowerShell's equivalent of
-`source`.
-
-**Bring volunteers up one at a time**, confirming each appears on the console before
-starting the next.
-
----
-
-## 7. The console
+## 6. The console
 
 In its own window, left running. This is the one place this guide shows the env file's
 actual variable names (`$MICROSERVICE_URL`/`$ADMIN_API_KEY`) instead of the `$MSURL`/`$KEY`
 shorthand used elsewhere — same values either way:
 
 **macOS / Linux:**
+
 ```bash
 source /tmp/vyomanaut-demo/env
 "$BIN_DIR/operator" watch --mode=demo --microservice-url="$MICROSERVICE_URL" --admin-api-key="$ADMIN_API_KEY"
 ```
+
 **Windows (PowerShell 7):**
+
 ```powershell
 . $env:TEMP\vyomanaut-demo\env.ps1
 & "$env:BIN_DIR\operator.exe" watch --mode=demo --microservice-url=$env:MICROSERVICE_URL --admin-api-key=$env:ADMIN_API_KEY
@@ -283,6 +287,7 @@ Expect **10–12 minutes** after the last machine joins — uploads genuinely re
 `ACTIVE` providers, not merely five registered, and the console's own countdown is accurate.
 
 Two panels worth knowing before anyone asks:
+
 - **Escrow & release** — charged, released, and **held** (accrued but not yet released).
   Charged above zero with released still zero is the hold window working, not a stalled
   payout. `unavailable` means one refresh failed and will retry — not a zero balance.
@@ -290,6 +295,38 @@ Two panels worth knowing before anyone asks:
   cap is enforced but never has to reject anything in this demo profile. In production these
   come from real routing data and the cap does real work; the `?` legend says this on
   screen.
+
+---
+
+## 7. Providers join
+
+Give each volunteer your coordinator address and a phone number to use
+(`+919790000001`, `+919790000002`, …). They run `join.sh` / `join.ps1` per their guide,
+passing **their own** mesh address as `--advertise-addr` / `-AdvertiseAddr`.
+
+When one asks for their code, in a terminal on your machine:
+
+**macOS / Linux:**
+
+```bash
+source /tmp/vyomanaut-demo/env
+"$BIN_DIR/operator" otp --mode=demo --otp-delivery-log="$OTP_LOG" "+91<phone>"
+```
+
+**Windows (PowerShell 7):**
+
+```powershell
+. $env:TEMP\vyomanaut-demo\env.ps1
+& "$env:BIN_DIR\operator.exe" otp --mode=demo --otp-delivery-log=$env:OTP_LOG +91<phone>
+```
+
+**Flags before the phone number, always.** The flag parser stops at the first non-flag
+argument — put the number first and every flag after it is silently ignored. On Windows,
+note the leading `. ` (dot, space) when loading `env.ps1` — PowerShell's equivalent of
+`source`.
+
+**Bring volunteers up one at a time**, confirming each appears on the console before
+starting the next.
 
 ---
 
@@ -309,20 +346,24 @@ $env:OWNER_DIR = "$env:USERPROFILE\.vyomanaut-owner"
 ```
 
 **Register** — writes down the 24-word mnemonic shown once:
-```
+
+```bash
 client register --mode=demo --microservice-url=$MSURL --data-dir=$OWNER_DIR
 ```
 
 **Fund and check:**
-```
+
+```bash
 client deposit --mode=demo --microservice-url=$MSURL --data-dir=$OWNER_DIR --amount-paise=1000000
 client balance --mode=demo --microservice-url=$MSURL --data-dir=$OWNER_DIR
 ```
 
 **Upload** — use a **plain text file** (`README.md` from the repo is ideal):
-```
+
+```bash
 client upload --mode=demo --microservice-url=$MSURL --data-dir=$OWNER_DIR README.md
 ```
+
 Save the file ID it prints.
 
 > **Why text, not video.** The confidentiality demo compares the entropy of the original
