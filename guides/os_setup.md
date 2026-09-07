@@ -1,8 +1,8 @@
 # OS Guide — preparing your desktop for Vyomanaut demo network
 
-## The Windows Guide
+## The Windows Guide for 'Storage Providers'
 
-Start with looking for the package installer:
+Start with looking for your package installer:
 
 ```bash
 winget --version
@@ -37,70 +37,76 @@ go version
 
 > If not present visit <https://go.dev/dl/>
 > Install go1.26.2.windows-amd64.msi Installer Windows x86-64 59MB 84826eca833548bb2beabe7429052eaaec18faa902fde723898d906b42e59a73
+> Open pwsh
 
-```bash
-wsl --version
-
-// If not installed then
-wsl --install
-
-// Docker needs WSL 2.1.5
-wsl --update
-```
-
-```bash
-docker --version
-
-// Look for Docker version 29.x.x
-docker compose version
-
-// Visit docker desktop download and install for amd64
-// Restart the computer once finished setting up
-```
+Next we install gcc
+It is required to for the go tests to run on the system and needed to compile the C++ tests to .exe and make windows execute it
 
 ```bash
 gcc --version 
+```
 
-// Look for 15.x.x
-// If absent, download MSYS2
-// After downloading open the specific MSYS2 UCRT64 - Universal C runtime
-// gcc is needed to compile the C++ tests to .exe and make windows execute it
+> Look for 15.x.x
+> If absent, download MSYS2
+> After downloading open the specific: "MSYS2 UCRT64" - Universal C runtime
 
+Inside MSYS2 UCRT64:
+
+```bash
 pacman -Syu
+```
 
-// The terminal closes the again run
+> Press Y when prompted
+> The shell closes by itself 
+> Open it again from the Windows icon and inside it run once again
+
+```bash
 pacman -Syu
+```
 
-// Install the 64bit GCC
+Then:
+
+```bash
 pacman -S mingw-w64-ucrt-x86_64-gcc
 ```
 
+> Now we set the path for the installation
+> Click the windows icon
+> Right click PWSH and run as administrator
+
+Inside pwsh (administrator)
+
 ```bash
-// Run PWSH as administrator
-[Environment]::SetEnvironmentVariable(
-    "Path",
-    [Environment]::GetEnvironmentVariable("Path", "Machine") + ";C:\msys64\ucrt64\bin",
-    "Machine"
-)
+$machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
 
-// close it and in new terminal 
-where.exe gcc
-
-// expect: C:\msys64\ucrt64\bin\gcc.exe
+if ($machinePath -notlike "*C:\msys64\ucrt64\bin*") {
+    [Environment]::SetEnvironmentVariable(
+        "Path",
+        "$machinePath;C:\msys64\ucrt64\bin",
+        "Machine"
+    )
+}
 ```
+
+> close it and in new a new pwsh
+
+```bash
+where.exe gcc
+```
+
+> expect: C:\msys64\ucrt64\bin\gcc.exe
+> then try
 
 ```bash
 gcc --version
 gcc -dumpmachine
-
-// expect x86_64-w64-mingw32
 ```
 
-```bash
-// If you get -> C:\MinGW\bin\gcc.exe
-// Means it is already installed
+> expect x86_64-w64-mingw32
+> **NOTE:** If you get -> C:\MinGW\bin\gcc.exe. It means gcc is already installed
+> As administrator you will have to fix that
 
-// Run as administrator 
+```bash
 $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
 
 $machinePath = ($machinePath -split ';' |
@@ -146,6 +152,4 @@ go mod tidy
 go vet ./...
 go build ./...
 go test -count=1 -p 1 ./...
-go build -tags integration ./scripts/test/...
-go vet -tags integration ./scripts/test/...
 ```
