@@ -155,20 +155,35 @@ join) in parallel with yours.
 
 ## 5. Start the network
 
-### 5.1 Postgres
+### 5.1 Postgres — once, not before every retry
+
+```
+docker compose -f deployments/dev/docker-compose.yml up -d postgres
+```
+
+**Run this once, the first time, and leave the container running** for the rest of the
+session — `up.sh`/`up.ps1` already run a full `DROP DATABASE` / `CREATE DATABASE` themselves
+on every single invocation (`up.sh`'s own Postgres-reset step), so tearing the container
+itself down and recreating it before every retry is redundant work that also adds a real
+race: a freshly-recreated container needs a moment before Postgres inside it is actually
+accepting connections, and `up.sh`/`up.ps1` don't wait for that, only for the *microservice*
+they start afterward to come up. Only reach for the heavier reset below if you want a
+genuinely fresh container — a new day's session, or if something seems actually corrupted:
 
 ```
 docker compose -f deployments/dev/docker-compose.yml down -v
 docker compose -f deployments/dev/docker-compose.yml up -d postgres
 ```
-`down -v` wipes any previous run. **Postgres holds metadata only** — who the providers are,
-which chunk went where, the ledger. It never sees chunk contents; every shard lives on its
-own provider's local disk. Only this machine needs Docker at all.
+
+**Postgres holds metadata only** — who the providers are, which chunk went where, the
+ledger. It never sees chunk contents; every shard lives on its own provider's local disk.
+Only this machine needs Docker at all.
 
 ### 5.2 Coordinator
 
-Always tear down a previous run first, or you'll get "database is being accessed by other
-users" from processes still holding connections:
+Always tear down the previous *coordinator* run first (this is separate from, and much more
+frequent than, the Postgres container above) — skipping it is the single most common cause
+of "database is being accessed by other users" or a hung port 8080 on the next attempt:
 
 **macOS / Linux:**
 ```bash
@@ -181,8 +196,10 @@ scripts/demo/up.sh --providers 0 --advertise-host "$MY_IP"
 .\scripts\demo\up.ps1 -Providers 0 -AdvertiseHost $MyIp
 ```
 
-**`--providers 0` / `-Providers 0`** — resets the database, builds all four binaries,
-starts the coordinator, and stops, leaving every provider slot for a real volunteer machine.
+**`--providers 0` / `-Providers 0`** — resets the database (see §5.1 — this happens inside
+`up.sh`/`up.ps1` itself, every time, regardless of what you did with Docker), builds all
+four binaries, starts the coordinator, and stops, leaving every provider slot for a real
+volunteer machine.
 
 **`--advertise-host` / `-AdvertiseHost` is new for this run, and matters.** Without it the
 script tries to guess which of your network adapters is the right one to advertise — and on
@@ -342,8 +359,11 @@ No graceful shutdown, no warning to the network.
 
 **Politely:** that volunteer runs `provider depart` (their guide, §8).
 
-The coordinator starts with a 90-second departure threshold, so expect detection within
-about that. Watch the Repair panel go from `queued: 0` to a departure-triggered job and then
+The coordinator starts with a 180-second departure threshold (raised from an original 90s
+after Stage 3's first real run — see ADR-089's addendum: over a real internet path rather
+than a LAN, two consecutive stalled heartbeat attempts could plausibly approach 90s on
+their own, which risked a live, connected provider being wrongly marked departed), so
+expect detection within about three minutes, not instantly. Watch the Repair panel go from `queued: 0` to a departure-triggered job and then
 complete. Confirm where the rebuilt shard landed:
 ```
 operator shards --mode=demo --microservice-url=$MSURL --admin-api-key=$KEY <file_id>
@@ -468,6 +488,8 @@ actually want to discard collected data; that's the point of it being separate.
 | `microservice never became reachable` | Port 8080 still held | Same |
 | The URL `up.sh`/`up.ps1` prints is `127.0.0.1` | No `--advertise-host` / `-AdvertiseHost` passed, and autodetection guessed the wrong adapter | §5.2 — always pass your mesh IP explicitly |
 | Provider registered, nothing connects | Wrong advertised address, or Wi-Fi power saving idled their adapter | Their guide §2 and §4; have them pass their mesh IP explicitly |
+| A provider likely was never touched but nobody remembers connecting it | Not stale — `up.sh`/`up.ps1` fully reset the database on every run (§5.1), so anything on the console is from *this* run. It's your own earlier attempt on that machine | Check its phone number against who's actually joined; harmless to leave, or `down` + restart for a clean console |
+| A provider registers (`PENDING_ONBOARDING` appears) but never becomes `ACTIVE`, eventually `DEPARTED` | Its `provider run` started without `--mode=demo` — defaults to PROD's 4-hour heartbeat interval against a coordinator enforcing demo's ~30-second one; a real bug found and fixed on `join.ps1` during Stage 3's first run (was already fixed on `join.sh` from an earlier session — the two had silently diverged) | Confirm your `join.sh`/`join.ps1` is current; re-`join` that machine |
 | Every signed request rejected | Clock skew > 2 minutes on some machine | Resync that machine's clock |
 | `NETWORK_NOT_READY` on upload | Fewer than five `ACTIVE` providers | Wait — the countdown is accurate |
 | `INSUFFICIENT_PROVIDER_CAPACITY` | Registered but still `VETTING` | Different, stricter gate — also just wait |

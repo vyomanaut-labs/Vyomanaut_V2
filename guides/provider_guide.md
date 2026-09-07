@@ -325,6 +325,7 @@ that may no longer exist, and just quietly never appears on the new console.
 | Daemon rejoins as an old provider you didn't expect | Stale `~/.vyomanaut` from a previous run | §11 |
 | Operator can't scrape your metrics | Bound to loopback by default, or bound to `0.0.0.0` | §10 — use your own mesh address, not `0.0.0.0` |
 | Chunks didn't disappear after the owner deleted a file | Delivery is asynchronous; your daemon must be running and reachable | Leave it running, wait a cycle, re-check |
+| You register fine but the operator says you never send a heartbeat, and eventually you show `DEPARTED` | A now-fixed bug: `join.ps1`'s `run` step was missing a required flag, so a Windows provider silently ran with a ~4-hour heartbeat interval instead of demo's ~30-second one | Make sure your checkout is current, then just re-run the join command (§5) |
 | Your machine looks like it "departed" but nobody touched it | Wi-Fi/sleep power saving idled the adapter | §4 — turn both off for the whole session |
 
 If you're stuck, the useful things to tell the operator are: your Peer ID, your mesh
