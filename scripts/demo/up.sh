@@ -262,8 +262,36 @@ PGDATABASE=$PGDATABASE
 EOF
 
 # ── start N local normal-mode providers (rehearsal fleet, F-D-3) ──────────
+#
+# [Fixed — found live on a real Mac, Stage 3 first multi-machine run]
+# This loop was `for i in $(seq 1 "$PROVIDERS")`. On GNU coreutils
+# `seq 1 0` prints nothing, so --providers 0 correctly started no local
+# fleet. On BSD seq — which is what macOS ships, and macOS is the
+# coordinator platform — `seq 1 0` prints "1" then "0": the man page
+# states plainly "When first is larger than last, the default incr is -1",
+# so it counts DOWN instead of producing an empty range.
+#
+# Confirmed directly from the run log, not inferred: `up.sh --providers 0`
+# printed "onboarding local provider 1/0" followed by "onboarding local
+# provider 0/0" — $i took the values 1 and 0, exactly as BSD seq
+# documents. Two phantom providers were onboarded on a run that asked for
+# none.
+#
+# The i=0 iteration is the worse of the two: PROVIDER_PORT below is
+# $((NEXT_PORT + i - 1)) = 8081 + 0 - 1 = 8080, which is the
+# MICROSERVICE's own port. That provider's `run` therefore died instantly
+# on a bind conflict, never heartbeat, and was marked DEPARTED — while the
+# i=1 phantom bound 8081 fine and vetted through to ACTIVE. That is the
+# complete explanation for the "two providers I never connected, one
+# always exits and the other turns active" symptom seen on every run so
+# far, including the +919790000000 DEPARTED / +919790000001 ACTIVE pair.
+#
+# A bash arithmetic for-loop, not seq: it has no BSD/GNU divergence, and
+# a zero or negative count simply never enters the body. Bash 3.2
+# (macOS's system /bin/bash) supports this form — this file already
+# depends on 3.2-compatible constructs throughout for the same reason.
 NEXT_PORT=$((PORT + 1))
-for i in $(seq 1 "$PROVIDERS"); do
+for (( i=1; i<=PROVIDERS; i++ )); do
   PHONE="$(printf '+9197%08d' "$((90000000 + i))")"
   PROVIDER_DATA_DIR="$DATA_DIR/provider-$i"
   PROVIDER_PORT=$((NEXT_PORT + i - 1))
