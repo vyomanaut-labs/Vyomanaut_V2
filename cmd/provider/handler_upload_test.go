@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -60,14 +62,75 @@ func startTestChunkWriter(t *testing.T, store storage.ChunkStore) chan chunkWrit
 
 func newTestChunkStore(t *testing.T) storage.ChunkStore {
 	t.Helper()
-	store, err := storage.NewChunkStore(t.TempDir())
+	// [Changed — found live, real Windows run, `go test -race`]
+	// t.TempDir() previously backed this store directly, and its own
+	// baked-in RemoveAll cleanup (registered internally by the testing
+	// package, not something a caller can wrap or override) is what failed:
+	// "TempDir RemoveAll cleanup: unlinkat ...\badger: The directory is not
+	// empty." This is not this project's bug — it is documented upstream as
+	// an open, acknowledged category of issue: BadgerDB's own maintainers
+	// state plainly that they do not run their own test suite on Windows,
+	// and that mmap-backed file handles are the suspected cause ("mmap
+	// could be acting different on windows... I do see quite a few open
+	// issues on windows related to this" — dgraph-io/badger#1883). Windows,
+	// unlike Unix, refuses to delete a file with any outstanding memory
+	// mapping or open handle; if Badger's own Close() returns before the
+	// OS has actually released every mapped table file — plausible under
+	// `-race`, which measurably slows and reorders goroutine scheduling —
+	// an immediate RemoveAll can lose that race even though Close() itself
+	// reported no error. This engine is windows-only (engine_badger.go);
+	// the RocksDB path (engine_rocksdb.go, macOS/Linux) is not this
+	// mechanism and is not expected to share this failure mode.
+	//
+	// Fix: an independent directory (os.MkdirTemp, NOT nested under
+	// t.TempDir()'s own tree — nesting would still hand the identical
+	// subtree to the testing package's own single-attempt cleanup) plus
+	// our own t.Cleanup, which closes the store, gives Windows a moment to
+	// actually release the mapping (runtime.GC() — Badger's own mmap
+	// wrapper (Ristretto's z.MmapFile) unmaps via a finalizer on some
+	// paths, which only runs after a GC cycle collects the object, not
+	// synchronously at Close() — then a bounded exponential-backoff retry
+	// on RemoveAll. A leftover temp directory after every retry is logged,
+	// not failed: cleanup hygiene is not the correctness property this
+	// test exists to check, and Windows reclaims its own temp folder
+	// regardless.
+	//
+	// UNVERIFIED IN THIS FORM: no Windows machine or Windows-buildable
+	// BadgerDB was available to actually run this fix against — it is
+	// standard-library-only and syntax/vet-checked, but the real
+	// confirmation is the next `go test -race ./cmd/provider/...` run on
+	// real Windows hardware. If the same symptom recurs — here or in any
+	// of this package's other t.TempDir()-backed storage tests
+	// (depart_test.go, earnings_test.go, inspect_test.go, onboard_test.go,
+	// main_test.go's sim fleet) — this same pattern is the fix to apply
+	// there too; it was not applied blindly to all of them without a
+	// confirmed reproduction in each.
+	dir, err := os.MkdirTemp("", "vyomanaut-chunkstore-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	store, err := storage.NewChunkStore(dir)
 	if err != nil {
 		t.Fatalf("NewChunkStore: %v", err)
 	}
 	if err := store.RecoverFromCrash(); err != nil {
 		t.Fatalf("RecoverFromCrash: %v", err)
 	}
-	t.Cleanup(func() { _ = store.Close() })
+	t.Cleanup(func() {
+		_ = store.Close()
+		runtime.GC()
+		delay := 50 * time.Millisecond
+		for attempt := 0; attempt < 6; attempt++ {
+			if err := os.RemoveAll(dir); err == nil {
+				return
+			}
+			time.Sleep(delay)
+			delay *= 2
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			t.Logf("newTestChunkStore: leaving %s in place after Close (non-fatal, likely the Windows/Badger mmap-release race documented above): %v", dir, err)
+		}
+	})
 	return store
 }
 
