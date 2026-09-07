@@ -89,20 +89,23 @@ tailnet the operator invited you to.
 > NAT traversal here, not Vyomanaut's own networking — that piece of Vyomanaut is built but
 > not yet wired up.
 
-Confirm you're connected and get your own address — same command on every platform:
+Confirm you're connected and get your own address — same command on every platform
 
+Inside the terminal share the two export:
 **macOS / Linux:**
 
 ```bash
 MY_IP="$(tailscale ip -4)"
-echo "$MY_IP"
+export MY_IP=MY_IP
+export MSURL="http://100.126.233.20:8080"
 ```
 
 **Windows (PowerShell 7):**
 
 ```powershell
 $MyIp = (tailscale ip -4)
-$MyIp
+$env:MyIp = $MyIp
+$env:MSURL = "http://100.126.233.20:8080"
 ```
 
 You should see an address starting `100.`. **Write it down** — it's your `-AdvertiseAddr` /
@@ -116,7 +119,6 @@ you are not on the mesh yet.
 
 ```bash
 cd ~
-git clone https://github.com/vyomanaut-labs/Vyomanaut_V2.git
 cd Vyomanaut_V2
 ```
 
@@ -140,22 +142,6 @@ go build ./...
 
 Ask the operator for the coordinator's address — it will look like
 `http://100.101.102.5:8080`, their own mesh IP from §2 plus `:8080`. Save it:
-
-Inside the terminal export the two Mesh IPs:
-**macOS / Linux:**
-
-```bash
-export MSURL="http://100.126.233.20:8080"
-export MY_IP="100.126.233.20"
-```
-
-For windows:
-**Windows (PowerShell 7):**
-
-```pwsh
-$env:MSURL = "http://100.126.233.20:8080"
-$env:MyIp = "100.126.233.20"
-```
 
 ---
 

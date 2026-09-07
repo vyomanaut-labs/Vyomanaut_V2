@@ -119,15 +119,23 @@ Not covered here — confirm these are ready before starting, per-machine, ahead
 > isolation, and use static DHCP reservations so an address never changes mid-run. Nothing
 > else in this guide changes.
 
+Inside the terminal share the two export:
 **macOS / Linux:**
+
+**macOS / Linux:**
+
 ```bash
 MY_IP="$(tailscale ip -4)"
-echo "$MY_IP"
+export MY_IP=MY_IP
+export MSURL="http://100.126.233.20:8080"
 ```
+
 **Windows (PowerShell 7):**
+
 ```powershell
 $MyIp = (tailscale ip -4)
-$MyIp
+$env:MyIp = $MyIp
+$env:MSURL = "http://100.126.233.20:8080"
 ```
 
 Write this down. It's what you pass to `up.sh`/`up.ps1` in §5 instead of letting the script
@@ -138,10 +146,18 @@ volunteer (§5.3).
 
 ## 4. Get the code and verify the build
 
+**macOS / Linux:**
+
 ```bash
 cd ~
-git clone https://github.com/vyomanaut-labs/Vyomanaut_V2.git
 cd Vyomanaut_V2
+```
+
+**Windows (PowerShell 7):**
+
+```pwsh
+cd ~
+cd .\Vyomanaut_V2\
 ```
 
 Next for **macOS** set up the CGO flags (not for windows):
@@ -166,22 +182,6 @@ Once this is clean, you already know what `$MSURL` will be — `http://<your mes
 §3>:8080` — even before the network is running. Share that with your team as soon as the
 network is actually up (§5), so they can start `provider_guide.md`'s §2–§5 (mesh through
 join) in parallel with yours.
-
-Inside the terminal share the two export:
-**macOS / Linux:**
-
-```bash
-export MSURL="http://100.126.233.20:8080"
-export MY_IP="100.126.233.20"
-```
-
-For windows:
-**Windows (PowerShell 7):**
-
-```pwsh
-$env:MSURL = "http://100.126.233.20:8080"
-$env:MyIp = "100.126.233.20:8080"
-```
 
 ---
 
