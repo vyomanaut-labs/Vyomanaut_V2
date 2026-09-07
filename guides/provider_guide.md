@@ -92,11 +92,14 @@ tailnet the operator invited you to.
 Confirm you're connected and get your own address — same command on every platform:
 
 **macOS / Linux:**
+
 ```bash
 MY_IP="$(tailscale ip -4)"
 echo "$MY_IP"
 ```
+
 **Windows (PowerShell 7):**
+
 ```powershell
 $MyIp = (tailscale ip -4)
 $MyIp
@@ -111,34 +114,60 @@ you are not on the mesh yet.
 
 ## 3. Get the code, and get the coordinator's address
 
-**macOS / Linux:**
 ```bash
 cd ~
 git clone https://github.com/vyomanaut-labs/Vyomanaut_V2.git
 cd Vyomanaut_V2
 ```
-**Windows (PowerShell 7):**
-```powershell
-cd ~
-git clone https://github.com/vyomanaut-labs/Vyomanaut_V2.git
-cd Vyomanaut_V2
+
+Next for **macOS** set up the CGO flags (not for windows):
+
+```bash
+export CGO_CFLAGS="-I$HOME/rocksdb/include"
+export CGO_LDFLAGS="-L$HOME/rocksdb/lib -L$(brew --prefix)/lib -L$(brew --prefix snappy)/lib \
+  -Wl,-rpath,$HOME/rocksdb/lib -Wl,-rpath,$(brew --prefix)/lib -Wl,-rpath,$(brew --prefix snappy)/lib \
+  -lrocksdb -lstdc++ -lm -lz -lbz2 -lsnappy -llz4 -lzstd"
+export DYLD_LIBRARY_PATH="$HOME/rocksdb/lib:$(brew --prefix)/lib:$(brew --prefix snappy)/lib:$DYLD_LIBRARY_PATH"
+
+```
+
+Then test everything working well:
+
+```bash
+go vet ./...
+go build ./...
 ```
 
 Ask the operator for the coordinator's address — it will look like
 `http://100.101.102.5:8080`, their own mesh IP from §2 plus `:8080`. Save it:
 
-**macOS / Linux:** `MSURL="http://100.101.102.5:8080"` *(their real address, not this one)*
-**Windows:** `$MSURL = "http://100.101.102.5:8080"`
+Inside the terminal export the two Mesh IPs:
+**macOS / Linux:**
+
+```bash
+export MSURL="http://100.126.233.20:8080"
+export MY_IP="100.126.233.20"
+```
+
+For windows:
+**Windows (PowerShell 7):**
+
+```pwsh
+$env:MSURL = "http://100.126.233.20:8080"
+$env:MyIp = "100.126.233.20"
+```
 
 ---
 
 ## 4. Open your port
 
 **Windows** — as Administrator, once per machine:
+
 ```powershell
 New-NetFirewallRule -DisplayName "Vyomanaut provider" -Direction Inbound `
   -Protocol TCP -LocalPort 30303 -Action Allow -Profile Any
 ```
+
 You may also see a one-time popup, *"Do you want to allow public and private networks to
 access this app?"* — click **Allow**. Clicking Cancel makes your machine unreachable in a
 way that is hard to diagnose later.
@@ -159,12 +188,15 @@ You'll need your listen port (30303 unless the operator says otherwise), your ow
 address from §2, and the coordinator's address from §3.
 
 **macOS / Linux:**
+
 ```bash
 scripts/demo/join.sh "$MSURL" --listen-port 30303 --advertise-addr "$MY_IP" --data-dir ~/.vyomanaut
 ```
+
 **Windows (PowerShell 7):**
+
 ```powershell
-.\scripts\demo\join.ps1 $MSURL -ListenPort 30303 -AdvertiseAddr $MyIp -DataDir $env:USERPROFILE\.vyomanaut
+.\scripts\demo\join.ps1 $env:MSURL -ListenPort 30303 -AdvertiseAddr $env:MyIp -DataDir $env:USERPROFILE\.vyomanaut
 ```
 
 `-AdvertiseAddr` / `--advertise-addr` is **your own** mesh address from §2 — always pass it
@@ -208,10 +240,13 @@ Worth doing once you're `ACTIVE`. The storage engine holds an exclusive lock whi
 daemon runs, so **stop your daemon first** (Ctrl-C in its window), then:
 
 **macOS / Linux:**
+
 ```bash
 .vyomanaut-bin/provider inspect --data-dir=~/.vyomanaut --hex
 ```
+
 **Windows (PowerShell 7):**
+
 ```powershell
 & ".\.vyomanaut-bin\provider.exe" inspect --data-dir="$env:USERPROFILE\.vyomanaut" --hex
 ```
