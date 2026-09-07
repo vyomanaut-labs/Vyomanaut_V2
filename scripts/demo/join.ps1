@@ -62,7 +62,23 @@ $RegistrationRecord = Join-Path $DataDir "registration.json"
 if (Test-Path $RegistrationRecord) {
     Write-Log "found an existing registration under $DataDir — skipping onboard, going straight to run"
 } else {
-    $Phone = Read-Host "Your phone number, E.164 format (e.g. +919876500001)"
+    # [Added — parity gap found alongside the --mode=demo fix above]
+    # join.sh validates E.164 format here in a re-prompt loop before ever
+    # calling onboard; this script had no such loop — a mistyped number
+    # (missing +, wrong digit count) fell straight through to onboard.go's
+    # own validation, which does catch it, but only after this script had
+    # already printed onboarding instructions referencing the bad number,
+    # and the failure then terminated the whole script (`if ($LASTEXITCODE
+    # -ne 0) { throw ... }` below) rather than giving an immediate,
+    # specific re-prompt the way join.sh does. Not the heartbeat bug —
+    # this one just makes a fat-fingered phone number a harsher retry
+    # (re-run the whole script) instead of a same-terminal re-prompt.
+    do {
+        $Phone = Read-Host "Your phone number, E.164 format (e.g. +919876500001)"
+        if ($Phone -notmatch '^\+[0-9]{8,15}$') {
+            Write-Host "  not E.164 format (need a leading + then 8-15 digits) — try again." -ForegroundColor Yellow
+        }
+    } while ($Phone -notmatch '^\+[0-9]{8,15}$')
 
     Write-Log "onboarding — you'll be asked how much storage to share, then for the"
     Write-Log "6-digit code. Ask the network operator to read it back to you (they"
@@ -93,8 +109,28 @@ if (Test-Path $RegistrationRecord) {
     }
 }
 
+# [Fixed, ADR-089 follow-up — confirmed live against a real Windows provider,
+# Stage 3] `provider onboard` has no -mode-equivalent flag at all (a
+# one-shot HTTP registration call, mode-independent — see onboard.go's own
+# flag set), but `provider run` genuinely needs --mode=demo, and it was
+# missing here. Omitting it defaults this daemon to PROD's own
+# NetworkProfile (config/profiles.go: HeartbeatInterval 4h,
+# DepartureThreshold 72h) while heartbeating against a microservice
+# enforcing DEMO's much faster ones (30s heartbeat / 180s departure
+# threshold, ADR-089 addendum) — RunHeartbeat
+# (internal/p2p/heartbeat.go) starts its timer BEFORE the first send, so
+# under the wrong profile no heartbeat is sent for the first ~4 hours,
+# full stop. Observed symptom, exactly reproduced: the provider registers
+# (PENDING_ONBOARDING appears on the console — `onboard` succeeded, being
+# mode-independent) but never sends a heartbeat the server recognizes as
+# timely, and the departure detector eventually marks it DEPARTED, having
+# genuinely never heartbeat even once.
+# join.sh already carries this exact fix, with this same explanation, from
+# an earlier real-Mac run; it was never ported to this script until now —
+# the two scripts had silently diverged on a correctness-critical flag.
 $runArgs = @(
     "run",
+    "--mode=demo",
     "--microservice-url=$MicroserviceUrl",
     "--data-dir=$DataDir",
     "--declared-storage-gb=$DeclaredStorageGB",
