@@ -155,7 +155,24 @@ $ClusterSeed = New-RandomBase64 32
 $OtpLog = Join-Path $StateDir "otp.log"
 Set-Content -Path $OtpLog -Value ""
 
-Write-Log "starting microservice on port $Port (mode=demo, departure-threshold=90s)"
+# [Changed, ADR-089 addendum — Stage 3 first real run] departure-threshold
+# raised from 90s to 180s. Margin analysis against a real (not same-LAN)
+# link: heartbeatHTTPTimeout (internal/p2p/heartbeat.go) bounds one stalled
+# heartbeat POST at 15s, and RunHeartbeat does not retry within a cycle —
+# a fully-timed-out attempt is simply followed by the next jittered
+# ~30s+/-5s interval. Two consecutive failed attempts (a plausible cost of
+# one Tailscale relay reconnect or Wi-Fi blip, not a departure) can
+# therefore consume up to ~100s before a third attempt even starts, which
+# left only ~10s of margin under the old LAN-tuned 90s value -- a same-LAN
+# run never stresses this because a stalled attempt there is near-instant,
+# not 15s. 180s survives two consecutive full-timeout misses with room
+# for a third attempt to land before crossing the threshold, at the cost
+# of a genuine departure taking up to ~3 minutes to detect instead of
+# ~1.5 -- an acceptable trade for a scripted demo. Still demo-mode only
+# and still validated against departureThresholdFloor
+# (cmd/microservice/main.go) at startup; still far below DemoProfile's
+# own 10-minute default.
+Write-Log "starting microservice on port $Port (mode=demo, departure-threshold=180s)"
 # Start-Process has no -Environment parameter that accepts a hashtable —
 # the child process inherits the CURRENT process's environment instead, so
 # these are set directly on $env: here (this script's only purpose is to
@@ -173,7 +190,7 @@ $env:VYOMANAUT_CLUSTER_MASTER_SEED = $ClusterSeed
 $env:VYOMANAUT_HTTP_LISTEN_ADDR = ":$Port"
 $msLog = Join-Path $LogDir "microservice.log"
 $msProc = Start-Process -FilePath (Join-Path $BinDir "microservice.exe") `
-    -ArgumentList "--mode=demo", "--otp-delivery-log=$OtpLog", "--departure-threshold=90s" `
+    -ArgumentList "--mode=demo", "--otp-delivery-log=$OtpLog", "--departure-threshold=180s" `
     -RedirectStandardOutput $msLog -RedirectStandardError "$msLog.err" `
     -PassThru -WindowStyle Hidden
 Add-Content -Path $PidFile -Value $msProc.Id
