@@ -29,7 +29,43 @@ $PSVersionTable.PSVersion
 winget install --id Microsoft.PowerShell -e --source winget
 ```
 
-> Open a new window called pwsh 7.6.5
+> Open a new terminal called pwsh from the windows button
+> Check version
+
+```bash
+$PSVersionTable.PSVersion
+```
+
+> Then fix the path:
+
+```bash
+$profileDir = Split-Path $PROFILE
+
+New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
+
+$pathBlock = @'
+# --- Windows environment PATH ---
+$machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+$userPath    = [Environment]::GetEnvironmentVariable("Path", "User")
+
+$env:Path = "$machinePath;$userPath"
+# --- End Windows environment PATH ---
+'@
+
+if (-not (Test-Path $PROFILE)) {
+    New-Item -ItemType File -Path $PROFILE -Force | Out-Null
+}
+
+$profileContent = Get-Content $PROFILE -Raw -ErrorAction SilentlyContinue
+
+if ($profileContent -notmatch '# --- Windows environment PATH ---') {
+    Add-Content -Path $PROFILE -Value "`r`n$pathBlock"
+}
+```
+
+Close pwsh and from here onwards run every command inside it only
+
+> Now we install go for running the cloned code:
 
 ```bash
 go version
