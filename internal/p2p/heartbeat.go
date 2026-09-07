@@ -273,6 +273,24 @@ func doHeartbeat(ctx context.Context, cfg HeartbeatConfig) {
 	}
 	if status != http.StatusOK {
 		log.Printf("[heartbeat] microservice returned %d: %s", status, respBody)
+		// [Added — found live, Stage 3 first multi-machine run] A bare
+		// status dump is not enough for 401 specifically, because 401 here
+		// is almost never transient and the daemon cannot recover from it
+		// on its own: it means this provider's persisted registration no
+		// longer matches the coordinator it is talking to. The usual cause
+		// on a demo rig is simply that the coordinator was restarted —
+		// up.sh/up.ps1 do a full DROP DATABASE / CREATE DATABASE and mint a
+		// fresh signing seed on every run, so a provider that kept its old
+		// data directory is presenting a provider_id that no longer exists,
+		// signed by a key that no longer exists. Retrying forever cannot
+		// fix that; re-onboarding can. Without this line the operator sees
+		// only "invalid token" repeating every 30 seconds with no
+		// indication that the data directory is the thing to act on.
+		if status == http.StatusUnauthorized {
+			log.Printf("[heartbeat] 401 means this provider's saved registration does not match the coordinator. " +
+				"This is expected if the coordinator was restarted since this provider onboarded. " +
+				"Fix: stop this daemon (Ctrl-C), delete its data directory, and run the join script again to onboard fresh.")
+		}
 	}
 }
 
