@@ -151,7 +151,24 @@ CLUSTER_SEED="$(openssl rand -base64 32)"
 OTP_LOG="$STATE_DIR/otp.log"
 : > "$OTP_LOG"
 
-log "starting microservice on port $PORT (mode=demo, departure-threshold=90s)"
+# [Changed, ADR-089 addendum — Stage 3 first real run] departure-threshold
+# raised from 90s to 180s. Margin analysis against a real (not same-LAN)
+# link: heartbeatHTTPTimeout (internal/p2p/heartbeat.go) bounds one stalled
+# heartbeat POST at 15s, and RunHeartbeat does not retry within a cycle —
+# a fully-timed-out attempt is simply followed by the next jittered
+# ~30s±5s interval. Two consecutive failed attempts (a plausible cost of
+# one Tailscale relay reconnect or Wi-Fi blip, not a departure) can
+# therefore consume up to ~100s before a third attempt even starts, which
+# left only ~10s of margin under the old LAN-tuned 90s value — a same-LAN
+# run never stresses this because a stalled attempt there is near-instant,
+# not 15s. 180s survives two consecutive full-timeout misses with room
+# for a third attempt to land before crossing the threshold, at the cost
+# of a genuine departure taking up to ~3 minutes to detect instead of
+# ~1.5 — an acceptable trade for a scripted demo. Still demo-mode only and
+# still validated against departureThresholdFloor (cmd/microservice/
+# main.go) at startup; still far below DemoProfile's own 10-minute
+# default.
+log "starting microservice on port $PORT (mode=demo, departure-threshold=180s)"
 PGHOST="$PGHOST" PGPORT="$PGPORT" PGDATABASE="$PGDATABASE" \
 PGUSER=vyomanaut_app PGPASSWORD="$PGAPPPASSWORD" \
 PGMIGRATORUSER="$PGMIGRATORUSER" PGMIGRATORPASSWORD="$PGMIGRATORPASSWORD" \
@@ -159,7 +176,7 @@ VYOMANAUT_ADMIN_API_KEY="$ADMIN_API_KEY" \
 VYOMANAUT_MICROSERVICE_SIGNING_SEED="$SIGNING_SEED" \
 VYOMANAUT_CLUSTER_MASTER_SEED="$CLUSTER_SEED" \
 VYOMANAUT_HTTP_LISTEN_ADDR=":$PORT" \
-  "$BIN_DIR/microservice" --mode=demo --otp-delivery-log="$OTP_LOG" --departure-threshold=90s \
+  "$BIN_DIR/microservice" --mode=demo --otp-delivery-log="$OTP_LOG" --departure-threshold=180s \
   > "$LOG_DIR/microservice.log" 2>&1 &
 MS_PID=$!
 echo "$MS_PID" >> "$PID_FILE"
