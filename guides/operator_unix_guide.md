@@ -66,48 +66,54 @@ Turn off sleep for the duration:
 
 ## Part 2 — The private network
 
-Every machine talks over one private network called a tailnet. You own it, so you set it up
-first, before sending anyone their guide.
+Every machine talks over one private virtual network — a ZeroTier network. You own it, so
+you set it up first, before sending anyone their guide.
 
-### 2.1 Create it and invite everyone
+### 2.1 Create it
 
-> Sign in at <https://login.tailscale.com/> and create your tailnet
-> **Machines → Add device**, or use **Users → Invite** to send join links
-> Send a link to every teammate lending a machine
+> Sign in at <https://my.zerotier.com/> (a free account is enough) and click
+> **Create A Network**
+> Copy the 16-character **network ID** it generates — e.g. `b103a835d24e3e5f`. That string
+> is the *only* thing you send teammates. No invite links, no email, no accounts for them.
+> Leave the network set to **Private** (the default) so you control who joins.
 
 ### 2.2 Install and register your own machine
 
 ```bash
-brew install --cask tailscale
-tailscale up
-tailscale ip -4
+brew install --cask zerotier-one
+sudo zerotier-cli join <network-id>
 ```
 
-> Expect an address starting with `100.` — write it down, this is your coordinator address
-
-### 2.3 Make auth keys ready in advance
-
-Do this now, not when someone is stuck.
-
-> Admin console → **Settings → Keys → Generate auth key**
-> Make it reusable, set an expiry that covers your demo day
-
-Some networks — college and office Wi-Fi especially — block the Tailscale login page. A
-teammate on such a network cannot sign in through a browser, but they can join with:
+> Then authorize yourself: Central → **Members**, tick the checkbox next to your own device
+> — yes, even the operator needs this. Then:
 
 ```bash
-tailscale up --auth-key=tskey-auth-xxxxxxxxxxxx
+zerotier-cli listnetworks
 ```
 
-Have two or three of these ready to hand out.
+> Expect an address starting with `10.` — write it down, this is your coordinator address.
+> The pattern changed from `100.` to `10.`, the role hasn't.
+
+### 2.3 Authorize each machine the moment it asks
+
+There's no equivalent of a pre-generated auth key to hand out in advance — instead, every
+teammate who runs `zerotier-cli join <network-id>` shows up in Central's **Members** list as
+**unauthorized** (grey, unticked). Nothing works for them until you tick that box.
+
+The good news: this replaces the old "campus Wi-Fi blocks the login page" problem entirely.
+Joining a ZeroTier network never opens a browser on the teammate's end — the only browser
+step in this whole flow is you, ticking checkboxes in Central. What campus firewalls *can*
+still block is the raw UDP ZeroTier prefers; when that happens the teammate's
+`zerotier-cli info` will show `TUNNELED` instead of `ONLINE` — that's an automatic TCP
+fallback, not a failure, and needs nothing from you.
 
 ### 2.4 Check who has actually joined
 
-> Admin console → **Machines**
+> Central → **Members**
 
-You should see every teammate's machine listed with a green dot and a `100.` address before
-you start. If someone is missing, fix that before going further — nothing else will work
-for them.
+You should see every teammate's machine listed, **Authorized**, with a `10.` address before
+you start. If someone is missing or still shows unauthorized, fix that before going further
+— nothing else will work for them.
 
 ---
 
@@ -117,7 +123,8 @@ for them.
 
 ```bash
 # ── set once per terminal ────────────────────────────────────────────────
-export MY_IP="$(tailscale ip -4)"
+export NETWORK_ID="b103a835d24e3e5f"   # your ZeroTier network ID
+export MY_IP="$(sudo zerotier-cli listnetworks | grep "$NETWORK_ID" | awk '{print $NF}' | cut -d'/' -f1)"
 
 export CGO_CFLAGS="-I$HOME/rocksdb/include"
 export CGO_LDFLAGS="-L$HOME/rocksdb/lib -L$(brew --prefix)/lib -L$(brew --prefix snappy)/lib \
@@ -149,7 +156,7 @@ source /tmp/vyomanaut-demo/env
 
 ```bash
 # ── set once per terminal ────────────────────────────────────────────────
-export MSURL="http://100.126.233.20:8080"   # the operator's address
+export MSURL="http://10.35.114.52:8080"   # the operator's address
 export OWNER_DIR="$HOME/.vyomanaut-owner"
 
 # ── identity and money ───────────────────────────────────────────────────
@@ -219,7 +226,8 @@ docker compose -f deployments/dev/docker-compose.yml up -d postgres
 ### 4.3 Start the coordinator
 
 ```bash
-export MY_IP="$(tailscale ip -4)"
+export NETWORK_ID="b103a835d24e3e5f"   # your ZeroTier network ID
+export MY_IP="$(sudo zerotier-cli listnetworks | grep "$NETWORK_ID" | awk '{print $NF}' | cut -d'/' -f1)"
 echo "$MY_IP"
 
 scripts/demo/down.sh
@@ -232,17 +240,17 @@ scripts/demo/up.sh --providers 0 --advertise-host "$MY_IP"
 > `--providers 0` means the coordinator starts alone, leaving every slot free for a real
 > machine to join. `--advertise-host` is what the others will dial — pass it explicitly,
 > always. Without it the script guesses which network card to publish, and on a machine
-> running Tailscale alongside ordinary Wi-Fi that guess is a coin flip.
+> running ZeroTier alongside ordinary Wi-Fi that guess is a coin flip.
 
 Save what it prints. **The admin key exists only on this machine and only for this run.**
 
 Sanity check the output before continuing:
 
 ```
-[up.sh] MICROSERVICE_URL = http://100.126.233.20:8080
+[up.sh] MICROSERVICE_URL = http://10.35.114.52:8080
 ```
 
-> It must be your `100.` address, not `127.0.0.1`.
+> It must be your `10.x` ZeroTier address, not `127.0.0.1`.
 > You should see **no** "onboarding local provider" lines at all with `--providers 0`.
 
 ### 4.4 Give everyone the address
@@ -250,7 +258,7 @@ Sanity check the output before continuing:
 Tell your teammates:
 
 ```
-http://<your 100. address>:8080
+http://<your 10.x ZeroTier address>:8080
 ```
 
 They can now start Part 4 of their own guide.
@@ -315,7 +323,7 @@ On the owner's machine, once the console says the network is ready.
 ### 6.1 Set up
 
 ```bash
-export MSURL="http://100.126.233.20:8080"    # the operator's real address
+export MSURL="http://10.35.114.52:8080"    # the operator's real address
 export OWNER_DIR="$HOME/.vyomanaut-owner"
 ```
 
@@ -449,7 +457,7 @@ rm -rf /tmp/vyomanaut-demo
 | --- | --- | --- |
 | `database is being accessed by other users` | Leftover processes from the last attempt | `down.sh` first, always |
 | `microservice never became reachable` | Port 8080 still held | Same |
-| The printed URL is `127.0.0.1` | `--advertise-host` not passed, autodetect picked the wrong card | 4.3 — pass your `100.` address |
+| The printed URL is `127.0.0.1` | `--advertise-host` not passed, autodetect picked the wrong card | 4.3 — pass your `10.x` ZeroTier address |
 | "onboarding local provider" appears despite `--providers 0` | Old copy of the start script | `git pull` and try again |
 | A teammate registers, then goes DEPARTED with `401 invalid token` on their side | They kept a data folder from before you restarted | They delete it and rejoin — their guide, Part 4 |
 | A teammate is never asked for a code | Same cause | Same fix |
@@ -460,7 +468,10 @@ rm -rf /tmp/vyomanaut-demo
 | A machine looks like it left but nobody touched it | That machine went to sleep | Their guide, sleep settings |
 | Every signed request rejected | A machine's clock is off by more than two minutes | Resync that machine's clock |
 | `rocksdb/c.h file not found` | Build flags not set in this terminal | 4.1 |
+| A teammate is stuck at `REQUESTING_CONFIGURATION` / `ACCESS_DENIED` | You haven't ticked their checkbox in Central yet | Members tab — authorize them, they don't need to do anything |
+| Two authorized machines never see each other in `zerotier-cli peers` | Both stuck relaying, or one daemon isn't actually running | Check `zerotier-cli info` on both — `TUNNELED` is fine, `OFFLINE` means restart that machine's service |
+| `$MY_IP` comes back empty | `NETWORK_ID` doesn't match, or you're not authorized on your own network | Recheck 2.2 — `zerotier-cli listnetworks` should show `OK`, not blank |
 
 > This demo runs over a private mesh network that handles the machine-to-machine
-> connectivity for us. If anyone asks: the connectivity layer is Tailscale's, the storage,
+> connectivity for us. If anyone asks: the connectivity layer is ZeroTier's, the storage,
 > repair, auditing and payment logic on top of it is ours.
