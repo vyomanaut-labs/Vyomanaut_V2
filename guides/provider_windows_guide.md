@@ -5,7 +5,8 @@ encrypted pieces of someone else's file and proves, on demand, that it still has
 
 You need two things from the operator. Ask for them when you get there:
 
-- the **coordinator address** — looks like `http://100.126.233.20:8080`
+- the **coordinator address** — looks like `http://10.35.114.52:8080` (a `10.x` address —
+  ZeroTier assigns these automatically once you join)
 - a **6-digit code** — only the first time you join
 
 > Your machine never sees a filename and never holds a readable copy of anything. What it
@@ -172,62 +173,70 @@ $machinePath += ';C:\msys64\ucrt64\bin'
 
 ## Part 2 — Joining the private network
 
-Every machine in this demo talks over one private network called a tailnet. Join it before
-anything else, or nothing will connect.
+Every machine in this demo talks over one private virtual network — a ZeroTier network. Join
+it before anything else, or nothing will connect.
 
-### 2.1 Accept the invite
+### 2.1 Get the network ID
 
-> The operator sends you a join link
-> Open it, sign in, accept
+> The operator gives you a 16-character **network ID**, like `b103a835d24e3e5f`
+> That's it — no invite link, no email, no sign-in. This one string is the only thing you need.
 
-### 2.2 Install Tailscale
-
-```pwsh
-winget install --id Tailscale.Tailscale -e --source winget
-```
-
-> Or download from <https://tailscale.com/download/windows>
-
-### 2.3 Log in and register this machine
+### 2.2 Install ZeroTier
 
 ```pwsh
-tailscale up
+winget install --id ZeroTier.ZeroTierOne -e --source winget
 ```
 
-> A browser window opens. Sign in with the same account you accepted the invite on.
-> Your machine now appears on the operator's device list.
+> Or download from <https://www.zerotier.com/download/>
+> A firewall/network-adapter permission prompt may appear during install — allow it.
+
+### 2.3 Join, then wait to be let in
+
+Open pwsh **as administrator** (zerotier-cli talks to a system service and needs elevation):
+
+```pwsh
+zerotier-cli join b103a835d24e3e5f
+```
+
+> This doesn't connect you yet — it just asks to join. The operator has to click a checkbox
+> in their ZeroTier Central console (**Members** tab) before you're actually let in. Tell
+> them your machine's ZeroTier address so they know which row to authorize:
+
+```pwsh
+zerotier-cli info
+```
+
+> The first field printed (e.g. `3568ddd9f9`) is your address. Send that, not your IP.
 
 ### 2.4 Get your address
 
 ```pwsh
-tailscale ip -4
+zerotier-cli listnetworks
 ```
 
-> Expect something starting with `100.`
-> **Write it down.** This is the single most important value in this guide.
+> Once authorized, expect a line ending in something like `10.35.114.94/24`.
+> **Write down the part before the `/`.** This is the single most important value in this
+> guide — it replaces what used to be a `100.` address.
+> Still says `REQUESTING_CONFIGURATION` or `ACCESS_DENIED`? You haven't been authorized in
+> Central yet — ping the operator, don't troubleshoot your own machine.
 
-### 2.5 If your network blocks the login
+### 2.5 If your network blocks things
 
-Common on college, office and hotel Wi-Fi.
+Common on college, office and hotel Wi-Fi. Unlike before, joining never opens a browser on
+your end, so there's no login page to get blocked. What campus firewalls typically block
+instead is the raw UDP port ZeroTier prefers.
 
 ```pwsh
-tailscale status
+zerotier-cli info
 ```
 
-- **The browser page won't load at all** — ask the operator for an auth key instead. They
-  generate one from their admin console. Then:
-
-  ```pwsh
-  tailscale up --auth-key=tskey-auth-xxxxxxxxxxxx
-  ```
-
-  This skips the browser entirely.
-
-- **`tailscale status` says `relay`, not `direct`** — that is fine. It means the network
-  blocked the fast path and Tailscale fell back to routing over standard web traffic.
-  Slower, still works.
-
-- **Nothing connects at all** — tether to a phone hotspot and try again. Tell the operator
+- **Status says `ONLINE`** — direct connection, ideal, nothing to do.
+- **Status says `TUNNELED`** — the network blocked the fast path and ZeroTier fell back to
+  a TCP relay automatically. That's fine, no action needed, just slower.
+- **Status says `OFFLINE`**, or `zerotier-cli` errors out entirely — the service itself isn't
+  reachable. Restart it (`Get-Service ZeroTierOneService | Restart-Service`, as
+  administrator) and check again after a minute.
+- **Still nothing connects** — tether to a phone hotspot and try again. Tell the operator
   either way.
 
 ---
@@ -239,8 +248,9 @@ first — everything else refers to them.
 
 ```pwsh
 # ── set once per terminal ────────────────────────────────────────────────
-$MyIp  = "100.105.176.94"              # yours, from `tailscale ip -4`
-$MSURL = "http://100.126.233.20:8080"  # the operator's, ask them
+$NetworkId = "b103a835d24e3e5f"        # the operator's ZeroTier network ID
+$MyIp  = "10.35.114.94"                # yours, from `zerotier-cli listnetworks`
+$MSURL = "http://10.35.114.52:8080"    # the operator's, ask them
 
 # ── join the network (this is the main one) ──────────────────────────────
 .\scripts\demo\join.ps1 $MSURL -ListenPort 30303 -AdvertiseAddr $MyIp -DataDir $env:USERPROFILE\.vyomanaut
@@ -313,12 +323,16 @@ later, when leaving is something we test on purpose.
 ### 4.5 Set your two values
 
 ```pwsh
-$MyIp  = (tailscale ip -4)
-$MSURL = "http://100.126.233.20:8080"   # the operator's real address
+$NetworkId = "b103a835d24e3e5f"   # the operator's ZeroTier network ID
+$MSURL     = "http://10.35.114.52:8080"   # the operator's real address
+
+$MyIp = ((zerotier-cli listnetworks) -split "`r?`n" |
+    Select-String $NetworkId).ToString().Split()[-1].Split('/')[0]
 $MyIp
 ```
 
-> Check `$MyIp` printed a `100.` address before continuing.
+> Check `$MyIp` printed a `10.` address before continuing. If it's blank, you're not
+> authorized yet — see 2.3.
 
 ### 4.6 Fresh start check — do not skip this
 
@@ -357,12 +371,12 @@ You should see, in order:
 
 ```
 [STARTUP][single] Peer ID: 12D3Koo...
-[STARTUP][single] advertising 100.105.176.94:30303 to the network
+[STARTUP][single] advertising 10.35.114.94:30303 to the network
 [STARTUP][single] Vyomanaut provider daemon ready
 ```
 
-> **Check the advertised address matches your own `100.` address.** If it doesn't, stop and
-> tell the operator.
+> **Check the advertised address matches your own `10.x` ZeroTier address.** If it doesn't,
+> stop and tell the operator.
 
 Then tell the operator you are up. They will confirm you appeared on their screen.
 
@@ -417,13 +431,16 @@ owner's file survives either way.
 | Join script never asks for a phone number or code | Same cause: you still have an old data folder | 4.6 |
 | `The term '...join.ps1' is not recognized` | Wrong folder | `cd ~\Vyomanaut_V2` first |
 | Script refuses to run, mentions version | You are in Windows PowerShell 5, not pwsh | 1.3 |
-| `tailscale ip -4` prints nothing | Not on the tailnet yet | Part 2 — stop and tell the operator |
+| `zerotier-cli listnetworks` shows `REQUESTING_CONFIGURATION` or `ACCESS_DENIED` | You haven't been authorized in ZeroTier Central yet | Send the operator your address from `zerotier-cli info`, ask them to authorize it — 2.3 |
+| `zerotier-cli listnetworks` prints nothing at all | Not joined | `zerotier-cli join <network-id>` — Part 2 |
+| `zerotier-cli info` shows `OFFLINE`, or the command errors out | The ZeroTier service isn't running | `Get-Service ZeroTierOneService \| Restart-Service` (as administrator) |
 | `bind: address already in use` | A provider is already running here | Close the other window, or use `-ListenPort 30304` |
-| Registered, but the operator sees nothing connect | Usually the wrong advertised address | Recheck 4.5 and 4.8 — pass your `100.` address explicitly |
+| Registered, but the operator sees nothing connect | Usually the wrong advertised address | Recheck 4.5 and 4.8 — pass your `10.x` ZeroTier address explicitly |
 | `connection refused` to the coordinator | Coordinator down, wrong address, or firewall | Recheck 4.3 and your `$MSURL`, then ask |
+| Two authorized machines never see each other in `zerotier-cli peers` | Both online but a firewall is blocking even the TCP relay | Check `zerotier-cli info` shows `TUNNELED` not `OFFLINE` on both ends; if `OFFLINE`, restart the service; if still stuck, try a phone hotspot |
 | Operator mentions `NETWORK_NOT_READY` | Not your problem — not enough machines yet | Wait |
 | You look like you left, but you didn't touch anything | The machine went to sleep | 4.4 |
 | Firewall popup | Expected, once | **Allow** |
 
-If you are stuck, send the operator: your Peer ID, your `100.` address, and the last five
-lines of your terminal.
+If you are stuck, send the operator: your Peer ID, your ZeroTier address (from
+`zerotier-cli info`), your `10.x` address, and the last five lines of your terminal.
