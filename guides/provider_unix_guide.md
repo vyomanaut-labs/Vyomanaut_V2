@@ -319,6 +319,7 @@ owner's file survives either way.
 | --- | --- | --- |
 | `401` / `invalid token`, repeating | Your saved membership is from an older run of the network | 4.5 — delete the data folder and join again |
 | Join script never asks for a phone number or code | Same cause: you still have an old data folder | 4.5 |
+| You registered fine (`PENDING_ONBOARDING` appeared), but the operator says you're never sending a heartbeat they'll accept, and your own log shows `microservice returned 400: ... "timestamp skew exceeds 5 minutes"` — you eventually show `DEPARTED` without ever leaving | Your machine's clock, not the network — it's off from the coordinator's by more than 5 minutes. `join.sh` now checks this itself before onboarding and will warn you if so; if you skipped past that warning or are on an older checkout, this is why | Resync via NTP (`sudo sntp -sS time.apple.com` on macOS, `sudo ntpdate pool.ntp.org` on Linux). If NTP is blocked on this network, set the clock manually instead: `curl -sI <coordinator URL>/.well-known/jwks.json` and read the `Date:` header for the coordinator's own clock, then set your machine to match and re-run join.sh (no need to delete your data folder — this isn't a stale-registration problem) |
 | `rocksdb/c.h file not found` | RocksDB flags not set in this terminal | 4.2 |
 | `ld: warning: duplicate -rpath` | Harmless noise from the flags | Ignore it |
 | `tailscale ip -4` prints nothing | Not on the tailnet yet | Part 2 — stop and tell the operator |
