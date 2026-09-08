@@ -58,6 +58,52 @@ if (-not (Test-Path $ProviderBin)) {
 $advertiseArgs = @()
 if ($AdvertiseAddr) { $advertiseArgs = @("--advertise-addr", $AdvertiseAddr) }
 
+# [Added — clock-skew preflight, evidence: a real college-lab desktop run
+# over ZeroTier where the join itself, the OTP exchange, and onboarding all
+# succeeded cleanly, yet every single heartbeat afterward came back
+# "400: timestamp skew exceeds 5 minutes" (internal/api/provider.go,
+# heartbeatTimestampSkew) until the provider was marked DEPARTED having
+# never actually left. None of onboard/OTP/join check timestamps at all —
+# only heartbeat (5 min, hardcoded) and the other provider-signed endpoints
+# repair-download/vetting-gc (2 min, NetworkProfile.AuthRequestFreshnessWindow,
+# ADR-036) do — so a clock problem is invisible through the entire happy
+# path and only shows up minutes later as an unexplained DEPARTED. This
+# checks against the coordinator's own HTTP `Date` response header from its
+# one genuinely unauthenticated endpoint (jwks.json) rather than external
+# NTP, deliberately: it is the exact clock every timestamp check downstream
+# is measured against, and it still works on networks that filter outbound
+# NTP (UDP 123) the same way this project has already seen campus Wi-Fi
+# filter other unexpected outbound traffic (see provider guide §2.5). A
+# probe failure just warns and lets the script continue unchanged.
+# [FLAGGED — logic only, not yet run against a live coordinator + real
+# clock-skewed Windows machine; confirm empirically before relying on it.]
+try {
+    $probe = Invoke-WebRequest -Uri "$MicroserviceUrl/.well-known/jwks.json" -UseBasicParsing -TimeoutSec 10
+    $dateHeader = $probe.Headers["Date"]
+    if ($dateHeader) {
+        $serverTime = [DateTime]::Parse(
+            $dateHeader,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal
+        )
+        $skewSeconds = [Math]::Abs(((Get-Date).ToUniversalTime() - $serverTime).TotalSeconds)
+        if ($skewSeconds -gt 120) {
+            Write-Host ""
+            Write-Host "[join.ps1] WARNING: this machine's clock is $([Math]::Round($skewSeconds))s off from the coordinator's." -ForegroundColor Yellow
+            Write-Host "[join.ps1] Past 120s, provider-signed requests (repair-download, vetting-gc) start getting rejected;" -ForegroundColor Yellow
+            Write-Host "[join.ps1] past 300s, EVERY heartbeat is rejected and you'll eventually show DEPARTED without ever leaving." -ForegroundColor Yellow
+            Write-Host "[join.ps1] Fix: as administrator, try 'w32tm /resync /force'." -ForegroundColor Yellow
+            Write-Host "[join.ps1] If this network blocks NTP, set the clock manually instead — as administrator:" -ForegroundColor Yellow
+            Write-Host "[join.ps1]   Set-Date -Date ([DateTime]::Parse('$($serverTime.ToString("o"))')).ToLocalTime()" -ForegroundColor Yellow
+            Write-Host ""
+            $proceed = Read-Host "Continue anyway? [y/N]"
+            if ($proceed -notmatch '^[Yy]') { exit 1 }
+        }
+    }
+} catch {
+    Write-Log "warning: could not preflight-check clock skew against the coordinator ($($_.Exception.Message)) — continuing anyway"
+}
+
 $RegistrationRecord = Join-Path $DataDir "registration.json"
 if (Test-Path $RegistrationRecord) {
     Write-Log "found an existing registration under $DataDir — skipping onboard, going straight to run"
