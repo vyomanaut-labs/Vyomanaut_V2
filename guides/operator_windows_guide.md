@@ -585,7 +585,8 @@ Remove-Item -Recurse -Force $env:TEMP\vyomanaut-demo
 | `NETWORK_NOT_READY` on upload | Fewer than five machines at `ACTIVE` | Wait — the countdown is accurate |
 | `INSUFFICIENT_PROVIDER_CAPACITY` | Machines registered but still in probation | Also just wait |
 | A machine looks like it left but nobody touched it | That machine went to sleep | Their guide, sleep settings |
-| Every signed request rejected | A machine's clock is off by more than two minutes | Resync that machine's clock |
+| A provider's repair-download or vetting-gc requests get rejected | That provider's clock is off by more than two minutes (`NetworkProfile.AuthRequestFreshnessWindow`, ADR-036) | Have them resync their clock — their guide's own troubleshooting section |
+| A provider's heartbeats get rejected with `400: "timestamp skew exceeds 5 minutes"`, and they eventually go `DEPARTED` without ever leaving | Same root cause, different (looser) threshold — heartbeat's own check is a separate, hardcoded 5 minutes (`internal/api/provider.go: heartbeatTimestampSkew`), not the 2-minute `AuthRequestFreshnessWindow` above | Their guide's own troubleshooting section — usually campus/lab Wi-Fi blocking outbound NTP |
 | Firewall popup | Expected, once | **Allow** |
 
 > This demo runs over a private mesh network that handles the machine-to-machine
