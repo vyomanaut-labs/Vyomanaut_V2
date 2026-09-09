@@ -86,17 +86,21 @@ if ($profileContent -notmatch '# --- Windows environment PATH ---') {
 }
 ```
 
-**Close pwsh. From here onwards run every command inside pwsh administrator only.**
-
+**Close pwsh. From here onwards run every command inside pwsh.**
+>**Always open pwsh as administrator to run ZeroTier and also mandatory for college desktops**
 > Windows PowerShell 5 will not work. The scripts refuse to run on it.
 
-Inside **pwsh administrator**
-right click to turn see the option
+Click Windows and type: pwsh
+Right click it to open **pwsh administrator**
 
 ### 1.4 Go
 
 ```pwsh
 go version
+
+// We specifically need go 1.26.2 only 
+// Visit the website and scroll to last to find it under archived as 
+// go1.26.2.windows-amd64.msi
 ```
 
 > If absent, visit <https://go.dev/dl/>
@@ -374,6 +378,8 @@ ls
 .\scripts\demo\join.ps1 $MSURL -ListenPort 30303 -AdvertiseAddr $MyIp -DataDir $env:USERPROFILE\.vyomanaut
 ```
 
+#### Possible errors
+
 If on the college Desktop then it might show a warning for the clock to be lagging behind
 
 Press **"N"** and reset the clock manually using the command that is printed:
@@ -382,11 +388,32 @@ Press **"N"** and reset the clock manually using the command that is printed:
 Set-Date -Date ....
 ```
 
-Then make sure to again run
+Then make sure to delete the bin folder again
 
 ```bash
 Remove-Item -Path ".\.vyomanaut-bin" -Recurse -Force
 ```
+
+Then run the join script again.
+
+If after entering your preferred storage it fails with the message:
+> Exception: C:\Users\ait\Vyomanaut_V2\scripts\demo\join.ps1:144
+Line |
+ 144 |      if ($LASTEXITCODE -ne 0) { throw "provider onboard failed" }
+     |                                 ~~~~~~~~~~~
+     | provider onboard failed
+
+Then do
+
+```bash
+ping 10.35.114.52
+```
+
+and share the result with the operator
+
+---
+
+What the join script does:
 
 The first run builds the provider, which takes a minute or two. Then it asks you three
 things:
@@ -403,7 +430,7 @@ Then the daemon starts and stays in the foreground.
 
 You should see, in order:
 
-```
+```bash
 [STARTUP][single] Peer ID: 12D3Koo...
 [STARTUP][single] advertising 10.35.114.94:30303 to the network
 [STARTUP][single] Vyomanaut provider daemon ready
