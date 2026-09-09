@@ -33,6 +33,11 @@ git --version
 ```
 
 > If absent, install from <https://git-scm.com/download/win>
+Or
+
+```bash
+winget install --id Git.Git -e --source winget
+```
 
 ### 1.3 PowerShell 7
 
@@ -81,9 +86,12 @@ if ($profileContent -notmatch '# --- Windows environment PATH ---') {
 }
 ```
 
-**Close pwsh. From here onwards run every command inside pwsh only.**
+**Close pwsh. From here onwards run every command inside pwsh administrator only.**
 
 > Windows PowerShell 5 will not work. The scripts refuse to run on it.
+
+Inside **pwsh administrator**
+right click to turn see the option
 
 ### 1.4 Go
 
@@ -348,10 +356,36 @@ Remove-Item -Recurse -Force "$env:USERPROFILE\.vyomanaut"
 > code step and the daemon then gets rejected on every heartbeat with `401 invalid token`.
 > Deleting the folder is the fix. When in doubt, delete it.
 
+Then remove ./vyomanaut-bin folder saving the log, so the run starts fresh
+
+```bash
+Remove-Item -Path ".\.vyomanaut-bin" -Recurse -Force
+```
+
+Print the files to recheck
+
+```bash
+ls
+```
+
 ### 4.7 Join
 
 ```pwsh
 .\scripts\demo\join.ps1 $MSURL -ListenPort 30303 -AdvertiseAddr $MyIp -DataDir $env:USERPROFILE\.vyomanaut
+```
+
+If on the college Desktop then it might show a warning for the clock to be lagging behind
+
+Press **"N"** and reset the clock manually using the command that is printed:
+
+```bash
+Set-Date -Date ....
+```
+
+Then make sure to again run
+
+```bash
+Remove-Item -Path ".\.vyomanaut-bin" -Recurse -Force
 ```
 
 The first run builds the provider, which takes a minute or two. Then it asks you three
