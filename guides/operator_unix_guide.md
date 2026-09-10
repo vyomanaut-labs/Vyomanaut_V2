@@ -182,14 +182,17 @@ export OWNER_DIR="$HOME/.vyomanaut-owner"
 
 ### 4.1 Get the code and set your flags
 
-Clone the code if starting fresh
+**First Time here?**
+Clone the code if starting fresh:
 
 ```pwsh
+
+# Only for first time people
 cd ~
 git clone https://github.com/vyomanaut-labs/Vyomanaut_V2.git
 ```
 
-> Already cloned? Just `cd ~\Vyomanaut_V2` and pull the latest:
+**Already cloned?** Just `cd ~\Vyomanaut_V2` and pull the latest:
 
 ```pwsh
 cd ~
