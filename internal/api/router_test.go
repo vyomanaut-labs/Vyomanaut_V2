@@ -86,6 +86,7 @@ type routeFixture struct {
 func allRegisteredRoutes() []routeFixture {
 	return []routeFixture{
 		{"GET", "/.well-known/jwks.json", authNone, true},
+		{"GET", "/api/v1/time", authNone, true}, // new, not yet build.md-sourced — see servertime.go
 		{"POST", "/api/v1/auth/otp/send", authNone, true},
 		{"POST", "/api/v1/auth/otp/verify", authNone, true},
 		{"GET", "/api/v1/pricing/estimate", authNone, true},

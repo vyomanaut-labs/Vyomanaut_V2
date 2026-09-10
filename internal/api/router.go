@@ -173,6 +173,7 @@ func NewRouter(cfg RouterConfig) *http.ServeMux {
 
 	// ── Public routes: no auth middleware ──────────────────────────────────
 	mux.HandleFunc("GET /.well-known/jwks.json", HandleJWKS(cfg.JWTPublicKey, cfg.JWTKeyID))                // getJwks
+	mux.HandleFunc("GET /api/v1/time", HandleServerTime)                                                    // getServerTime — new, not yet in openapi.yaml (see servertime.go)
 	mux.HandleFunc("POST /api/v1/auth/otp/send", otpHandler.HandleSend)                                     // sendOtp
 	mux.HandleFunc("POST /api/v1/auth/otp/verify", otpVerifyHandler.HandleVerify)                           // verifyOtp
 	mux.HandleFunc("GET /api/v1/pricing/estimate", pricingEstimateHandler.HandleEstimate)                   // getPricingEstimate
