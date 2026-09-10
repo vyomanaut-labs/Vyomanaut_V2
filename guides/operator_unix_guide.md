@@ -291,6 +291,16 @@ source /tmp/vyomanaut-demo/env
 Leave it running. `?` for the legend, `1`–`7` to focus a panel, arrows or `j`/`k` to scroll,
 `q` to quit.
 
+Now if someone fails to send the ping then:
+
+```bash
+ping 10.35.114.<number>
+```
+
+ping him back - this helps the peer detect itself back to the operator and becomes alive
+
+Use it also when a provider skips a heartbeat.
+
 ---
 
 ## Part 5 — Bringing machines in
