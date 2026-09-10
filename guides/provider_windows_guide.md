@@ -226,6 +226,14 @@ zerotier-cli info
 zerotier-cli listnetworks
 ```
 
+Once ZeroTier is confirmed as running we check if a ping to the operator happens successfully 
+
+```bash
+ping 10.35.114.52
+```
+
+If it fails then either the operator desktop or the provider desktop needs to Restart ZeroTier
+
 > Once authorized, expect a line ending in something like `10.35.114.94/24`.
 > **Write down the part before the `/`.** This is the single most important value in this
 > guide — it replaces what used to be a `100.` address.
@@ -403,7 +411,12 @@ Line |
      |                                 ~~~~~~~~~~~
      | provider onboard failed
 
-Then do
+Then do:
+
+```bash
+Restart-Service -Name "ZeroTierOneService"
+Get-Service -Name "ZeroTierOneService"
+```
 
 ```bash
 ping 10.35.114.52
