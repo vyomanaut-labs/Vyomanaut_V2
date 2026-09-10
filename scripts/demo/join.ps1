@@ -67,26 +67,31 @@ if ($AdvertiseAddr) { $advertiseArgs = @("--advertise-addr", $AdvertiseAddr) }
 # only heartbeat (5 min, hardcoded) and the other provider-signed endpoints
 # repair-download/vetting-gc (2 min, NetworkProfile.AuthRequestFreshnessWindow,
 # ADR-036) do — so a clock problem is invisible through the entire happy
-# path and only shows up minutes later as an unexplained DEPARTED. This
-# checks against the coordinator's own HTTP `Date` response header from its
-# one genuinely unauthenticated endpoint (jwks.json) rather than external
-# NTP, deliberately: it is the exact clock every timestamp check downstream
-# is measured against, and it still works on networks that filter outbound
-# NTP (UDP 123) the same way this project has already seen campus Wi-Fi
-# filter other unexpected outbound traffic (see provider guide §2.5). A
-# probe failure just warns and lets the script continue unchanged.
+# path and only shows up minutes later as an unexplained DEPARTED.
+#
+# [Replaced — dedicated time endpoint] Previously this parsed the
+# coordinator's HTTP `Date` response header off /.well-known/jwks.json — an
+# endpoint that was only unauthenticated as a side effect of what it's
+# actually for, never designed as a clock source, and required
+# DateTime.Parse with an explicit invariant-culture/AssumeUniversal
+# incantation just to turn an HTTP-date string back into a comparable
+# instant. GET /api/v1/time (internal/api/servertime.go) is a
+# purpose-built, unauthenticated endpoint that returns unix_epoch
+# directly, so this block now does plain integer subtraction — no
+# date-string parsing at all. Same trust model and same reason it still
+# works on networks that filter outbound NTP (UDP 123) the same way this
+# project has already seen campus Wi-Fi filter other unexpected outbound
+# traffic (see provider guide §2.5): it's a plain HTTPS/TCP request to
+# the coordinator, not UDP. A probe failure just warns and lets the
+# script continue unchanged.
 # [FLAGGED — logic only, not yet run against a live coordinator + real
 # clock-skewed Windows machine; confirm empirically before relying on it.]
 try {
-    $probe = Invoke-WebRequest -Uri "$MicroserviceUrl/.well-known/jwks.json" -UseBasicParsing -TimeoutSec 10
-    $dateHeader = $probe.Headers["Date"]
-    if ($dateHeader) {
-        $serverTime = [DateTime]::Parse(
-            $dateHeader,
-            [System.Globalization.CultureInfo]::InvariantCulture,
-            [System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal
-        )
-        $skewSeconds = [Math]::Abs(((Get-Date).ToUniversalTime() - $serverTime).TotalSeconds)
+    $probe = Invoke-RestMethod -Uri "$MicroserviceUrl/api/v1/time" -TimeoutSec 10
+    if ($probe.unix_epoch) {
+        $serverEpoch = [int64]$probe.unix_epoch
+        $nowEpoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        $skewSeconds = [Math]::Abs($nowEpoch - $serverEpoch)
         if ($skewSeconds -gt 120) {
             Write-Host ""
             Write-Host "[join.ps1] WARNING: this machine's clock is $([Math]::Round($skewSeconds))s off from the coordinator's." -ForegroundColor Yellow
@@ -94,7 +99,7 @@ try {
             Write-Host "[join.ps1] past 300s, EVERY heartbeat is rejected and you'll eventually show DEPARTED without ever leaving." -ForegroundColor Yellow
             Write-Host "[join.ps1] Fix: as administrator, try 'w32tm /resync /force'." -ForegroundColor Yellow
             Write-Host "[join.ps1] If this network blocks NTP, set the clock manually instead — as administrator:" -ForegroundColor Yellow
-            Write-Host "[join.ps1]   Set-Date -Date ([DateTime]::Parse('$($serverTime.ToString("o"))')).ToLocalTime()" -ForegroundColor Yellow
+            Write-Host "[join.ps1]   Set-Date -Date ([DateTimeOffset]::FromUnixTimeSeconds($serverEpoch).UtcDateTime).ToLocalTime()" -ForegroundColor Yellow
             Write-Host ""
             $proceed = Read-Host "Continue anyway? [y/N]"
             if ($proceed -notmatch '^[Yy]') { exit 1 }

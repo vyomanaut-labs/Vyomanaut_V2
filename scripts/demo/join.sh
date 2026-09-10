@@ -116,37 +116,41 @@ fi
 # only heartbeat (5 min, hardcoded) and the other provider-signed endpoints
 # repair-download/vetting-gc (2 min, NetworkProfile.AuthRequestFreshnessWindow,
 # ADR-036) do — so a clock problem is invisible through the entire happy
-# path and only shows up minutes later as an unexplained DEPARTED. This
-# checks against the coordinator's own HTTP `Date` response header from its
-# one genuinely unauthenticated endpoint (jwks.json) rather than external
-# NTP, deliberately: it is the exact clock every timestamp check downstream
-# is measured against, and it still works on networks that filter outbound
-# NTP (UDP 123) the same way this project has already seen campus Wi-Fi
-# filter other unexpected outbound traffic. Best-effort only — a failed
-# probe (offline coordinator, no jwks route on some future build) just logs
-# a warning and lets the rest of the script proceed unchanged.
+# path and only shows up minutes later as an unexplained DEPARTED.
+#
+# [Replaced — dedicated time endpoint] Previously this parsed the
+# coordinator's HTTP `Date` response header off /.well-known/jwks.json — an
+# endpoint that was only unauthenticated as a side effect of what it's
+# actually for, never designed as a clock source, and forced a GNU-date/
+# BSD-date fallback branch (same shape as up.sh's detect_lan_ip) just to
+# turn an HTTP-date string back into an epoch. GET /api/v1/time
+# (internal/api/servertime.go) is a purpose-built, unauthenticated
+# endpoint that returns unix_epoch directly, so no date-string-parsing
+# branch is needed on either platform anymore. Same trust model and same
+# reason it still works on networks that filter outbound NTP (UDP 123) the
+# same way this project has already seen campus Wi-Fi filter other
+# unexpected outbound traffic: it's a plain HTTPS/TCP request to the
+# coordinator, not UDP. Best-effort only — a failed probe (offline
+# coordinator, unreachable microservice) just logs a warning and lets the
+# rest of the script proceed unchanged.
 # [FLAGGED — logic only, not yet run against a live coordinator + real
 # clock-skewed machine; confirm empirically before relying on it.]
-SERVER_DATE="$(curl -sS --max-time 10 -D - -o /dev/null "$MICROSERVICE_URL/.well-known/jwks.json" 2>/dev/null | grep -i '^date:' | head -1 | cut -d' ' -f2- | tr -d '\r')"
-if [[ -n "$SERVER_DATE" ]]; then
-  # GNU date (Linux) then BSD date (macOS) — same fallback shape as
-  # up.sh's detect_lan_ip, for the same reason: both platforms are real
-  # targets for this script and their date(1) flags do not overlap.
-  SERVER_EPOCH="$(date -d "$SERVER_DATE" +%s 2>/dev/null || date -j -f "%a, %d %b %Y %H:%M:%S %Z" "$SERVER_DATE" +%s 2>/dev/null || true)"
-  if [[ -n "$SERVER_EPOCH" ]]; then
-    SKEW=$(( $(date -u +%s) - SERVER_EPOCH ))
-    SKEW_ABS=${SKEW#-}
-    if (( SKEW_ABS > 120 )); then
-      echo "" >&2
-      log "WARNING: this machine's clock is ${SKEW_ABS}s off from the coordinator's."
-      log "Past 120s, provider-signed requests (repair-download, vetting-gc) start getting rejected;"
-      log "past 300s, EVERY heartbeat is rejected and you'll eventually show DEPARTED without ever leaving."
-      log "Fix: resync via NTP (e.g. 'sudo sntp -sS time.apple.com' on macOS, 'sudo ntpdate pool.ntp.org' on Linux)."
-      log "If this network blocks NTP, set the clock manually close to: $SERVER_DATE"
-      echo "" >&2
-      read -r -p "[join.sh] Continue anyway? [y/N] " PROCEED
-      [[ "$PROCEED" =~ ^[Yy]$ ]] || exit 1
-    fi
+TIME_RESPONSE="$(curl -sS --max-time 10 "$MICROSERVICE_URL/api/v1/time" 2>/dev/null)"
+SERVER_EPOCH="$(printf '%s' "$TIME_RESPONSE" | grep -o '"unix_epoch"[[:space:]]*:[[:space:]]*[0-9]*' | grep -o '[0-9]*$' || true)"
+SERVER_UTC="$(printf '%s' "$TIME_RESPONSE" | grep -o '"utc"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4 || true)"
+if [[ -n "$SERVER_EPOCH" ]]; then
+  SKEW=$(( $(date -u +%s) - SERVER_EPOCH ))
+  SKEW_ABS=${SKEW#-}
+  if (( SKEW_ABS > 120 )); then
+    echo "" >&2
+    log "WARNING: this machine's clock is ${SKEW_ABS}s off from the coordinator's."
+    log "Past 120s, provider-signed requests (repair-download, vetting-gc) start getting rejected;"
+    log "past 300s, EVERY heartbeat is rejected and you'll eventually show DEPARTED without ever leaving."
+    log "Fix: resync via NTP (e.g. 'sudo sntp -sS time.apple.com' on macOS, 'sudo ntpdate pool.ntp.org' on Linux)."
+    log "If this network blocks NTP, set the clock manually close to: ${SERVER_UTC:-epoch $SERVER_EPOCH}"
+    echo "" >&2
+    read -r -p "[join.sh] Continue anyway? [y/N] " PROCEED
+    [[ "$PROCEED" =~ ^[Yy]$ ]] || exit 1
   fi
 else
   log "warning: could not preflight-check clock skew against the coordinator — continuing anyway"
