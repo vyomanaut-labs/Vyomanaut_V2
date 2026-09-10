@@ -298,15 +298,18 @@ Open pwsh. Work through this in order.
 
 ### 4.1 Get the code
 
+Clone the code if starting fresh
+
 ```pwsh
 cd ~
 git clone https://github.com/vyomanaut-labs/Vyomanaut_V2.git
-cd .\Vyomanaut_V2\
 ```
 
 > Already cloned? Just `cd ~\Vyomanaut_V2` and pull the latest:
 
 ```pwsh
+cd ~
+cd .\Vyomanaut_V2\
 git pull
 ```
 
@@ -328,10 +331,6 @@ Right click pwsh, run as administrator:
 New-NetFirewallRule -DisplayName "Vyomanaut provider" -Direction Inbound `
   -Protocol TCP -LocalPort 30303 -Action Allow -Profile Any
 ```
-
-> You may also get a popup: *"Do you want to allow public and private networks to access
-> this app?"* — click **Allow**. Clicking Cancel makes your machine unreachable in a way
-> that is annoying to diagnose later.
 
 ### 4.4 Turn off sleep
 
@@ -382,6 +381,8 @@ ls
 
 ### 4.7 Join
 
+And let's join the network!
+
 ```pwsh
 .\scripts\demo\join.ps1 $MSURL -ListenPort 30303 -AdvertiseAddr $MyIp -DataDir $env:USERPROFILE\.vyomanaut
 ```
@@ -395,6 +396,8 @@ Press **"N"** and reset the clock manually using the command that is printed:
 ```bash
 Set-Date -Date ....
 ```
+
+Or even better: Do it **manually.**
 
 Then make sure to delete the bin folder again
 

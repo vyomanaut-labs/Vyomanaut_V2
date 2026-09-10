@@ -182,11 +182,22 @@ export OWNER_DIR="$HOME/.vyomanaut-owner"
 
 ### 4.1 Get the code and set your flags
 
-```bash
+Clone the code if starting fresh
+
+```pwsh
 cd ~
 git clone https://github.com/vyomanaut-labs/Vyomanaut_V2.git
-cd Vyomanaut_V2
 ```
+
+> Already cloned? Just `cd ~\Vyomanaut_V2` and pull the latest:
+
+```pwsh
+cd ~
+cd .\Vyomanaut_V2\
+git pull
+```
+
+The CGO flags necessary for RocksDB:
 
 ```bash
 export CGO_CFLAGS="-I$HOME/rocksdb/include"
@@ -208,14 +219,6 @@ go build ./...
 ### 4.2 Start Postgres — once, and leave it running
 
 ```bash
-docker compose -f deployments/dev/docker-compose.yml up -d postgres
-```
-
-> Leave this container up for the whole session. The start script wipes and rebuilds the
-> database itself on every run, so you do not need to touch Docker between attempts.
-> Only if something seems genuinely broken:
-
-```bash
 docker compose -f deployments/dev/docker-compose.yml down -v
 docker compose -f deployments/dev/docker-compose.yml up -d postgres
 ```
@@ -225,17 +228,27 @@ docker compose -f deployments/dev/docker-compose.yml up -d postgres
 
 ### 4.3 Start the coordinator
 
+Set the environment for ZeroTier:
+
 ```bash
 export NETWORK_ID="b103a835d24e3e5f"   # your ZeroTier network ID
 export MY_IP="$(sudo zerotier-cli listnetworks | grep "$NETWORK_ID" | awk '{print $NF}' | cut -d'/' -f1)"
 echo "$MY_IP"
-
-scripts/demo/down.sh
-scripts/demo/up.sh --providers 0 --advertise-host "$MY_IP"
 ```
 
 > **Always run `down.sh` first.** Leftover processes from a previous attempt holding the
 > port are the most common cause of a failed restart.
+
+```bash
+scripts/demo/down.sh
+rm -rf /tmp/vyomanaut-demo
+```
+
+Establish the network:
+
+```pwsh
+scripts/demo/up.sh --providers 0 --advertise-host "$MY_IP"
+```
 
 > `--providers 0` means the coordinator starts alone, leaving every slot free for a real
 > machine to join. `--advertise-host` is what the others will dial — pass it explicitly,
@@ -246,7 +259,7 @@ Save what it prints. **The admin key exists only on this machine and only for th
 
 Sanity check the output before continuing:
 
-```
+```bash
 [up.sh] MICROSERVICE_URL = http://10.35.114.52:8080
 ```
 
@@ -257,7 +270,7 @@ Sanity check the output before continuing:
 
 Tell your teammates:
 
-```
+```bash
 http://<your 10.x ZeroTier address>:8080
 ```
 
@@ -265,7 +278,7 @@ They can now start Part 4 of their own guide.
 
 ### 4.5 Open the console
 
-New terminal:
+New terminal for the TUI:
 
 ```bash
 source /tmp/vyomanaut-demo/env
