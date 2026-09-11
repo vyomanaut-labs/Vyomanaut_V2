@@ -277,7 +277,7 @@ func dispatchRecover(args []string, stdin io.Reader, out, errOut io.Writer) int 
 	ownerID := fs.String("owner-id", "", "Recover fully locally (no network) using the keystore already present at --data-dir. Requires that file to exist.")
 	phone := fs.String("phone", "", "Phone number for network-based recovery (new-device case). Prompted if omitted and --owner-id is not given.")
 	otpCode := fs.String("otp-code", "", "6-digit OTP code for network-based recovery. Prompted if omitted.")
-	passphrase := fs.String("passphrase", "", "Passphrase recovery path (MVP §8.3). Mutually exclusive with --mnemonic.")
+	passphrase := fs.String("passphrase", "", "Passphrase recovery path (MVP §8.3). Mutually exclusive with --mnemonic. For network-based recovery (no --owner-id), prompted if omitted — preferred for interactive use, since a flag leaves the passphrase in shell history.")
 	mnemonic := fs.String("mnemonic", "", "24-word BIP-39 mnemonic recovery path (MVP §8.3), space-separated. Mutually exclusive with --passphrase.")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
@@ -286,12 +286,17 @@ func dispatchRecover(args []string, stdin io.Reader, out, errOut io.Writer) int 
 		fprintln(errOut, err)
 		return exitUsage
 	}
-	if *passphrase == "" && *mnemonic == "" {
-		fprintln(errOut, "recover requires --passphrase or --mnemonic (MVP §8.3).")
-		return exitUsage
-	}
 	if *passphrase != "" && *mnemonic != "" {
 		fprintln(errOut, "recover accepts only one of --passphrase or --mnemonic, not both.")
+		return exitUsage
+	}
+	// Only the local (--owner-id) path requires this upfront: it decrypts
+	// a keystore already on disk right now, with no other chance to ask.
+	// The network path prompts for a missing passphrase itself
+	// (runNetworkRecover, right after the phone number) instead of
+	// failing here — see that function's own note on why.
+	if *ownerID != "" && *passphrase == "" && *mnemonic == "" {
+		fprintln(errOut, "recover --owner-id requires --passphrase or --mnemonic (MVP §8.3).")
 		return exitUsage
 	}
 
@@ -315,17 +320,16 @@ func dispatchRecover(args []string, stdin io.Reader, out, errOut io.Writer) int 
 }
 
 func runRecover(ctx context.Context, cfg recoverConfig, in *bufio.Reader, out, errOut io.Writer) int {
-	masterSecretFor := func(ownerID uuid.UUID) ([32]byte, error) {
-		if cfg.mnemonic != "" {
-			return account.RecoverFromMnemonic(strings.Fields(cfg.mnemonic))
-		}
-		return account.RecoverFromPassphrase(ownerID, []byte(cfg.passphrase), cfg.profile)
-	}
-
 	if cfg.ownerID != "" {
+		masterSecretFor := func(ownerID uuid.UUID) ([32]byte, error) {
+			if cfg.mnemonic != "" {
+				return account.RecoverFromMnemonic(strings.Fields(cfg.mnemonic))
+			}
+			return account.RecoverFromPassphrase(ownerID, []byte(cfg.passphrase), cfg.profile)
+		}
 		return runLocalRecover(cfg, masterSecretFor, out, errOut)
 	}
-	return runNetworkRecover(ctx, cfg, masterSecretFor, in, out, errOut)
+	return runNetworkRecover(ctx, cfg, in, out, errOut)
 }
 
 // runLocalRecover is the same-machine path: no network call at all,
@@ -381,7 +385,7 @@ func runLocalRecover(cfg recoverConfig, masterSecretFor func(uuid.UUID) ([32]byt
 // data can be decoded) but the Ed25519 identity key cannot be — there is
 // no server-side re-keying endpoint in this codebase. Stated to the user
 // plainly rather than silently degraded.
-func runNetworkRecover(ctx context.Context, cfg recoverConfig, masterSecretFor func(uuid.UUID) ([32]byte, error), in *bufio.Reader, out, errOut io.Writer) int {
+func runNetworkRecover(ctx context.Context, cfg recoverConfig, in *bufio.Reader, out, errOut io.Writer) int {
 	phone := cfg.phone
 	if phone == "" {
 		var err error
@@ -392,6 +396,35 @@ func runNetworkRecover(ctx context.Context, cfg recoverConfig, masterSecretFor f
 		}
 	}
 	phone = normalizePhone(phone)
+
+	// Resolved here, before SendOTP, rather than lazily at the
+	// masterSecretFor call site below: RecoverFromPassphrase needs the
+	// account's owner_id (only known after VerifyOTP succeeds) to derive
+	// anything, but the raw passphrase STRING doesn't — asking for it now
+	// means every prompt in this command happens up front, instead of
+	// making the operator wait through an OTP round-trip first only to
+	// then be asked for the one piece of secret material this command was
+	// named for. Only reached when neither flag was given — dispatchRecover
+	// already errors out early for --owner-id (local) with neither, and a
+	// given --mnemonic here just skips this entirely.
+	passphrase := cfg.passphrase
+	if cfg.mnemonic == "" && passphrase == "" {
+		var err error
+		passphrase, err = promptLine(out, in, "Passphrase: ")
+		if err != nil {
+			printCLIError(errOut, cfg.g.json, err, renderError)
+			return 1
+		}
+		// Same precondition as register (minPassphraseLength's own
+		// comment): account.RecoverFromPassphrase's underlying
+		// crypto.DeriveMasterSecret panics below 8 characters rather
+		// than erroring — checked here so a short passphrase is a clean
+		// CLI error instead of a panic.
+		if len(passphrase) < minPassphraseLength {
+			fprintln(errOut, "Passphrase must be at least 8 characters.")
+			return 1
+		}
+	}
 
 	if err := account.SendOTP(ctx, cfg.g.microserviceURL, cfg.httpClient, phone, account.OTPPurposeLogin); err != nil {
 		printCLIError(errOut, cfg.g.json, err, renderError)
@@ -419,19 +452,49 @@ func runNetworkRecover(ctx context.Context, cfg recoverConfig, masterSecretFor f
 		return 1
 	}
 
-	masterSecret, err := masterSecretFor(verifyResult.EntityID)
+	var masterSecret [32]byte
+	if cfg.mnemonic != "" {
+		masterSecret, err = account.RecoverFromMnemonic(strings.Fields(cfg.mnemonic))
+	} else {
+		masterSecret, err = account.RecoverFromPassphrase(verifyResult.EntityID, []byte(passphrase), cfg.profile)
+	}
 	if err != nil {
 		printCLIError(errOut, cfg.g.json, err, renderError)
 		return 1
 	}
 
+	// [Fix — new-device login, not part of any prior session's TASK text]
+	// Previously, when no local keystore was present at all (stored ==
+	// nil — the actual new-device case this function's own doc comment
+	// describes), this function derived masterSecret and got a fresh
+	// verifyResult.Token but never persisted either one: the next
+	// invocation of ls/rm/balance/deposit/retrieve (identity.go's
+	// loadIdentity, every one of which calls readIdentityFile itself)
+	// would find no identity file and fail with "run register first" —
+	// even though this call had just succeeded. The three-way split below
+	// fixes that without touching the one case that must stay
+	// conservative: an EXISTING local keystore that failed to decrypt
+	// (wrong passphrase, or a stale data-dir from a different owner) is
+	// left completely untouched rather than silently replaced by a
+	// token-only record, so a passphrase typo can never destroy key
+	// material that a correct retry would have recovered.
+	stored, readErr := readIdentityFile(cfg.g.dataDir)
 	signingKeyRestored := false
-	if stored, readErr := readIdentityFile(cfg.g.dataDir); readErr == nil && stored != nil {
+	var persistErr error
+	switch {
+	case readErr == nil && stored == nil:
+		// True new device: nothing to lose, and nothing to restore.
+		// Token-only is the entire point of this branch.
+		persistErr = writeIdentityFileTokenOnly(cfg.g.dataDir, verifyResult.EntityID, verifyResult.Token)
+	case readErr == nil && stored != nil:
 		if ciphertext, nonce, decodeErr := decodeStoredKeystore(*stored); decodeErr == nil {
 			if _, decErr := account.DecryptKeystore(ciphertext, nonce, masterSecret, verifyResult.EntityID[:]); decErr == nil {
 				signingKeyRestored = true
-				_ = writeIdentityFile(cfg.g.dataDir, verifyResult.EntityID, verifyResult.Token, ciphertext, nonce)
+				persistErr = writeIdentityFile(cfg.g.dataDir, verifyResult.EntityID, verifyResult.Token, ciphertext, nonce)
 			}
+			// decErr != nil: existing keystore present but didn't decrypt
+			// with this passphrase/mnemonic — deliberately left on disk,
+			// untouched; see this block's header note.
 		}
 	}
 	account.ZeroMasterSecret(&masterSecret)
@@ -439,9 +502,16 @@ func runNetworkRecover(ctx context.Context, cfg recoverConfig, masterSecretFor f
 	if cfg.g.json {
 		fprintln(out, renderRecoverJSON(verifyResult.EntityID, signingKeyRestored))
 	} else {
-		fprintf(out, "Recovered. owner_id=%s\n", verifyResult.EntityID)
-		if !signingKeyRestored {
-			fprintln(out, "Note: no local keystore was found or decryptable at this data-dir, so your Ed25519 signing identity could not be restored. File data can still be decoded with this master secret, but new uploads need the original keystore — there is currently no server-side way to register a replacement signing key for an existing owner_id.")
+		fprintf(out, "Logged in. owner_id=%s\n", verifyResult.EntityID)
+		if signingKeyRestored {
+			fprintln(out, "Signing identity restored from a local keystore found at this data-dir — every client command, including upload, works from here.")
+		} else if readErr == nil && stored == nil {
+			fprintln(out, "This device has no local keystore. retrieve, ls, rm, balance, and deposit all work from here. upload does not: it needs the original Ed25519 signing key, and this codebase has no way to issue a replacement for an existing account — that would need a server-side re-keying or key-escrow feature this project doesn't have yet.")
+		} else {
+			fprintln(out, "A local keystore exists at this data-dir but didn't decrypt with the given passphrase/mnemonic — it was left untouched. retrieve/ls/rm/balance/deposit work from here using the master secret alone; upload still needs the correct passphrase/mnemonic for that existing keystore.")
+		}
+		if persistErr != nil {
+			fprintf(errOut, "warning: logged in, but could not save the local session (%v) — you'll need to log in again for the next command.\n", persistErr)
 		}
 	}
 	return 0
