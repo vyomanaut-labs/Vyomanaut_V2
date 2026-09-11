@@ -43,8 +43,17 @@ func ensureDataDir(dataDir string) error {
 // ── Final, completed identity (post successful register/recover) ──────────
 
 type storedIdentity struct {
-	OwnerID               string `json:"owner_id"`
-	Token                 string `json:"token"`
+	OwnerID string `json:"owner_id"`
+	Token   string `json:"token"`
+	// HasKeystore is false for a token-only identity — added for the
+	// new-device network-`recover` case (account_cmds.go's runNetworkRecover):
+	// phone+OTP+passphrase verified and a fresh JWT issued, but no local
+	// Ed25519 keystore exists on this machine to restore, so
+	// KeystoreNonceHex/KeystoreCiphertextHex are empty. Explicit rather
+	// than inferred from empty-string fields, so loadIdentity (identity.go)
+	// never mistakes "nothing to decrypt" for "decrypt this empty blob and
+	// fail" — see that file's own header note.
+	HasKeystore           bool   `json:"has_keystore"`
 	KeystoreNonceHex      string `json:"keystore_nonce_hex"`
 	KeystoreCiphertextHex string `json:"keystore_ciphertext_hex"`
 }
@@ -54,17 +63,39 @@ func identityFilePath(dataDir string) string {
 }
 
 // writeIdentityFile persists ownerID/token/the already-encrypted keystore
-// bytes. Never touches plaintext key material or the mnemonic — ciphertext
-// and nonce are opaque bytes by the time they reach this function.
+// bytes, with HasKeystore=true. Never touches plaintext key material or
+// the mnemonic — ciphertext and nonce are opaque bytes by the time they
+// reach this function.
 func writeIdentityFile(dataDir string, ownerID uuid.UUID, token string, ciphertext []byte, nonce [12]byte) error {
-	if err := ensureDataDir(dataDir); err != nil {
-		return err
-	}
-	rec := storedIdentity{
+	return writeIdentityFileRecord(dataDir, storedIdentity{
 		OwnerID:               ownerID.String(),
 		Token:                 token,
+		HasKeystore:           true,
 		KeystoreNonceHex:      hex.EncodeToString(nonce[:]),
 		KeystoreCiphertextHex: hex.EncodeToString(ciphertext),
+	})
+}
+
+// writeIdentityFileTokenOnly persists ownerID/token with no keystore at
+// all (HasKeystore=false) — the new-device network-`recover` case
+// where phone+OTP+passphrase restores a usable JWT and master secret, but
+// there is no local Ed25519 keystore to bring along, and no server-side
+// endpoint in this codebase to re-key one (registerflow.go's own header
+// note). Deliberately a separate function from writeIdentityFile, not an
+// optional-ciphertext variant of it: callers that DO have a keystore
+// should never be able to accidentally pass a nil/empty one through and
+// silently downgrade a real identity to a token-only one.
+func writeIdentityFileTokenOnly(dataDir string, ownerID uuid.UUID, token string) error {
+	return writeIdentityFileRecord(dataDir, storedIdentity{
+		OwnerID:     ownerID.String(),
+		Token:       token,
+		HasKeystore: false,
+	})
+}
+
+func writeIdentityFileRecord(dataDir string, rec storedIdentity) error {
+	if err := ensureDataDir(dataDir); err != nil {
+		return err
 	}
 	data, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
