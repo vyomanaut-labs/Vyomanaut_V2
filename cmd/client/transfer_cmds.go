@@ -28,6 +28,8 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
+	cryptorand "crypto/rand"
 	"errors"
 	"flag"
 	"fmt"
@@ -117,6 +119,14 @@ func withTransferErrorCode(err error) error {
 	}
 }
 
+// errNoSigningKeyForUpload is returned by dispatchUpload when the local
+// identity has no Ed25519 signing key (identity.go's unlockedIdentity —
+// a token-only identity from network `recover` on a device that
+// never had a local keystore). Checked explicitly, before
+// buildHostAndEngine, so the failure is this clear message rather than
+// p2p.NewHost's own byte-length validation error on a nil key.
+var errNoSigningKeyForUpload = fmt.Errorf("cmd/client: no local signing key on this device — upload needs the original device's keystore; there is no server-side way to issue a replacement signing key for an existing account")
+
 // buildHostAndEngine constructs the p2p.Host (client-only: no ListenAddr,
 // so it accepts no inbound streams — this is a data-owner CLI, not a
 // provider daemon) and erasure.Engine every upload/retrieve call shares.
@@ -132,6 +142,35 @@ func buildHostAndEngine(profile config.NetworkProfile, signingKey []byte) (p2p.H
 		return nil, nil, fmt.Errorf("cmd/client: construct erasure engine: %w", err)
 	}
 	return host, engine, nil
+}
+
+// p2pIdentityForRetrieve returns signingKey unchanged when present, or a
+// freshly generated Ed25519 keypair when it's nil (a token-only local
+// identity — see identity.go's unlockedIdentity doc comment). Retrieve-only:
+// dispatchUpload must never call this, since upload's owner_sig has to be
+// the caller's actual, server-registered identity key for HandleRegister's
+// owner_sig check to mean anything (registerflow.go's own header note) —
+// an ephemeral key there would just be a signature the coordinator can't
+// verify, not a working substitute.
+//
+// Safe specifically for retrieve because of ADR-080 §1: a shard fetch is
+// authorized by a coordinator-signed download-capability token the client
+// only ever forwards, never a check against the requesting peer's own
+// identity (download.go's own header note) — so this host's Ed25519 key
+// only has to be valid for a TLS 1.3 handshake, not recognized by
+// anything. p2p.Host.Connect/NewStream verify the far side's PeerID
+// (ErrPeerIDMismatch, internal/p2p/host.go) but nothing here checks this
+// host's OWN PeerID against a whitelist — there is nothing for a provider
+// to reject.
+func p2pIdentityForRetrieve(signingKey ed25519.PrivateKey) (ed25519.PrivateKey, error) {
+	if signingKey != nil {
+		return signingKey, nil
+	}
+	_, priv, err := ed25519.GenerateKey(cryptorand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("cmd/client: generate ephemeral p2p identity for retrieve: %w", err)
+	}
+	return priv, nil
 }
 
 func uploadSessionDir(dataDir string) string {
@@ -174,6 +213,10 @@ func dispatchUpload(args []string, stdin io.Reader, out, errOut io.Writer) int {
 		return 1
 	}
 	defer account.ZeroMasterSecret(&id.MasterSecret)
+	if id.SigningKey == nil {
+		printCLIError(errOut, g.json, errNoSigningKeyForUpload, renderError)
+		return 1
+	}
 
 	host, engine, err := buildHostAndEngine(profile, id.SigningKey)
 	if err != nil {
@@ -466,7 +509,12 @@ func dispatchRetrieve(args []string, stdin io.Reader, out, errOut io.Writer) int
 	}
 	defer account.ZeroMasterSecret(&id.MasterSecret)
 
-	host, engine, err := buildHostAndEngine(profile, id.SigningKey)
+	p2pKey, err := p2pIdentityForRetrieve(id.SigningKey)
+	if err != nil {
+		printCLIError(errOut, g.json, err, renderError)
+		return 1
+	}
+	host, engine, err := buildHostAndEngine(profile, p2pKey)
 	if err != nil {
 		printCLIError(errOut, g.json, err, renderError)
 		return 1
