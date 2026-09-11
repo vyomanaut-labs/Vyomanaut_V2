@@ -161,7 +161,8 @@ export OWNER_DIR="$HOME/.vyomanaut-owner"
 
 # ── identity and money ───────────────────────────────────────────────────
 "$BIN_DIR/client" register --mode=demo --microservice-url="$MSURL" --data-dir="$OWNER_DIR"
-"$BIN_DIR/client" recover  --mode=demo --microservice-url="$MSURL" --data-dir="$OWNER_DIR" --mnemonic="<24 words>"
+"$BIN_DIR/client" recover  --mode=demo --microservice-url="$MSURL" --data-dir="$NEWDEVICE_DIR" --phone="+919790000001"   # new device: prompts for the OTP code, then the passphrase
+"$BIN_DIR/client" recover  --mode=demo --microservice-url="$MSURL" --data-dir="$OWNER_DIR" --mnemonic="<24 words>"       # only if the passphrase itself is lost
 "$BIN_DIR/client" deposit  --mode=demo --microservice-url="$MSURL" --data-dir="$OWNER_DIR" --amount-paise=1000000
 "$BIN_DIR/client" balance  --mode=demo --microservice-url="$MSURL" --data-dir="$OWNER_DIR"
 
@@ -359,12 +360,23 @@ export OWNER_DIR="$HOME/.vyomanaut-owner"
 
 ### 6.2 Register
 
+Clear the previous data owner registration details
+
+```bash
+rm -r ~/.vyomanaut-owner
+```
+
+Then register fresh:
+
 ```bash
 "$BIN_DIR/client" register --mode=demo --microservice-url="$MSURL" --data-dir="$OWNER_DIR"
 ```
 
 > **Write down the 24 words it shows.** They appear once. They are the only way back into
 > this identity.
+>
+> **Also note the phone number you give it.** 6.7 needs it to prove the file comes back on
+> a different device — it's easy to forget since nothing prints it back at you here.
 
 ### 6.3 Add funds and check
 
@@ -412,6 +424,38 @@ way to show where the trust boundary sits.
 "$BIN_DIR/client" retrieve --mode=demo --microservice-url="$MSURL" --data-dir="$OWNER_DIR" -o out.md "<file_id>"
 cmp README.md out.md && echo IDENTICAL
 ```
+
+### 6.7 Get it back from a different device
+
+This is the actual claim worth demonstrating, not 6.6: the file comes back on a machine
+that has never seen this account before, using nothing but the phone number and the
+passphrase from 6.2. No copied files, no shared keystore.
+
+> Use a genuinely separate machine if you have a spare one for this. If not, a fresh
+> `--data-dir` on the same machine is not a simplification — it behaves exactly like a
+> new device, since every credential this needs lives on the server or in your head, not
+> in that directory.
+
+```bash
+export NEWDEVICE_DIR="$HOME/.vyomanaut-newdevice"   # or the second machine's own path
+"$BIN_DIR/client" recover --mode=demo --microservice-url="$MSURL" --data-dir="$NEWDEVICE_DIR" --phone="<the phone number used at 6.2>"
+```
+
+It sends an OTP and asks for the code — look it up the same way as Part 5, `operator otp`. Then
+it asks for the passphrase chosen at 6.2. Neither needs to be typed as a flag; both are
+prompted.
+
+```bash
+"$BIN_DIR/client" ls       --mode=demo --microservice-url="$MSURL" --data-dir="$NEWDEVICE_DIR"
+"$BIN_DIR/client" retrieve --mode=demo --microservice-url="$MSURL" --data-dir="$NEWDEVICE_DIR" -o out2.md "<file_id>"
+cmp README.md out2.md && echo IDENTICAL
+```
+
+> `recover` tells you plainly what this device can and cannot do once it finishes: `ls`,
+> `retrieve`, `rm`, `balance`, and `deposit` all work from here. `upload` does not — a new
+> file needs the original device's signing key, and there is no way in this system to issue
+> a replacement one for an existing account. If the passphrase itself is lost too, not just
+> the device, `--mnemonic="<24 words>"` on this same `recover` call is the only way back in.
 
 ---
 
@@ -492,6 +536,7 @@ rm -rf /tmp/vyomanaut-demo
 | `NETWORK_NOT_READY` on upload | Fewer than five machines at `ACTIVE` | Wait — the countdown is accurate |
 | `INSUFFICIENT_PROVIDER_CAPACITY` | Machines registered but still in probation | Also just wait |
 | A machine looks like it left but nobody touched it | That machine went to sleep | Their guide, sleep settings |
+| `upload` refuses on a device that just ran `recover --phone` | Expected, not a bug — that device has no local keystore (6.7) | Upload from the original device, or a device that started as a copy of it |
 | A provider's repair-download or vetting-gc requests get rejected | That provider's clock is off by more than two minutes (`NetworkProfile.AuthRequestFreshnessWindow`, ADR-036) | Have them resync their clock — their guide's own troubleshooting section |
 | A provider's heartbeats get rejected with `400: "timestamp skew exceeds 5 minutes"`, and they eventually go `DEPARTED` without ever leaving | Same root cause, different (looser) threshold — heartbeat's own check is a separate, hardcoded 5 minutes (`internal/api/provider.go: heartbeatTimestampSkew`), not the 2-minute `AuthRequestFreshnessWindow` above | Their guide's own troubleshooting section — usually campus/lab Wi-Fi blocking outbound NTP |
 | `rocksdb/c.h file not found` | Build flags not set in this terminal | 4.1 |
