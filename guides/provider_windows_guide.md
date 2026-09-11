@@ -204,6 +204,12 @@ winget install --id ZeroTier.ZeroTierOne -e --source winget
 
 ### 2.3 Join, then wait to be let in
 
+Before everything else we will correct the time of our machine:
+
+```pwsh
+Set-Date -Date ([DateTimeOffset]::FromUnixTimeSeconds((Invoke-RestMethod -Method Get -Uri 'https://timeapi.io/api/v1/time/current/unix' -Headers @{ accept = '*/*' }).unix_timestamp).UtcDateTime).ToLocalTime()
+```
+
 Open pwsh **as administrator** (zerotier-cli talks to a system service and needs elevation):
 
 ```pwsh
@@ -298,7 +304,7 @@ Open pwsh. Work through this in order.
 
 ### 4.1 Get the code
 
-Clone the code if starting fresh
+Clone the code if starting fresh:
 
 ```pwsh
 cd ~
@@ -394,8 +400,10 @@ If on the college Desktop then it might show a warning for the clock to be laggi
 Press **"N"** and reset the clock manually using the command that is printed:
 
 ```bash
-Set-Date -Date ....
+Set-Date -Date ([DateTimeOffset]::FromUnixTimeSeconds((Invoke-RestMethod -Method Get -Uri 'https://timeapi.io/api/v1/time/current/unix' -Headers @{ accept = '*/*' }).unix_timestamp).UtcDateTime).ToLocalTime()
 ```
+
+**Always use this before running the scripts**
 
 Or even better: Do it **manually.**
 
