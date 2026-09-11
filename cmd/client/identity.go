@@ -26,6 +26,19 @@ import (
 // identity once it's decrypted. MasterSecret is the caller's
 // responsibility to zero (account.ZeroMasterSecret) once no longer
 // needed — the same discipline internal/client/account itself applies.
+//
+// SigningKey is nil for a token-only identity (stored.HasKeystore ==
+// false — see localstore.go's own header note on writeIdentityFileTokenOnly):
+// the network-`recover` new-device case where phone+OTP+passphrase
+// restored a usable JWT and master secret, but no local Ed25519 keystore
+// exists on this machine and there is no server-side endpoint in this
+// codebase to re-key one. retrieve/ls/rm/balance/deposit never read
+// SigningKey (see manage_cmds.go and transfer_cmds.go's dispatchRetrieve,
+// which falls back to a fresh ephemeral p2p transport identity — ADR-080
+// §1 authorizes shard access via a coordinator-signed capability token,
+// never by matching the caller's own peer identity, so an ephemeral key
+// there is not a security downgrade). dispatchUpload is the one caller
+// that must check for nil and refuse cleanly instead of proceeding.
 type unlockedIdentity struct {
 	OwnerID      uuid.UUID
 	Token        string
@@ -37,15 +50,18 @@ type unlockedIdentity struct {
 // from passphrase or mnemonic (prompting for a passphrase if neither is
 // given — this session's subcommands don't force a choice the way
 // `recover` does, since a passphrase default is the common case for
-// day-to-day use), and decrypts the local keystore to recover the Ed25519
-// signing key.
+// day-to-day use), and — if a local keystore is actually present —
+// decrypts it to recover the Ed25519 signing key. A token-only identity
+// (see this file's unlockedIdentity doc comment) is not an error here:
+// the master secret alone is still enough for every subcommand except
+// upload.
 func loadIdentity(dataDir, passphrase, mnemonic string, in *bufio.Reader, out io.Writer, profile config.NetworkProfile) (*unlockedIdentity, error) {
 	stored, err := readIdentityFile(dataDir)
 	if err != nil {
 		return nil, err
 	}
 	if stored == nil {
-		return nil, fmt.Errorf("no local identity found at %s — run `register` first", identityFilePath(dataDir))
+		return nil, fmt.Errorf("no local identity found at %s — run `register` or `recover` first", identityFilePath(dataDir))
 	}
 	ownerID, err := uuid.Parse(stored.OwnerID)
 	if err != nil {
@@ -67,6 +83,15 @@ func loadIdentity(dataDir, passphrase, mnemonic string, in *bufio.Reader, out io
 	}
 	if err != nil {
 		return nil, err
+	}
+
+	if !stored.HasKeystore {
+		return &unlockedIdentity{
+			OwnerID:      ownerID,
+			Token:        stored.Token,
+			SigningKey:   nil,
+			MasterSecret: masterSecret,
+		}, nil
 	}
 
 	ciphertext, nonce, err := decodeStoredKeystore(*stored)
