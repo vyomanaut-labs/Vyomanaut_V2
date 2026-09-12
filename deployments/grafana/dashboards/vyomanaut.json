@@ -2,7 +2,7 @@
   "id": null,
   "uid": "vyomanaut-microservice-nfr025",
   "title": "Vyomanaut V2 \u2014 Microservice + Provider Daemon Fleet (NFR-025/026)",
-  "description": "NFR-025's eight mandatory microservice metrics, exact names per internal/metrics/microservice.go (OBS.1.1/OBS.1.2), PLUS a second row (added, M18 Stage 3 rig) covering the seven NFR-026 provider-daemon metrics from internal/metrics/daemon.go. [Correction to this file's own prior claim] This dashboard used to say provider-daemon metrics were excluded because there was no fleet-wide aggregation path to them \u2014 true when OBS.3.1 wrote this file, no longer true for the Stage 3 rig specifically: deployments/observability/prometheus.yml now scrapes every opted-in provider's 127.0.0.1:9091 endpoint directly (each provider started with --metrics-addr=0.0.0.0:9091 / -MetricsAddr 0.0.0.0:9091), which is itself a fleet-wide aggregation path, just not the OTel/remote_write one the original wording assumed. The microservice side of this dashboard (the first nine panels) is UNCHANGED and still shows no data on the Stage 3 rig \u2014 cmd/microservice still registers no /metrics handler at all (see prometheus.yml point 2). Flagging this correction for Karma rather than silently rewriting history.",
+  "description": "NFR-025's eight mandatory microservice metrics, exact names per internal/metrics/microservice.go (OBS.1.1/OBS.1.2), PLUS a second row (added, M18 Stage 3 rig) covering the seven NFR-026 provider-daemon metrics from internal/metrics/daemon.go. [Correction, round 2] The patch that added the daemon row also said the microservice side (the first nine panels) \"still shows no data on the Stage 3 rig \u2014 cmd/microservice still registers no /metrics handler at all.\" That was wrong, checked too narrowly: a separate, already-built, already-tested path exists at internal/api/router.go (GET /metrics mounted directly on the microservice's own API listener, gated behind RouterConfig.ExposePrometheusMetrics / cmd/microservice's --expose-metrics flag / VYOMANAUT_EXPOSE_METRICS=1, off by default \u2014 internal/api/router_test.go's TestPrometheusMetricsRouteIsOptIn pins exactly this). Turn that flag on (scripts/demo/up.sh --expose-metrics), add the coordinator's own address to deployments/observability/targets/microservice.json, and these first nine panels receive real data \u2014 the metrics were being updated on every run all along; nothing was ever exposing them until that flag exists. internal/metrics/microservice.go's own StartMicroserviceMetricsServer / ShutdownMicroserviceMetricsServer remain genuinely unused after this correction: a second, separate-port mechanism for the same metrics that the router-mounted approach appears to have superseded. Worth a decision (document the two as intentionally serving different tracks, or drop the unused one) rather than something resolved here.",
   "tags": [
     "vyomanaut",
     "nfr-025",
@@ -13,7 +13,7 @@
   ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "refresh": "30s",
   "time": {
     "from": "now-6h",
