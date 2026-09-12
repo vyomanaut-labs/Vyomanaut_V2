@@ -230,7 +230,97 @@ docker compose -f deployments/dev/docker-compose.yml up -d postgres
 > The database holds only bookkeeping — who the machines are, which piece went where, the
 > ledger. It never sees the contents of anything.
 
-### 4.3 Start the coordinator
+### 4.3 Start the observability stack (Prometheus + Grafana)
+
+Two new tools, so a plain-language version first. **Prometheus** is a small program that
+asks every machine you point it at "what are your numbers right now?" every few seconds and
+remembers the answers. **Grafana** is a second small program that turns those remembered
+numbers into graphs you look at in a browser. Neither of them touches the demo itself —
+they only watch it.
+
+> Bring this up **now**, before 4.4's `up.sh`, not after. Both tools only remember numbers
+> from the moment they start — anything that happened before they were running is gone for
+> good. Starting them first means the very first heartbeat gets captured.
+
+```bash
+docker compose -f deployments/observability/docker-compose.yml up -d
+```
+
+Check Prometheus is actually collecting something:
+
+> Open <http://localhost:9090/targets> in a browser.
+
+You'll see two jobs. `prometheus` (itself, watching its own health — ignore it) and
+`vyomanaut-providers`, which starts **empty**. That's expected, not broken — it fills in
+as real machines join in Part 5, below.
+
+Check Grafana:
+
+> Open <http://localhost:3000>. Log in with `admin` / `admin`. It will ask you to set a new
+> password on first login — **"Skip"** is fine for a demo that only runs on your own machine.
+
+Find the dashboard:
+
+> Left sidebar (the four-squares icon) → **Dashboards** → **Vyomanaut** folder → open
+> **"Vyomanaut V2 — Microservice + Provider Daemon Fleet"**.
+
+> The top half of this dashboard (the first nine panels) will show **"No data"** for the
+> whole demo. That's the coordinator's side of things, and the coordinator doesn't expose
+> any metrics yet — a known gap, not something broken in your setup. The bottom half (the
+> panels titled `Daemon: ...`) is the part that actually works today, and it's per-machine.
+
+#### Add each machine as it joins (do this during Part 5)
+
+Two things have to both be true for a machine to show up here, and it's almost always the
+first one that gets missed:
+
+1. That teammate was started with the metrics flag on — `--metrics-addr=0.0.0.0:9091`
+   (their guide's `join.sh`) or `-MetricsAddr 0.0.0.0:9091` (`join.ps1`). **This is off by
+   default.** If you want a machine's daemon metrics visible, tell that teammate to add the
+   flag when they run their join command — it's optional precisely so nobody's metrics get
+   exposed without them knowing.
+2. You've added that machine's `10.x` address to the target list Prometheus reads. Open
+   `deployments/observability/targets/providers.json` in any text editor and add a block —
+   the file's own `README.md` next to it has the exact format, but the short version:
+
+   ```json
+   [
+     {
+       "targets": ["10.35.114.94:9091"],
+       "labels": { "desk": "DESK-01" }
+     }
+   ]
+   ```
+
+   The IP is the same `10.x` ZeroTier address you already have in front of you — Central →
+   **Members** (2.4) lists it for every authorized machine. Save the file. **No restart,
+   no reload command.** Prometheus notices the change on its own within about 15 seconds —
+   refresh <http://localhost:9090/targets> and the new entry should turn green (`UP`)
+   shortly after that teammate's provider process actually starts.
+
+   Add one block per machine as they join, in the same array. Remove a block when a machine
+   is done for the day — nothing else needs cleaning up.
+
+#### What you're actually looking at
+
+| Panel | Healthy looks like | Worth a second look when |
+| --- | --- | --- |
+| Daemon: chunks stored | Climbing per desk while vetting or repair work is happening | One desk stays flat while the others climb |
+| Daemon: audit responses sent | Roughly even across desks | One desk falls far behind the rest |
+| Daemon: audit response latency p95 | Low and flat (this one's in milliseconds, not seconds) | One desk climbs while the others stay flat — that machine, not the network, is the bottleneck |
+| Daemon: vLog append latency p95 | Low and flat | One desk drifts upward over a long run — that machine's disk, not this project's code |
+| Daemon: content hash failures | Flat zero, always, for every desk | Any value above zero at all — real, silent disk corruption on that machine |
+| Daemon: heartbeats sent | A steady pulse per desk | A flatline — usually your **earliest** warning that a machine went to sleep or lost its ZeroTier link, ahead of the console's own OVERDUE marker |
+| Daemon: RAM constrained | Flat 0 for every desk | Pinned at 1 — check that machine directly (Task Manager / Activity Monitor) before trusting its other numbers here |
+
+> Use the **Desk** dropdown at the top of the dashboard to narrow the graphs to one machine
+> once you've got more than a handful running — the legend gets crowded past four or five.
+
+> This opens an unauthenticated port on every machine that turns the flag on — anyone on
+> the same private network can read it. Fine on this project's own isolated lab mesh.
+> Never turn this flag on anywhere else.
+
+### 4.4 Start the coordinator
 
 Set the environment for ZeroTier:
 
@@ -259,6 +349,9 @@ scripts/demo/up.sh --providers 0 --advertise-host "$MY_IP"
 > always. Without it the script guesses which network card to publish, and on a machine
 > running ZeroTier alongside ordinary Wi-Fi that guess is a coin flip.
 
+> If you followed 4.3, Prometheus and Grafana are already running alongside this — nothing
+> further to do here on that front.
+
 Save what it prints. **The admin key exists only on this machine and only for this run.**
 
 Sanity check the output before continuing:
@@ -270,7 +363,7 @@ Sanity check the output before continuing:
 > It must be your `10.x` ZeroTier address, not `127.0.0.1`.
 > You should see **no** "onboarding local provider" lines at all with `--providers 0`.
 
-### 4.4 Give everyone the address
+### 4.5 Give everyone the address
 
 Tell your teammates:
 
@@ -280,7 +373,7 @@ http://<your 10.x ZeroTier address>:8080
 
 They can now start Part 4 of their own guide.
 
-### 4.5 Open the console
+### 4.6 Open the console
 
 New terminal for the TUI:
 
@@ -307,6 +400,10 @@ Use it also when a provider skips a heartbeat.
 ## Part 5 — Bringing machines in
 
 Bring them in **one at a time**, confirming each appears before starting the next.
+
+> Running the observability stack from 4.3? This is also the point where each machine's
+> `10.x` address becomes real — add it to `deployments/observability/targets/providers.json`
+> as they join, not before.
 
 When a teammate asks for their code, in another terminal:
 
@@ -519,6 +616,18 @@ rm -rf /tmp/vyomanaut-demo
 > restart — the start script rebuilds the network from scratch, and their old membership is
 > no longer recognised.
 
+> `down.sh` deliberately does **not** touch Prometheus or Grafana (4.3) — they're a separate
+> compose stack on purpose, so the numbers from this run survive your next `down.sh` /
+> `up.sh` cycle and you can compare across runs. Leave them running between attempts. Only
+> stop them when you're genuinely done for the day:
+>
+> ```bash
+> docker compose -f deployments/observability/docker-compose.yml down
+> ```
+>
+> That keeps the collected history on disk for next time. Add `-v` only if you want to wipe
+> it and start clean.
+
 ---
 
 ## Part 10 — When something goes wrong
@@ -527,7 +636,7 @@ rm -rf /tmp/vyomanaut-demo
 | --- | --- | --- |
 | `database is being accessed by other users` | Leftover processes from the last attempt | `down.sh` first, always |
 | `microservice never became reachable` | Port 8080 still held | Same |
-| The printed URL is `127.0.0.1` | `--advertise-host` not passed, autodetect picked the wrong card | 4.3 — pass your `10.x` ZeroTier address |
+| The printed URL is `127.0.0.1` | `--advertise-host` not passed, autodetect picked the wrong card | 4.4 — pass your `10.x` ZeroTier address |
 | "onboarding local provider" appears despite `--providers 0` | Old copy of the start script | `git pull` and try again |
 | A teammate registers, then goes DEPARTED with `401 invalid token` on their side | They kept a data folder from before you restarted | They delete it and rejoin — their guide, Part 4 |
 | A teammate is never asked for a code | Same cause | Same fix |
@@ -543,6 +652,10 @@ rm -rf /tmp/vyomanaut-demo
 | A teammate is stuck at `REQUESTING_CONFIGURATION` / `ACCESS_DENIED` | You haven't ticked their checkbox in Central yet | Members tab — authorize them, they don't need to do anything |
 | Two authorized machines never see each other in `zerotier-cli peers` | Both stuck relaying, or one daemon isn't actually running | Check `zerotier-cli info` on both — `TUNNELED` is fine, `OFFLINE` means restart that machine's service |
 | `$MY_IP` comes back empty | `NETWORK_ID` doesn't match, or you're not authorized on your own network | Recheck 2.2 — `zerotier-cli listnetworks` should show `OK`, not blank |
+| A desk stays red/`DOWN` on the Prometheus targets page | Almost always the metrics flag was left off when that teammate ran `join.sh`/`join.ps1` | Have them re-run their join command with `--metrics-addr=0.0.0.0:9091` / `-MetricsAddr 0.0.0.0:9091` added |
+| A desk is `UP` in Prometheus but never appears in Grafana's legend | The `targets/providers.json` entry has a typo in the `desk` label, or you're mid-refresh | Wait ~15s and reload the dashboard; recheck the JSON is valid (a stray trailing comma is the usual culprit — see `targets/README.md`) |
+| The top nine panels on the dashboard all say "No data" | Expected — the coordinator doesn't expose `/metrics` yet | Not a bug in your setup; see 4.3's note. The `Daemon: ...` panels below are the ones that work today |
+| Editing `providers.json` doesn't seem to do anything | Invalid JSON — Prometheus silently keeps the last good version rather than erroring loudly | Check for a missing comma or bracket; <http://localhost:9090/targets> is the fastest way to confirm whether your edit actually landed |
 
 > This demo runs over a private mesh network that handles the machine-to-machine
 > connectivity for us. If anyone asks: the connectivity layer is ZeroTier's, the storage,
