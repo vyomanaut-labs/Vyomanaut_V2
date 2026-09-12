@@ -11,26 +11,52 @@
 #    reach. That endpoint has NO authentication, so opening it is only
 #    appropriate on the isolated, no-uplink rig.
 #
-# 2. THE COORDINATOR IS NOT SCRAPED, BECAUSE IT EXPOSES NOTHING.
-#    cmd/microservice registers no /metrics handler at all — verified, not
-#    assumed. So repair duration, audit cycle timing, charge computation
-#    latency and every other coordinator-side measurement are NOT collected
-#    by this file. What you get here is provider-side only. Closing that
-#    gap is a separate piece of work; see the M18 Stage 3 handoff.
+# 2. [Corrected] This comment previously said "THE COORDINATOR IS NOT
+#    SCRAPED, BECAUSE IT EXPOSES NOTHING" and claimed cmd/microservice
+#    registered no /metrics handler at all. That was wrong, checked too
+#    narrowly: it is true that internal/metrics/microservice.go's own
+#    StartMicroserviceMetricsServer is never called anywhere (still true,
+#    still unused today) — but that isn't the only mechanism. A SEPARATE,
+#    already-built, already-tested path exists: internal/api/router.go
+#    mounts GET /metrics (promhttp.Handler(), same default Prometheus
+#    registry the microservice's collectors register into) directly on the
+#    microservice's own API listener, gated behind
+#    RouterConfig.ExposePrometheusMetrics (cmd/microservice's
+#    --expose-metrics flag / VYOMANAUT_EXPOSE_METRICS=1, off by default —
+#    internal/api/router_test.go's TestPrometheusMetricsRouteIsOptIn pins
+#    exactly this). scripts/demo/up.sh now has an --expose-metrics flag
+#    (also off by default) that sets it for a given run. Turn that on, add
+#    the coordinator's own address to targets/microservice.json below (see
+#    that file's README), and the vyomanaut-microservice job here starts
+#    collecting real repair/audit/scoring/escrow/db-latency data — the
+#    metrics registered in internal/metrics/microservice.go were already
+#    being updated on every run all along; nothing was ever exposing them
+#    until this flag exists. Flagging the correction plainly rather than
+#    quietly rewriting the earlier, wrong claim.
 #
-# 3. [Changed, Stage 3 scale-up] The target list used to be a fixed
-#    static_configs block (DESK-01 through DESK-07, hardcoded IPs) — fine
-#    for a 7-machine rehearsal, but two real problems show up past that:
-#    a) a rig now regularly runs 10+ machines and growing, so the list
-#       needs to grow with it, and b) every one of those IPs is a ZeroTier
-#       address that Central hands out only once a machine actually joins
-#       (guides/operator_unix_guide.md Part 5) — meaning the addresses do
-#       not exist yet at the point in Part 4 where this stack starts.
+#    internal/metrics/microservice.go's StartMicroserviceMetricsServer /
+#    ShutdownMicroserviceMetricsServer / DefaultAdminMetricsPort remain
+#    genuinely unused after this correction — a second, separate-port
+#    design for exposing the same metrics that nothing calls. Worth a
+#    decision (keep both for different tracks and document why, or drop
+#    the unused one) rather than something to resolve unilaterally here.
+#
+# 3. [Changed, Stage 3 scale-up] The provider target list used to be a
+#    fixed static_configs block (DESK-01 through DESK-07, hardcoded IPs) —
+#    fine for a 7-machine rehearsal, but two real problems show up past
+#    that: a) a rig now regularly runs 10+ machines and growing, so the
+#    list needs to grow with it, and b) every one of those IPs is a
+#    ZeroTier address that Central hands out only once a machine actually
+#    joins (guides/operator_unix_guide.md Part 5) — meaning the addresses
+#    do not exist yet at the point in Part 4 where this stack starts.
 #    file_sd_configs (below) solves both: it watches a plain JSON file on
 #    disk and re-reads it on its own every 15s, no Prometheus restart and
 #    no reload API call needed. Bring this stack up early with an empty
 #    targets file, then append one line per machine as it joins. See
-#    targets/README.md for the exact format.
+#    targets/README.md for the exact format. The coordinator itself gets
+#    the same treatment (targets/microservice.json) even though there is
+#    normally only one of it in this demo, purely so both jobs work the
+#    same way and the operator only has to learn one mechanism.
 
 global:
   scrape_interval: 15s
@@ -43,6 +69,12 @@ scrape_configs:
     file_sd_configs:
       - files:
           - /etc/prometheus/targets/providers.json
+        refresh_interval: 15s
+
+  - job_name: vyomanaut-microservice
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/microservice.json
         refresh_interval: 15s
 
   - job_name: prometheus
