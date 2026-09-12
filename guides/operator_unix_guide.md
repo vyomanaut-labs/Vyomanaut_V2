@@ -250,9 +250,10 @@ Check Prometheus is actually collecting something:
 
 > Open <http://localhost:9090/targets> in a browser.
 
-You'll see two jobs. `prometheus` (itself, watching its own health — ignore it) and
-`vyomanaut-providers`, which starts **empty**. That's expected, not broken — it fills in
-as real machines join in Part 5, below.
+You'll see three jobs: `prometheus` (itself, watching its own health — ignore it),
+`vyomanaut-providers`, and `vyomanaut-microservice` — the latter two both start **empty**.
+That's expected, not broken. `vyomanaut-providers` fills in as real machines join in Part 5,
+below; `vyomanaut-microservice` fills in once you enable it a few paragraphs down.
 
 Check Grafana:
 
@@ -264,10 +265,42 @@ Find the dashboard:
 > Left sidebar (the four-squares icon) → **Dashboards** → **Vyomanaut** folder → open
 > **"Vyomanaut V2 — Microservice + Provider Daemon Fleet"**.
 
-> The top half of this dashboard (the first nine panels) will show **"No data"** for the
-> whole demo. That's the coordinator's side of things, and the coordinator doesn't expose
-> any metrics yet — a known gap, not something broken in your setup. The bottom half (the
-> panels titled `Daemon: ...`) is the part that actually works today, and it's per-machine.
+#### Turn on the coordinator's own metrics
+
+The top nine panels (repair, audit, scoring, escrow, DB latency) are the coordinator's
+side of things. They're **off by default** — same reasoning as everything else on this
+page: the endpoint has no authentication.
+
+> **Don't run `up.sh` yet** — that's 4.4, and `$MY_IP` isn't set until you get there. Just
+> remember, when you reach 4.4's command, to add one flag:
+>
+> ```bash
+> scripts/demo/up.sh --providers 0 --advertise-host "$MY_IP" --expose-metrics
+> ```
+>
+> There's no way to turn this on for an already-running coordinator — if you forget and
+> start `up.sh` without it, `down.sh` and restart with the flag added.
+
+You can add the target entry now, though — you already know your own `10.x` address from
+2.2, and that's the address that goes here regardless of when `up.sh` actually starts.
+Add it to `deployments/observability/targets/microservice.json` (same file format as the
+provider one, see its `README.md`):
+
+```json
+[
+  {
+    "targets": ["10.35.114.52:8080"],
+    "labels": { "desk": "COORDINATOR" }
+  }
+]
+```
+
+> Use your own `$MY_IP` and whatever `--port` you gave `up.sh` (default `8080` — the same
+> port as the main API, not a separate one). You already know this address; it's the one
+> you're about to hand teammates in 4.5.
+
+Skip this and the top nine panels stay empty — not broken, just not turned on. Everything
+else on this page works either way.
 
 #### Add each machine as it joins (do this during Part 5)
 
@@ -303,6 +336,17 @@ first one that gets missed:
 
 #### What you're actually looking at
 
+The coordinator's own panels (top nine, if you turned them on above):
+
+| Panel | Healthy looks like | Worth a second look when |
+| --- | --- | --- |
+| Repair queue depth | Low, draining as fast as it fills | Climbing steadily — the same NFR-027 threshold (1,000) `alerts.yaml`'s `RepairQueueDepthHigh` watches |
+| Audit results by outcome | Mostly PASS | TIMEOUT climbing past ~5% of the total — `AuditTimeoutRateHigh`'s own threshold |
+| Escrow events | DEPOSIT/RELEASE ticking up in step with real uploads and payouts | A SEIZURE or REVERSAL you didn't expect |
+| DB read latency | Comfortably under 50ms | Approaching or past it — NFR-028's own throttle threshold, visible here before the throttle loop itself would act |
+
+The per-machine daemon panels (bottom half, always on once a machine opts in):
+
 | Panel | Healthy looks like | Worth a second look when |
 | --- | --- | --- |
 | Daemon: chunks stored | Climbing per desk while vetting or repair work is happening | One desk stays flat while the others climb |
@@ -313,12 +357,14 @@ first one that gets missed:
 | Daemon: heartbeats sent | A steady pulse per desk | A flatline — usually your **earliest** warning that a machine went to sleep or lost its ZeroTier link, ahead of the console's own OVERDUE marker |
 | Daemon: RAM constrained | Flat 0 for every desk | Pinned at 1 — check that machine directly (Task Manager / Activity Monitor) before trusting its other numbers here |
 
-> Use the **Desk** dropdown at the top of the dashboard to narrow the graphs to one machine
-> once you've got more than a handful running — the legend gets crowded past four or five.
+> Use the **Desk** dropdown at the top of the dashboard to narrow the daemon graphs to one
+> machine once you've got more than a handful running — the legend gets crowded past four
+> or five.
 
-> This opens an unauthenticated port on every machine that turns the flag on — anyone on
-> the same private network can read it. Fine on this project's own isolated lab mesh.
-> Never turn this flag on anywhere else.
+> Both of these open an unauthenticated port — the coordinator's on `--expose-metrics`,
+> each provider's on its own opt-in flag. Anyone on the same private network can read
+> whichever ones are turned on. Fine on this project's own isolated lab mesh. Never turn
+> either on anywhere else.
 
 ### 4.4 Start the coordinator
 
@@ -349,8 +395,9 @@ scripts/demo/up.sh --providers 0 --advertise-host "$MY_IP"
 > always. Without it the script guesses which network card to publish, and on a machine
 > running ZeroTier alongside ordinary Wi-Fi that guess is a coin flip.
 
-> If you followed 4.3, Prometheus and Grafana are already running alongside this — nothing
-> further to do here on that front.
+> If you're running the observability stack from 4.3 and want the coordinator's own panels
+> populated, add `--expose-metrics` to the command above now — there's no adding it later
+> without restarting.
 
 Save what it prints. **The admin key exists only on this machine and only for this run.**
 
@@ -654,7 +701,7 @@ rm -rf /tmp/vyomanaut-demo
 | `$MY_IP` comes back empty | `NETWORK_ID` doesn't match, or you're not authorized on your own network | Recheck 2.2 — `zerotier-cli listnetworks` should show `OK`, not blank |
 | A desk stays red/`DOWN` on the Prometheus targets page | Almost always the metrics flag was left off when that teammate ran `join.sh`/`join.ps1` | Have them re-run their join command with `--metrics-addr=0.0.0.0:9091` / `-MetricsAddr 0.0.0.0:9091` added |
 | A desk is `UP` in Prometheus but never appears in Grafana's legend | The `targets/providers.json` entry has a typo in the `desk` label, or you're mid-refresh | Wait ~15s and reload the dashboard; recheck the JSON is valid (a stray trailing comma is the usual culprit — see `targets/README.md`) |
-| The top nine panels on the dashboard all say "No data" | Expected — the coordinator doesn't expose `/metrics` yet | Not a bug in your setup; see 4.3's note. The `Daemon: ...` panels below are the ones that work today |
+| The top nine panels on the dashboard say "No data" | `--expose-metrics` wasn't passed to `up.sh`, or the coordinator's address is missing from `targets/microservice.json` | See 4.3's "Turn on the coordinator's own metrics" — both are required, and the flag can't be added without restarting |
 | Editing `providers.json` doesn't seem to do anything | Invalid JSON — Prometheus silently keeps the last good version rather than erroring loudly | Check for a missing comma or bracket; <http://localhost:9090/targets> is the fastest way to confirm whether your edit actually landed |
 
 > This demo runs over a private mesh network that handles the machine-to-machine
