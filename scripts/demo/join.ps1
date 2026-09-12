@@ -17,7 +17,15 @@ param(
 
     [int]$ListenPort = 30303,
     [string]$AdvertiseAddr = "",
-    [string]$DataDir = (Join-Path $env:USERPROFILE ".vyomanaut")
+    [string]$DataDir = (Join-Path $env:USERPROFILE ".vyomanaut"),
+
+    # [Added, M18 Stage 3] Passed straight through to `provider run`.
+    # Empty (default) = this machine's daemon metrics stay loopback-only,
+    # matching every prior run of this script. Only set this if the
+    # network operator has asked you to, and only ever to 0.0.0.0:9091 on
+    # this project's own isolated lab mesh — see join.sh's usage text for
+    # the full warning (same flag, same daemon, same caveat either OS).
+    [string]$MetricsAddr = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -57,6 +65,9 @@ if (-not (Test-Path $ProviderBin)) {
 
 $advertiseArgs = @()
 if ($AdvertiseAddr) { $advertiseArgs = @("--advertise-addr", $AdvertiseAddr) }
+
+$metricsArgs = @()
+if ($MetricsAddr) { $metricsArgs = @("--metrics-addr", $MetricsAddr) }
 
 # [Added — clock-skew preflight, evidence: a real college-lab desktop run
 # over ZeroTier where the join itself, the OTP exchange, and onboarding all
@@ -186,5 +197,5 @@ $runArgs = @(
     "--data-dir=$DataDir",
     "--declared-storage-gb=$DeclaredStorageGB",
     "--listen-port=$ListenPort"
-) + $advertiseArgs
+) + $advertiseArgs + $metricsArgs
 & $ProviderBin @runArgs

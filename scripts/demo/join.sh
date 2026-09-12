@@ -24,7 +24,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/demo/join.sh <microservice-url> [--listen-port PORT] [--advertise-addr ADDR] [--data-dir DIR]
+Usage: scripts/demo/join.sh <microservice-url> [--listen-port PORT] [--advertise-addr ADDR] [--data-dir DIR] [--metrics-addr ADDR]
 
   <microservice-url>     Required. The URL the network operator gave you,
                           e.g. http://192.168.1.42:8080 — printed by up.sh.
@@ -36,6 +36,16 @@ Usage: scripts/demo/join.sh <microservice-url> [--listen-port PORT] [--advertise
                           (default ~/.vyomanaut). Re-running join.sh with the
                           same --data-dir resumes an already-onboarded provider
                           instead of onboarding again.
+  --metrics-addr ADDR    [Added, M18 Stage 3] Passed straight through to
+                          `provider run`. Empty (default) = this machine's
+                          daemon metrics stay loopback-only, matching every
+                          prior run of this script. Only set this if the
+                          network operator has asked you to, and only ever
+                          to 0.0.0.0:9091 on this project's own isolated lab
+                          mesh — the endpoint it opens has no authentication
+                          of any kind, so it publishes this machine's audit
+                          response timings, content-hash-failure history,
+                          and RAM pressure state to that entire network.
 EOF
 }
 
@@ -54,12 +64,14 @@ shift
 LISTEN_PORT=30303
 ADVERTISE_ADDR=""
 DATA_DIR="${HOME:-.}/.vyomanaut"
+METRICS_ADDR=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --listen-port) LISTEN_PORT="$2"; shift 2 ;;
     --advertise-addr) ADVERTISE_ADDR="$2"; shift 2 ;;
     --data-dir) DATA_DIR="$2"; shift 2 ;;
+    --metrics-addr) METRICS_ADDR="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown flag: $1" >&2; usage; exit 2 ;;
   esac
@@ -105,6 +117,15 @@ fi
 ADVERTISE_FLAG=()
 if [[ -n "$ADVERTISE_ADDR" ]]; then
   ADVERTISE_FLAG=(--advertise-addr "$ADVERTISE_ADDR")
+fi
+
+# Same bash-3.2-safe empty-array pattern as ADVERTISE_FLAG above, same
+# reason: METRICS_ADDR is empty far more often than not (only the
+# observability-rig case needs it), and this script's most common target
+# platform is macOS's system bash 3.2.57.
+METRICS_FLAG=()
+if [[ -n "$METRICS_ADDR" ]]; then
+  METRICS_FLAG=(--metrics-addr "$METRICS_ADDR")
 fi
 
 # [Added — clock-skew preflight, evidence: a real college-lab desktop run
@@ -230,4 +251,5 @@ exec "$PROVIDER_BIN" run \
   --data-dir="$DATA_DIR" \
   --declared-storage-gb="$DECLARED_STORAGE_GB" \
   --listen-port="$LISTEN_PORT" \
-  "${ADVERTISE_FLAG[@]+"${ADVERTISE_FLAG[@]}"}"
+  "${ADVERTISE_FLAG[@]+"${ADVERTISE_FLAG[@]}"}" \
+  "${METRICS_FLAG[@]+"${METRICS_FLAG[@]}"}"
