@@ -1,16 +1,19 @@
 {
   "id": null,
   "uid": "vyomanaut-microservice-nfr025",
-  "title": "Vyomanaut V2 \u2014 Microservice (NFR-025)",
-  "description": "NFR-025's eight mandatory microservice metrics, exact names per internal/metrics/microservice.go (OBS.1.1/OBS.1.2). Provider-daemon metrics (NFR-026) are intentionally excluded \u2014 they are registered on each daemon's local-only status endpoint (127.0.0.1:9091, OBS.2.1) and this dashboard has no fleet-wide aggregation path to them yet (see alerts.yaml's ContentHashFailureDetected annotation for the same gap).",
+  "title": "Vyomanaut V2 \u2014 Microservice + Provider Daemon Fleet (NFR-025/026)",
+  "description": "NFR-025's eight mandatory microservice metrics, exact names per internal/metrics/microservice.go (OBS.1.1/OBS.1.2), PLUS a second row (added, M18 Stage 3 rig) covering the seven NFR-026 provider-daemon metrics from internal/metrics/daemon.go. [Correction to this file's own prior claim] This dashboard used to say provider-daemon metrics were excluded because there was no fleet-wide aggregation path to them \u2014 true when OBS.3.1 wrote this file, no longer true for the Stage 3 rig specifically: deployments/observability/prometheus.yml now scrapes every opted-in provider's 127.0.0.1:9091 endpoint directly (each provider started with --metrics-addr=0.0.0.0:9091 / -MetricsAddr 0.0.0.0:9091), which is itself a fleet-wide aggregation path, just not the OTel/remote_write one the original wording assumed. The microservice side of this dashboard (the first nine panels) is UNCHANGED and still shows no data on the Stage 3 rig \u2014 cmd/microservice still registers no /metrics handler at all (see prometheus.yml point 2). Flagging this correction for Karma rather than silently rewriting history.",
   "tags": [
     "vyomanaut",
     "nfr-025",
-    "microservice"
+    "nfr-026",
+    "microservice",
+    "daemon",
+    "stage3"
   ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "30s",
   "time": {
     "from": "now-6h",
@@ -342,10 +345,268 @@
         "overrides": []
       },
       "options": {}
+    },
+    {
+      "id": 10,
+      "title": "Daemon: chunks stored (per desk)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+      },
+      "description": "[Added, M18 Stage 3] Chunk-store activity per provider (vyomanaut_daemon_chunks_stored_total). Cumulative counter, so this is a rate \u2014 a flat line at zero on a desk that should be receiving vetting/repair traffic is the first sign something upstream stopped routing work to it. Requires that desk's provider to have been started with --metrics-addr=0.0.0.0:9091 / -MetricsAddr 0.0.0.0:9091; a desk missing from the legend entirely usually means that flag was left off, not that the metric is broken.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(vyomanaut_daemon_chunks_stored_total{desk=~\"$desk\"}[5m])",
+          "legendFormat": "{{desk}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 11,
+      "title": "Daemon: audit responses sent (per desk)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+      },
+      "description": "[Added, M18 Stage 3] Per-provider audit-response throughput (vyomanaut_daemon_audit_responses_sent_total). Cross-check against the microservice-side 'Audit results by outcome' panel above: if that panel's TIMEOUT share is climbing but every desk here still shows a healthy response rate, the timeouts are more likely network/relay-side than the provider failing to respond at all.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(vyomanaut_daemon_audit_responses_sent_total{desk=~\"$desk\"}[5m])",
+          "legendFormat": "{{desk}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 12,
+      "title": "Daemon: audit response latency p95 (per desk)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+      },
+      "description": "[Added, M18 Stage 3] p95 of vyomanaut_daemon_audit_response_latency_milliseconds. [Note] Registered in milliseconds, not seconds \u2014 internal/metrics/daemon.go's own OBS.2.1 comment documents this as a deliberate exception to NFR-046's _seconds convention, kept because this histogram also feeds FR-029's human-facing CLI status view. The single slowest desk here is usually your bottleneck for the whole network's audit cycle time, not the average.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, desk) (rate(vyomanaut_daemon_audit_response_latency_milliseconds_bucket{desk=~\"$desk\"}[5m])))",
+          "legendFormat": "{{desk}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 13,
+      "title": "Daemon: vLog append latency p95 (per desk)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+      },
+      "description": "[Added, M18 Stage 3] p95 of vyomanaut_daemon_vlog_append_latency_milliseconds \u2014 local disk write performance per machine. Also milliseconds, same NFR-046 exception as the panel above. A desk that drifts upward here over a long run, while every other desk stays flat, points at that specific machine's disk (fragmentation, thermal throttling, a background scan) rather than anything in this project's own code.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, desk) (rate(vyomanaut_daemon_vlog_append_latency_milliseconds_bucket{desk=~\"$desk\"}[5m])))",
+          "legendFormat": "{{desk}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 14,
+      "title": "Daemon: content hash failures (per desk)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+      },
+      "description": "[Added, M18 Stage 3] increase() of vyomanaut_daemon_content_hash_failures_total over 1h \u2014 the same metric alerts.yaml's ContentHashFailureDetected rule watches. This should sit at exactly zero for every desk, always. Any nonzero value is a real silent-corruption event on that machine's disk (architecture.md \u00a723: trigger an accelerated re-audit of everything that provider holds), not noise to average away \u2014 hence the threshold coloring rather than a smoothed rate.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "increase(vyomanaut_daemon_content_hash_failures_total{desk=~\"$desk\"}[1h])",
+          "legendFormat": "{{desk}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 15,
+      "title": "Daemon: heartbeats sent (per desk)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+      },
+      "description": "[Added, M18 Stage 3] rate() of vyomanaut_daemon_heartbeat_sent_total \u2014 each desk's connectivity signal. A line that flatlines here is usually visible minutes before the operator console's own Provider fleet panel marks that machine OVERDUE/DEPARTED (departure-threshold is on the order of minutes; the flatline itself starts at the missed heartbeat), so this is the earliest warning of a machine that has gone to sleep or lost its ZeroTier link.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(vyomanaut_daemon_heartbeat_sent_total{desk=~\"$desk\"}[5m])",
+          "legendFormat": "{{desk}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 16,
+      "title": "Daemon: RAM constrained (per desk)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+      },
+      "description": "[Added, M18 Stage 3] vyomanaut_daemon_ram_constrained \u2014 1 while that desk is under RAM pressure (Session 13.6.1, A1), 0 otherwise. Expect a flat 0 for every desk on typical lab hardware; a desk pinned at 1 is worth checking directly (Task Manager / Activity Monitor) before trusting its other numbers on this dashboard, since a RAM-constrained daemon is more likely to also be the one posting slow audit/vLog latency above.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 56
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "vyomanaut_daemon_ram_constrained{desk=~\"$desk\"}",
+          "legendFormat": "{{desk}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {}
     }
   ],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "name": "desk",
+        "label": "Desk",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+        },
+        "query": {
+          "query": "label_values(vyomanaut_daemon_heartbeat_sent_total, desk)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "hide": 0
+      }
+    ]
   },
   "annotations": {
     "list": []
