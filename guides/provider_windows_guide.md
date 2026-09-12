@@ -393,6 +393,12 @@ And let's join the network!
 .\scripts\demo\join.ps1 $MSURL -ListenPort 30303 -AdvertiseAddr $MyIp -DataDir $env:USERPROFILE\.vyomanaut
 ```
 
+> **If the operator asks you to** — and only then — add `-MetricsAddr 0.0.0.0:9091` to that
+> command. It lets the operator's Prometheus/Grafana setup see this machine's numbers
+> (chunks stored, audit response times, and so on). It's off unless you turn it on, because
+> it opens that port with no password on it — fine on this project's own lab network, not
+> something to leave on anywhere else.
+
 #### Possible errors
 
 If on the college Desktop then it might show a warning for the clock to be lagging behind
