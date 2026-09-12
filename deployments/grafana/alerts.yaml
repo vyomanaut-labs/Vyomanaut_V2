@@ -123,12 +123,25 @@ groups:
           note: >-
             vyomanaut_daemon_content_hash_failures_total is registered on
             the provider daemon's local-only status endpoint
-            (127.0.0.1:9091, OBS.2.1) — this rule assumes a separate
-            fleet-wide aggregation path (e.g. an OTel/Prometheus
-            remote_write agent per provider host) forwards it into the
-            same Prometheus this alert queries. That aggregation path is
-            not yet built (out of this session's FILES scope) — flagging
-            here rather than silently assuming it exists.
+            (127.0.0.1:9091, OBS.2.1). This rule was originally written
+            assuming a separate fleet-wide aggregation path (e.g. an
+            OTel/Prometheus remote_write agent per provider host) would be
+            needed to forward it into the Prometheus this alert queries,
+            and that path did not exist yet at the time.
+            [Corrected, M18 Stage 3] deployments/observability/prometheus.yml
+            now provides exactly that aggregation path for the isolated
+            Stage 3 rig, by direct scrape rather than remote_write: every
+            provider started with --metrics-addr=0.0.0.0:9091 (join.sh) or
+            -MetricsAddr 0.0.0.0:9091 (join.ps1) is scraped straight from
+            its own host. This rule is therefore deployable as written
+            against that Prometheus instance today. What remains unbuilt
+            is a PRODUCTION aggregation path (this direct-scrape approach
+            is only safe on the rig's isolated, no-uplink network, per
+            prometheus.yml's own security note) and wiring this alerts
+            file into the observability docker-compose's Grafana
+            provisioning at all — neither done here, flagging both as
+            separate follow-on work rather than silently leaving the old
+            claim standing next to code that now contradicts it.
         data:
           - refId: query
             datasourceUid: "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
