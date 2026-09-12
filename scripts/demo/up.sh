@@ -50,6 +50,11 @@ STORAGE_GB=10
 ADVERTISE_ADDR=""
 ADVERTISE_HOST=""
 PORT=8080
+# [Added, M18 Stage 3] Empty = VYOMANAUT_EXPOSE_METRICS unset, which
+# config_env.go treats as false — matches every prior run of this script.
+# See the --expose-metrics usage text below for what turning this on
+# actually does and why it stays opt-in.
+EXPOSE_METRICS=""
 
 usage() {
   cat <<'EOF'
@@ -71,6 +76,15 @@ Usage: scripts/demo/up.sh [--providers N] [--storage-gb N] [--advertise-addr ADD
                           this explicitly outside a single-NIC machine — see ADR-089 and
                           guides/operator_and_client_guide.md.
   --port PORT          Microservice HTTP port (default 8080).
+  --expose-metrics     [Added, M18 Stage 3] Turns on VYOMANAUT_EXPOSE_METRICS
+                        for this run, which serves an UNAUTHENTICATED GET
+                        /metrics on the coordinator's own port (--port above,
+                        default 8080) — internal/api/router.go's
+                        RouterConfig.ExposePrometheusMetrics, already
+                        implemented and tested, just never turned on by this
+                        script until now. Off by default. Only turn this on
+                        on the isolated lab mesh, same rule as join.sh's
+                        --metrics-addr.
 EOF
 }
 
@@ -81,6 +95,7 @@ while [[ $# -gt 0 ]]; do
     --advertise-addr) ADVERTISE_ADDR="$2"; shift 2 ;;
     --advertise-host) ADVERTISE_HOST="$2"; shift 2 ;;
     --port) PORT="$2"; shift 2 ;;
+    --expose-metrics) EXPOSE_METRICS="1"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown flag: $1" >&2; usage; exit 2 ;;
   esac
@@ -176,6 +191,7 @@ VYOMANAUT_ADMIN_API_KEY="$ADMIN_API_KEY" \
 VYOMANAUT_MICROSERVICE_SIGNING_SEED="$SIGNING_SEED" \
 VYOMANAUT_CLUSTER_MASTER_SEED="$CLUSTER_SEED" \
 VYOMANAUT_HTTP_LISTEN_ADDR=":$PORT" \
+VYOMANAUT_EXPOSE_METRICS="$EXPOSE_METRICS" \
   "$BIN_DIR/microservice" --mode=demo --otp-delivery-log="$OTP_LOG" --departure-threshold=180s \
   > "$LOG_DIR/microservice.log" 2>&1 &
 MS_PID=$!
@@ -235,6 +251,9 @@ done
 if ! curl -sf -o /dev/null "http://127.0.0.1:$PORT/api/v1/admin/readiness" -H "X-Admin-API-Key: $ADMIN_API_KEY"; then
   echo "[up.sh] microservice never became reachable — see $LOG_DIR/microservice.log" >&2
   exit 1
+fi
+if [[ "$EXPOSE_METRICS" == "1" ]]; then
+  log "coordinator-side metrics live at $MICROSERVICE_URL/metrics (--expose-metrics was set)"
 fi
 
 # ── persist state for down.sh / a human re-running join.sh by hand ────────
