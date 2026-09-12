@@ -14,6 +14,11 @@ services:
       - "9090:9090"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # [Added] file_sd_configs target for the vyomanaut-providers job
+      # (prometheus.yml point 3) — this is the file the operator edits as
+      # machines join. Read-write on the host side, read-only in the
+      # container: Prometheus only ever reads this file, never writes it.
+      - ./targets:/etc/prometheus/targets:ro
       - prometheus-data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
@@ -27,6 +32,16 @@ services:
       - "3000:3000"
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      # [Fixed] dashboards.yml (grafana/provisioning/dashboards/) declares
+      # its file-provider path as this same directory, but nothing used to
+      # put deployments/grafana/dashboards/vyomanaut.json there — Grafana
+      # provisioned an empty "Vyomanaut" folder and the dashboard never
+      # actually loaded. A second, file-level bind mount layers the real
+      # dashboard JSON into that directory without moving or duplicating
+      # it — deployments/grafana/dashboards/vyomanaut.json (the file
+      # scripts/ci/grep_checks.sh validates) stays the single source of
+      # truth.
+      - ../grafana/dashboards/vyomanaut.json:/etc/grafana/provisioning/dashboards/vyomanaut.json:ro
       - grafana-data:/var/lib/grafana
     environment:
       GF_SECURITY_ADMIN_PASSWORD: admin
