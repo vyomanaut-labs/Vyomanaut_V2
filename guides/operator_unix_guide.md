@@ -243,6 +243,7 @@ they only watch it.
 > good. Starting them first means the very first heartbeat gets captured.
 
 ```bash
+docker compose -f deployments/observability/docker-compose.yml down
 docker compose -f deployments/observability/docker-compose.yml up -d
 ```
 
