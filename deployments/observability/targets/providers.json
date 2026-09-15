@@ -1,1 +1,39 @@
-[]
+[
+    {
+        "targets": ["10.35.114.132:9091"],
+        "labels": { "desk": "Comp Lab PC C13" }
+    },
+    {
+        "targets": ["10.35.114.116:9091"],
+        "labels": { "desk": "Comp Lab PC C26" }
+    },
+    {
+        "targets": ["10.35.114.31:9091"],
+        "labels": { "desk": "Comp Lab PC C37" }
+    },
+    {
+        "targets": ["10.35.114.103:9091"],
+        "labels": { "desk": "Comp Lab PC C21" }
+    },
+    {
+        "targets": ["10.35.114.36:9091"],
+        "labels": { "desk": "Comp Lab PC C36" }
+    },
+    {
+        "targets": ["10.35.114.12:9091"],
+        "labels": { "desk": "Comp Lab PC 15 F" }
+    },
+    {
+        "targets": ["10.35.114.99:9091"],
+        "labels": { "desk": "Comp Lab PC 15 E" }
+    },
+    {
+        "targets": ["10.35.114.167:9091"],
+        "labels": { "desk": "Comp Lab PC C16" }
+    },
+    {
+        "targets": ["10.35.114.238:9091"],
+        "labels": { "desk": "Comp Lab PC C32" }
+    }
+    
+]
