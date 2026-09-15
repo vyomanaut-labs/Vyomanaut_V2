@@ -26,7 +26,7 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+        "uid": "VYOMANAUT_PROMETHEUS_DATASOURCE_UID"
       },
       "description": "Challenge throughput (vyomanaut_audit_challenges_issued_total).",
       "gridPos": {
@@ -56,7 +56,7 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+        "uid": "VYOMANAUT_PROMETHEUS_DATASOURCE_UID"
       },
       "description": "Network reliability, split PASS/FAIL/TIMEOUT (vyomanaut_audit_results_total).",
       "gridPos": {
@@ -86,7 +86,7 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+        "uid": "VYOMANAUT_PROMETHEUS_DATASOURCE_UID"
       },
       "description": "NFR-027 AuditTimeoutRateHigh signal \u2014 alert fires above 0.05.",
       "gridPos": {
@@ -129,7 +129,7 @@
       "type": "heatmap",
       "datasource": {
         "type": "prometheus",
-        "uid": "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+        "uid": "VYOMANAUT_PROMETHEUS_DATASOURCE_UID"
       },
       "description": "Distribution of computed provider reliability scores (vyomanaut_scoring_provider_score).",
       "gridPos": {
@@ -159,7 +159,7 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+        "uid": "VYOMANAUT_PROMETHEUS_DATASOURCE_UID"
       },
       "description": "NFR-027 RepairQueueDepthHigh signal \u2014 alert fires above 1,000.",
       "gridPos": {
@@ -202,7 +202,7 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+        "uid": "VYOMANAUT_PROMETHEUS_DATASOURCE_UID"
       },
       "description": "Repair throughput (vyomanaut_repair_jobs_completed_total).",
       "gridPos": {
@@ -232,7 +232,7 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+        "uid": "VYOMANAUT_PROMETHEUS_DATASOURCE_UID"
       },
       "description": "Payment volume, split DEPOSIT/RELEASE/SEIZURE/REVERSAL (vyomanaut_payment_escrow_events_total).",
       "gridPos": {
@@ -262,7 +262,7 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+        "uid": "VYOMANAUT_PROMETHEUS_DATASOURCE_UID"
       },
       "description": "NFR-027 MicroserviceReplicasDegraded signal \u2014 alert fires when healthy < 3.",
       "gridPos": {
@@ -305,7 +305,7 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+        "uid": "VYOMANAUT_PROMETHEUS_DATASOURCE_UID"
       },
       "description": "Dashboard view of the ADR-033 cumulative histogram (vyomanaut_db_read_latency_seconds). NFR-028's actual background-throttle decision reads the process-local 60s sliding window (metrics.ForegroundReadP99Window in internal/metrics/window.go), not this PromQL quantile \u2014 the two will diverge under a very recent burst, by design.",
       "gridPos": {
@@ -352,7 +352,7 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+        "uid": "VYOMANAUT_PROMETHEUS_DATASOURCE_UID"
       },
       "description": "[Added, M18 Stage 3] Chunk-store activity per provider (vyomanaut_daemon_chunks_stored_total). Cumulative counter, so this is a rate \u2014 a flat line at zero on a desk that should be receiving vetting/repair traffic is the first sign something upstream stopped routing work to it. Requires that desk's provider to have been started with --metrics-addr=0.0.0.0:9091 / -MetricsAddr 0.0.0.0:9091; a desk missing from the legend entirely usually means that flag was left off, not that the metric is broken.",
       "gridPos": {
@@ -382,7 +382,7 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+        "uid": "VYOMANAUT_PROMETHEUS_DATASOURCE_UID"
       },
       "description": "[Added, M18 Stage 3] Per-provider audit-response throughput (vyomanaut_daemon_audit_responses_sent_total). Cross-check against the microservice-side 'Audit results by outcome' panel above: if that panel's TIMEOUT share is climbing but every desk here still shows a healthy response rate, the timeouts are more likely network/relay-side than the provider failing to respond at all.",
       "gridPos": {
@@ -412,7 +412,7 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+        "uid": "VYOMANAUT_PROMETHEUS_DATASOURCE_UID"
       },
       "description": "[Added, M18 Stage 3] p95 of vyomanaut_daemon_audit_response_latency_milliseconds. [Note] Registered in milliseconds, not seconds \u2014 internal/metrics/daemon.go's own OBS.2.1 comment documents this as a deliberate exception to NFR-046's _seconds convention, kept because this histogram also feeds FR-029's human-facing CLI status view. The single slowest desk here is usually your bottleneck for the whole network's audit cycle time, not the average.",
       "gridPos": {
@@ -442,7 +442,7 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+        "uid": "VYOMANAUT_PROMETHEUS_DATASOURCE_UID"
       },
       "description": "[Added, M18 Stage 3] p95 of vyomanaut_daemon_vlog_append_latency_milliseconds \u2014 local disk write performance per machine. Also milliseconds, same NFR-046 exception as the panel above. A desk that drifts upward here over a long run, while every other desk stays flat, points at that specific machine's disk (fragmentation, thermal throttling, a background scan) rather than anything in this project's own code.",
       "gridPos": {
@@ -472,7 +472,7 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+        "uid": "VYOMANAUT_PROMETHEUS_DATASOURCE_UID"
       },
       "description": "[Added, M18 Stage 3] increase() of vyomanaut_daemon_content_hash_failures_total over 1h \u2014 the same metric alerts.yaml's ContentHashFailureDetected rule watches. This should sit at exactly zero for every desk, always. Any nonzero value is a real silent-corruption event on that machine's disk (architecture.md \u00a723: trigger an accelerated re-audit of everything that provider holds), not noise to average away \u2014 hence the threshold coloring rather than a smoothed rate.",
       "gridPos": {
@@ -515,7 +515,7 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+        "uid": "VYOMANAUT_PROMETHEUS_DATASOURCE_UID"
       },
       "description": "[Added, M18 Stage 3] rate() of vyomanaut_daemon_heartbeat_sent_total \u2014 each desk's connectivity signal. A line that flatlines here is usually visible minutes before the operator console's own Provider fleet panel marks that machine OVERDUE/DEPARTED (departure-threshold is on the order of minutes; the flatline itself starts at the missed heartbeat), so this is the earliest warning of a machine that has gone to sleep or lost its ZeroTier link.",
       "gridPos": {
@@ -545,7 +545,7 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+        "uid": "VYOMANAUT_PROMETHEUS_DATASOURCE_UID"
       },
       "description": "[Added, M18 Stage 3] vyomanaut_daemon_ram_constrained \u2014 1 while that desk is under RAM pressure (Session 13.6.1, A1), 0 otherwise. Expect a flat 0 for every desk on typical lab hardware; a desk pinned at 1 is worth checking directly (Task Manager / Activity Monitor) before trusting its other numbers on this dashboard, since a RAM-constrained daemon is more likely to also be the one posting slow audit/vLog latency above.",
       "gridPos": {
@@ -591,7 +591,7 @@
         "type": "query",
         "datasource": {
           "type": "prometheus",
-          "uid": "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+          "uid": "VYOMANAUT_PROMETHEUS_DATASOURCE_UID"
         },
         "query": {
           "query": "label_values(vyomanaut_daemon_heartbeat_sent_total, desk)",

@@ -2,7 +2,7 @@ apiVersion: 1
 datasources:
   - name: Prometheus
     type: prometheus
+    uid: VYOMANAUT_PROMETHEUS_DATASOURCE_UID
     access: proxy
-    # Container-to-container over the compose network, not localhost.
     url: http://prometheus:9090
     isDefault: true

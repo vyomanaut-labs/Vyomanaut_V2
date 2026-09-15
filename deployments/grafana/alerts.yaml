@@ -22,7 +22,7 @@
 # appear below, matching NFR-027 exactly.
 #
 # [Placeholder] datasourceUid values below are a placeholder
-# ("${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}") rather than a fabricated
+# ("VYOMANAUT_PROMETHEUS_DATASOURCE_UID") rather than a fabricated
 # real one — the actual UID is assigned by whichever Grafana instance
 # provisions this file and isn't knowable from source alone. Substitute the
 # real datasource UID (or template it via Grafana's provisioning
@@ -51,7 +51,7 @@ groups:
             rate; check bandwidth budget.
         data:
           - refId: query
-            datasourceUid: "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+            datasourceUid: "VYOMANAUT_PROMETHEUS_DATASOURCE_UID"
             relativeTimeRange:
               from: 600
               to: 0
@@ -85,7 +85,7 @@ groups:
             heartbeat address freshness.
         data:
           - refId: query
-            datasourceUid: "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+            datasourceUid: "VYOMANAUT_PROMETHEUS_DATASOURCE_UID"
             relativeTimeRange:
               from: 3600
               to: 0
@@ -144,7 +144,7 @@ groups:
             claim standing next to code that now contradicts it.
         data:
           - refId: query
-            datasourceUid: "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+            datasourceUid: "VYOMANAUT_PROMETHEUS_DATASOURCE_UID"
             relativeTimeRange:
               from: 604800
               to: 0
@@ -176,7 +176,7 @@ groups:
             Action (architecture.md §23): investigate replica failure.
         data:
           - refId: query
-            datasourceUid: "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+            datasourceUid: "VYOMANAUT_PROMETHEUS_DATASOURCE_UID"
             relativeTimeRange:
               from: 300
               to: 0
