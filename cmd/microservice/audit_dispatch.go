@@ -91,6 +91,7 @@ import (
 
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/audit"
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/metrics"
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/p2p"
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/scoring"
 )
@@ -333,6 +334,19 @@ func dispatchOneChallenge(
 	if err != nil {
 		return fmt.Errorf("WriteReceiptPhase1: %w", err)
 	}
+	// [Added — Grafana panel fix, evening-run review] AuditChallengesIssuedTotal
+	// was registered (internal/metrics/microservice.go, NFR-025) but had zero
+	// call sites — the "Audit challenges issued" panel was flat zero across
+	// a run that issued tens of thousands of real challenges (confirmed via
+	// the sibling "Audit results by outcome" panel, which IS wired, at
+	// internal/audit/receipt.go:440). Placed here rather than after the
+	// network dispatch below (openChallengeStream / writeChallengeRequest):
+	// this is the one point every attempted challenge passes through exactly
+	// once, matching what the operator TUI's own "challenges: N" figure
+	// appears to count — a challenge that fails to even reach the provider
+	// still gets a receipt row and an immediate TIMEOUT via finalizeTimeout
+	// below, not a silently discarded attempt.
+	metrics.AuditChallengesIssuedTotal.Inc()
 
 	// Step 4-5: resolve the provider's real p2p identity, connect, and open
 	// the /vyomanaut/audit-challenge/1.0.0 stream (repairTransport-equivalent
