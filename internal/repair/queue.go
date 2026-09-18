@@ -425,8 +425,14 @@ func MarkJobComplete(ctx context.Context, db *sql.DB, jobID uuid.UUID, success b
 	const query = `
 UPDATE repair_jobs
 SET status = $1, completed_at = NOW(), failure_reason = $3
-WHERE job_id = $2`
-	if _, err := db.ExecContext(ctx, query, status, jobID, failureReason); err != nil {
+WHERE job_id = $2
+RETURNING created_at`
+	// QueryRowContext + RETURNING rather than ExecContext: this is the one
+	// extra column (created_at) needed for RepairJobDurationSeconds below,
+	// and RETURNING gets it in the same round-trip as the UPDATE rather
+	// than a separate SELECT before or after it.
+	var createdAt time.Time
+	if err := db.QueryRowContext(ctx, query, status, jobID, failureReason).Scan(&createdAt); err != nil {
 		return fmt.Errorf("repair.MarkJobComplete: %w", err)
 	}
 	// [Added — Grafana panel fix, evening-run review] RepairJobsCompletedTotal
@@ -450,6 +456,11 @@ WHERE job_id = $2`
 	// `success`) — flagging the choice rather than silently picking the
 	// interpretation that happened to be easiest to wire.
 	metrics.RepairJobsCompletedTotal.Inc()
+	// [Added — Stage 3 final test] created_at came back from the same
+	// UPDATE above (RETURNING), not a fresh NOW() here, so this is the
+	// job's true end-to-end lifetime — queue wait plus execution — not
+	// just the time since this function was entered.
+	metrics.RepairJobDurationSeconds.Observe(time.Since(createdAt).Seconds())
 	return nil
 }
 
