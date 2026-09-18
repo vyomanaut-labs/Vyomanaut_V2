@@ -90,6 +90,27 @@ var (
 		Help: "Total number of repair jobs completed.",
 	})
 
+	// RepairJobDurationSeconds is the wall-clock time from a job's
+	// created_at (EnqueueJob) to its completed_at (MarkJobComplete) —
+	// queue wait plus execution together, the same quantity the morning
+	// run's repair review had to reconstruct by eye from two
+	// RepairQueueDepth screenshots (a 132-job spike draining over roughly
+	// 8-9 minutes). Buckets span a fast single-chunk reconstruction (a few
+	// seconds) through a queue backed up under load (tens of minutes) —
+	// not to the profile's PromisedDowntimeMaximum/DepartureThreshold
+	// scale, since a job that old has almost certainly been superseded or
+	// abandoned rather than genuinely still running.
+	//
+	// [Added — Stage 3 final test] Recorded regardless of success/failure,
+	// same reasoning as RepairJobsCompletedTotal just above: this is a
+	// throughput/latency signal, paired with RepairQueueDepth, not a
+	// quality signal.
+	RepairJobDurationSeconds = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "vyomanaut_repair_job_duration_seconds",
+		Help:    "Wall-clock time from a repair job's creation to its completion (success or failure), in seconds.",
+		Buckets: []float64{1, 5, 15, 30, 60, 120, 300, 600, 1200, 1800},
+	})
+
 	// PaymentEscrowEventsTotal counts escrow events by type
 	// (DEPOSIT|RELEASE|SEIZURE|REVERSAL), the payment subsystem's volume
 	// signal (NFR-025).
