@@ -44,6 +44,7 @@ import (
 
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
 	localcrypto "github.com/vyomanaut-labs/Vyomanaut_V2/internal/crypto"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/metrics"
 )
 
 // ── constants ──────────────────────────────────────────────────────────────
@@ -266,6 +267,18 @@ func doHeartbeat(ctx context.Context, cfg HeartbeatConfig) {
 	if cfg.GetToken != nil {
 		token, _ = cfg.GetToken()
 	}
+	// [Added — Grafana panel fix, evening-run review] DaemonHeartbeatSentTotal
+	// was registered (internal/metrics/daemon.go, OBS.2.1) but had zero call
+	// sites anywhere in the codebase — the "Daemon: heartbeats sent" panel
+	// was flat zero not because nothing was happening, but because nothing
+	// was counting it. Incremented here, once per actual dispatch attempt
+	// (not gated on success/status below): the metric's own doc comment
+	// calls this "this daemon's connectivity signal", so a daemon that is
+	// alive and trying — even if the coordinator is unreachable — should
+	// still register, matching this dashboard's stated purpose of catching
+	// a machine that went to sleep or lost its link before the departure
+	// threshold fires.
+	metrics.DaemonHeartbeatSentTotal.Inc()
 	status, respBody, err := postHeartbeat(ctx, cfg.effectiveHTTPClient(), cfg.MicroserviceURL+heartbeatPath, token, body)
 	if err != nil {
 		log.Printf("[heartbeat] send failed; will retry next cycle: %v", err)
