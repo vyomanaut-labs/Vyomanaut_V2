@@ -429,6 +429,27 @@ WHERE job_id = $2`
 	if _, err := db.ExecContext(ctx, query, status, jobID, failureReason); err != nil {
 		return fmt.Errorf("repair.MarkJobComplete: %w", err)
 	}
+	// [Added — Grafana panel fix, evening-run review] RepairJobsCompletedTotal
+	// was registered (internal/metrics/microservice.go, NFR-025) but had zero
+	// call sites anywhere — the "Repair jobs completed" panel stayed flat
+	// zero through a real morning-run repair cycle where the queue-depth
+	// gauge (this same file, refreshRepairQueueDepthGauge) visibly spiked
+	// and drained, so jobs were plainly completing; nothing was counting it.
+	// Incremented here rather than at each of executor.go's ~11 call sites:
+	// every one of them already funnels through this function for the
+	// UPDATE above, so this is the single point that sees every job's
+	// terminal state exactly once.
+	//
+	// [Decision, flagged rather than assumed] Incremented regardless of
+	// `success` — this counts queue THROUGHPUT (paired with
+	// RepairQueueDepth: a job leaves that gauge exactly when this function
+	// is called, win or lose), not job QUALITY. A FAILED job still shows up
+	// in repair_jobs with that status and a failure_reason for anyone
+	// querying quality separately. If what you actually want on this panel
+	// is successes only, this is a one-line change (guard the Inc() on
+	// `success`) — flagging the choice rather than silently picking the
+	// interpretation that happened to be easiest to wire.
+	metrics.RepairJobsCompletedTotal.Inc()
 	return nil
 }
 
