@@ -13,7 +13,7 @@
   ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 4,
+  "version": 5,
   "refresh": "30s",
   "time": {
     "from": "now-6h",
@@ -577,6 +577,41 @@
               }
             ]
           }
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 17,
+      "title": "Repair job duration (p50 / p95)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+      },
+      "description": "[Added, Stage 3 final test] End-to-end wall-clock time per repair job \u2014 created_at to completed_at, queue wait plus execution, from vyomanaut_repair_job_duration_seconds (internal/repair/queue.go's MarkJobComplete). Coordinator-side and singular in this demo (no `desk` label \u2014 there is one coordinator), unlike the per-desk daemon histograms above. The morning run's repair cycle had to be read off two separate 'Repair queue depth' screenshots and eyeballed at roughly 8-9 minutes for a 132-job backlog; this panel gives the real per-job number directly. A job that never completes (as in the evening run, where nothing was ever real enough to repair from) produces no observation at all here rather than a misleadingly low one \u2014 absence of data on this panel during an active incident is itself informative.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 64
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(vyomanaut_repair_job_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vyomanaut_repair_job_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
         },
         "overrides": []
       },
