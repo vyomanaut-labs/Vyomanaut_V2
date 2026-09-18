@@ -1008,9 +1008,32 @@ func boolToFloat(b bool) float64 {
 // directly (see that file's SINGLE_WRITER_RULE note). Started once from
 // main() after crash recovery completes (IC §5.3 pre-condition, Step 5
 // above), and stops when writeCh is closed at shutdown.
+//
+// [Added — Grafana panel fix, evening-run review] DaemonVlogAppendLatencyMilliseconds
+// was registered (internal/metrics/daemon.go, OBS.2.1) but had zero call
+// sites anywhere — the "Daemon: vLog append latency" panel rendered
+// completely empty, not just zero, because histogram_quantile over a
+// never-observed series returns no data at all. The natural call site is
+// inside internal/storage/vlog.go's appendToVLog, but that file's own
+// header is explicit: "IMPORT CONSTRAINT (IC §9): no other internal/
+// package may be imported here" — added deliberately, not an oversight,
+// so importing internal/metrics there was not done unilaterally. This is
+// the one and only caller of store.AppendChunk in the whole daemon (see
+// above), so timing the call from here gives the identical measurement
+// without touching the constrained file at all.
 func runChunkStoreWriter(store storage.ChunkStore, writeCh <-chan chunkWriteRequest) {
 	for req := range writeCh {
+		start := time.Now()
 		offset, err := store.AppendChunk(req.chunkID, req.data)
+		// handler_audit.go's sibling DaemonAuditResponseLatencyMilliseconds
+		// call uses float64(time.Since(start).Milliseconds()) (integer ms),
+		// fine there since that histogram's floor bucket is 10ms. Not used
+		// here on purpose: this histogram's floor bucket is 0.5ms (a fast
+		// SSD append is expected to land under 1ms per its own doc comment),
+		// so truncating to whole milliseconds first would collapse every
+		// sub-millisecond append to exactly 0 and destroy the one bucket
+		// boundary this histogram most needs to resolve.
+		metrics.DaemonVlogAppendLatencyMilliseconds.Observe(float64(time.Since(start)) / float64(time.Millisecond))
 		req.resultCh <- chunkWriteResult{vlogOffset: offset, err: err}
 	}
 }
