@@ -125,6 +125,7 @@ linters:
             - $gostd
             - github.com/vyomanaut-labs/Vyomanaut_V2/internal/config
             - github.com/vyomanaut-labs/Vyomanaut_V2/internal/crypto
+            - github.com/vyomanaut-labs/Vyomanaut_V2/internal/metrics
 
         # ── repair: config + erasure only — no payment, audit, scoring, p2p ──────
         # IC §9's closing paragraph: "the microservice entrypoint wires
