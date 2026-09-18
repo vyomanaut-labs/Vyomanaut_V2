@@ -13,7 +13,7 @@
   ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 3,
+  "version": 4,
   "refresh": "30s",
   "time": {
     "from": "now-6h",
@@ -88,7 +88,7 @@
         "type": "prometheus",
         "uid": "VYOMANAUT_PROMETHEUS_DATASOURCE_UID"
       },
-      "description": "NFR-027 AuditTimeoutRateHigh signal \u2014 alert fires above 0.05.",
+      "description": "NFR-027 AuditTimeoutRateHigh signal \u2014 alert fires above 0.05. [Corrected, Grafana panel fix / evening-run review] The previous expression divided rate(...{result=\"TIMEOUT\"}) by the bare, unaggregated rate(vyomanaut_audit_results_total[1h]) \u2014 that denominator is actually THREE separate series (one per result label: PASS, FAIL, TIMEOUT), not one combined total, since AuditResultsTotal is a CounterVec keyed on `result` (internal/metrics/microservice.go) and rate() does not sum across label values on its own. PromQL's default one-to-one vector matching then paired the numerator's TIMEOUT series with the denominator's identically-labeled TIMEOUT series and quietly dropped the unmatched PASS/FAIL series \u2014 so the panel always read exactly 100%, even during the morning run where the unaggregated 'Audit results by outcome' panel showed timeouts were a small fraction of the total. sum() on both sides collapses each side to the single intended series first.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -98,7 +98,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "rate(vyomanaut_audit_results_total{result=\"TIMEOUT\"}[1h]) / rate(vyomanaut_audit_results_total[1h])",
+          "expr": "sum(rate(vyomanaut_audit_results_total{result=\"TIMEOUT\"}[1h])) / sum(rate(vyomanaut_audit_results_total[1h]))",
           "legendFormat": ""
         }
       ],
