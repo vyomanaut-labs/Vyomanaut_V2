@@ -236,8 +236,16 @@ func dispatchUpload(args []string, stdin io.Reader, out, errOut io.Writer) int {
 			fprintf(errOut, "--resume must be a valid file_id (UUID): %v\n", err)
 			return exitUsage
 		}
+		// Read-only peek at the session's original size, purely to report
+		// it in printUploadTiming below — ResumeUpload (next line) loads
+		// this exact same state again internally; this does not create or
+		// mutate anything. A failure here just means the timing line falls
+		// back to "rate n/a" (n=0) rather than blocking the resume itself.
+		sess, sessErr := upload.LoadSessionState(sessionDir, fileID)
 		stopProgress := startUploadProgress(sessionDir, fileID, errOut)
+		startedAt := time.Now()
 		err = orch.ResumeUpload(ctx, id.MasterSecret, id.OwnerID, fileID)
+		elapsed := time.Since(startedAt)
 		stopProgress()
 		if err != nil {
 			printCLIError(errOut, g.json, withTransferErrorCode(err), renderTransferError)
@@ -245,6 +253,11 @@ func dispatchUpload(args []string, stdin io.Reader, out, errOut io.Writer) int {
 		}
 		finishUploadProgress(g.json, errOut)
 		printUploadResult(g.json, fileID, out)
+		originalSize := 0
+		if sessErr == nil {
+			originalSize = int(sess.OriginalSizeBytes)
+		}
+		printUploadTiming(g.json, originalSize, elapsed, errOut)
 		return 0
 	}
 
@@ -256,7 +269,9 @@ func dispatchUpload(args []string, stdin io.Reader, out, errOut io.Writer) int {
 	}
 
 	stopProgress := startUploadProgressForNewSession(sessionDir, errOut)
+	startedAt := time.Now()
 	fileID, err := orch.UploadFile(ctx, id.MasterSecret, id.OwnerID, plaintext)
+	elapsed := time.Since(startedAt)
 	stopProgress()
 	if err != nil {
 		if errors.Is(err, upload.ErrUploadIncomplete) {
@@ -267,6 +282,7 @@ func dispatchUpload(args []string, stdin io.Reader, out, errOut io.Writer) int {
 	}
 	finishUploadProgress(g.json, errOut)
 	printUploadResult(g.json, fileID, out)
+	printUploadTiming(g.json, len(plaintext), elapsed, errOut)
 	return 0
 }
 
@@ -297,6 +313,57 @@ func printUploadResult(jsonMode bool, fileID uuid.UUID, out io.Writer) {
 	} else {
 		fprintln(out, fileID.String())
 	}
+}
+
+// printUploadTiming reports an upload's wall-clock time and observed
+// throughput, the same pair dispatchRetrieve has always printed after a
+// "rebuilt in ..." line — this was the missing half. Suppressed under
+// --json for the same reason finishUploadProgress is: it's a
+// human-readability line, not part of the machine-readable result, and it
+// goes to errOut alongside every other progress/timing line for that
+// reason. n is the whole plaintext's byte count — for a fresh upload the
+// caller already has it (os.ReadFile's own return); for --resume, the
+// caller reads it once from the session state (SessionState.OriginalSizeBytes)
+// purely to report it here, since ResumeUpload's own signature carries no
+// byte count out.
+//
+// [Added — evening-run follow-up] dispatchRetrieve has printed this pair
+// since Session 18.1.5; dispatchUpload never did, so every upload timing
+// figure in the evening-run review (the 750-shard vs. 4,760-shard
+// comparison) had to be hand-computed from screenshot timestamps instead
+// of read off a log line. Mirrors roundRetrieveDuration/retrieveThroughput
+// exactly rather than reusing them under a generic name, so a future
+// change to one direction's reporting can't silently reach into the
+// other's tests.
+func printUploadTiming(jsonMode bool, n int, elapsed time.Duration, errOut io.Writer) {
+	if jsonMode {
+		return
+	}
+	fprintf(errOut, "  uploaded in %s (%s)\n", roundUploadDuration(elapsed), uploadThroughput(n, elapsed))
+}
+
+// roundUploadDuration renders an upload's wall-clock time at the same
+// precision as roundRetrieveDuration.
+func roundUploadDuration(d time.Duration) string {
+	if d < time.Second {
+		return d.Round(time.Millisecond).String()
+	}
+	return d.Round(retrieveDurationPrecision).String()
+}
+
+// uploadThroughput renders observed MB/s for an upload, or "rate n/a" when
+// the elapsed time is too small to divide by meaningfully — same floor as
+// retrieveThroughput, same reasoning: a tiny file uploaded in under a
+// millisecond would otherwise print an enormous, meaningless rate.
+func uploadThroughput(n int, d time.Duration) string {
+	if d <= 0 || n <= 0 {
+		return "rate n/a"
+	}
+	mbps := (float64(n) / humanize.BytesPerMB) / d.Seconds()
+	if mbps < minReportableMBps {
+		return "rate n/a"
+	}
+	return fmt.Sprintf("%.1f MB/s", mbps)
 }
 
 const uploadProgressPollInterval = 500 * time.Millisecond
