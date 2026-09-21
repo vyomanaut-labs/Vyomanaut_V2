@@ -111,6 +111,42 @@ var (
 		Buckets: []float64{1, 5, 15, 30, 60, 120, 300, 600, 1200, 1800},
 	})
 
+	// StorageChunkAssignmentsTotal counts chunk_assignments rows created
+	// by the upload assign path. This is a BOOKKEEPING counter: a row
+	// exists the moment the assign transaction commits, before any byte
+	// reaches the provider. Compared against the fleet's confirmed-store
+	// counter (vyomanaut_daemon_chunks_stored_total), the difference is
+	// the assignment/delivery gap that the "Assignment vs confirmed
+	// delivery" and "Cumulative assignment/delivery gap" dashboard panels
+	// chart.
+	//
+	// [Decision - NFR-046/A6 naming] Named vyomanaut_storage_chunk_assignments_total
+	// rather than an "upload"-prefixed name (the originally proposed one):
+	// {subsystem} is drawn from a fixed allow-list (this file's own
+	// package doc, A6; enforced mechanically by scripts/ci/grep_checks.sh's
+	// NO_ORPHAN_METRIC_NAME gate), and "upload" is not on it - "storage"
+	// is, and was otherwise unused. The metric's meaning is unchanged;
+	// only the wire name moved to stay inside the frozen naming contract.
+	//
+	// [Caveat, carried into the dashboard panel descriptions] The
+	// comparison is only clean during an upload window once the fleet is
+	// fully ACTIVE: cmd/provider/handler_upload.go's chunks-stored
+	// increment fires from the single wire-identical
+	// /vyomanaut/chunk-upload/1.0.0 stream handler regardless of whether
+	// the push is a real upload, a synthetic vetting chunk
+	// (internal/vettingchunk/generator.go), or a repair-driven shard
+	// re-placement (internal/repair/executor.go) - DM §4.5: "The provider
+	// daemon has no visibility into [is_vetting_chunk]; it stores and
+	// serves audits for synthetic chunks through the identical code paths
+	// as real shards." StorageChunkAssignmentsTotal itself is scoped to
+	// this file's assign path only, so any concurrent vetting or repair
+	// traffic inflates the "stored" side without a matching "assigned"
+	// row and must be excluded from the comparison window.
+	StorageChunkAssignmentsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "vyomanaut_storage_chunk_assignments_total",
+		Help: "Total chunk_assignments rows created by the upload assign path (bookkeeping, not confirmed delivery).",
+	})
+
 	// PaymentEscrowEventsTotal counts escrow events by type
 	// (DEPOSIT|RELEASE|SEIZURE|REVERSAL), the payment subsystem's volume
 	// signal (NFR-025).
