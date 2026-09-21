@@ -1,8 +1,8 @@
 # Scrape targets
 
-Two files live here, one per Prometheus job in `prometheus.yml`. Both work the same way:
-Prometheus rereads them every 15 seconds on its own — no restart, no reload command, no
-touching `prometheus.yml` itself. Both start as an empty list:
+Three files live here, one per Prometheus job in `prometheus.yml`. All three work the
+same way: Prometheus rereads them every 15 seconds on its own — no restart, no reload
+command, no touching `prometheus.yml` itself. All three start as an empty list:
 
 ```json
 []
@@ -58,7 +58,37 @@ in operator_unix_guide.md 4.4):
   default, same reasoning as the provider flag above: this endpoint has no
   authentication either.
 
-## Rules that apply to both files
+## `hosts.json` — the `vyomanaut-hosts` job (C5, optional)
+
+One entry per desk running `windows_exporter` (`winget install --id
+Prometheus.WindowsExporter` — see that command's own notes for what it sets up).
+Per-machine CPU, RAM, disk I/O, network, and uptime — the only source in this stack for
+provider-side host burden, since everything else here is Vyomanaut's own application
+metrics:
+
+```json
+[
+  {
+    "targets": ["10.35.114.94:9182"],
+    "labels": { "desk": "DESK-01" }
+  }
+]
+```
+
+- `9182` is `windows_exporter`'s default port. Same IP as that machine's `providers.json`
+  entry — it is the same physical desk, just a second port on it.
+- `desk` must be the EXACT same label already used for that machine in `providers.json`.
+  This is what lets a Grafana panel line up a desk's host metrics (this job) against its
+  daemon metrics (the `vyomanaut-providers` job) — a typo or a renamed desk here breaks
+  that join silently rather than erroring.
+- Unlike `providers.json` and `microservice.json`, adding the `vyomanaut-hosts` job block
+  itself to `prometheus.yml` (a one-time change, already done) needed a Prometheus
+  restart to take effect — file_sd's 15-second hot-reload only watches for changes
+  *within* a job Prometheus already knows about, not a brand new `job_name`. Editing
+  `hosts.json` itself afterward (adding or removing a desk) does NOT need a restart,
+  same as the other two files.
+
+## Rules that apply to all three files
 
 - Valid JSON, always: a trailing comma after the last `}` in the array is the single most
   common way to break one of these files. If Prometheus's Targets page
