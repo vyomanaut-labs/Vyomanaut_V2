@@ -77,6 +77,24 @@ scrape_configs:
           - /etc/prometheus/targets/microservice.json
         refresh_interval: 15s
 
+  # [Added, C5 - windows_exporter] Per-machine OS metrics (CPU, RAM, disk
+  # I/O, network, uptime) for a subset of provider desks, via
+  # prometheus-community/windows_exporter (winget install --id
+  # Prometheus.WindowsExporter, port 9182 by default). This is the only
+  # source in this stack for provider-side host burden - everything else
+  # here is Vyomanaut's own application metrics. Same file_sd_configs
+  # mechanism and the same reasoning as the two jobs above: see
+  # targets/README.md for the hosts.json format, and note there that
+  # ADDING this job_name block (as opposed to editing hosts.json's
+  # contents afterward) needs a Prometheus restart to take effect -
+  # file_sd's own 15s hot-reload only re-reads a target file an EXISTING
+  # job already watches, not a new job_name block in this file.
+  - job_name: vyomanaut-hosts
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/hosts.json
+        refresh_interval: 15s
+
   - job_name: prometheus
     static_configs:
       - targets: ['localhost:9090']
