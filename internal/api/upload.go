@@ -107,6 +107,7 @@ import (
 
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
 	localcrypto "github.com/vyomanaut-labs/Vyomanaut_V2/internal/crypto"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/metrics"
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/repair"
 )
 
@@ -555,6 +556,14 @@ func (h *UploadAssignHandler) assignSegment(ctx context.Context, fileID uuid.UUI
 
 	excludeIDs := append([]uuid.UUID{}, excludeForCeiling...)
 
+	// inserted counts chunk_assignments rows added by this call, for the
+	// metrics.StorageChunkAssignmentsTotal bump below. Counted locally and
+	// added only after tx.Commit() succeeds, not at the ExecContext call
+	// site itself: incrementing there would overcount every rolled-back
+	// transaction, and rollback is exactly what happens below on
+	// repair.ErrNoEligibleReplacement, which is not rare at this topology.
+	inserted := 0
+
 	for shardIdx := 0; shardIdx < h.profile.TotalShards; shardIdx++ {
 		providerID, err := repair.SelectReplacementProvider(ctx, tx, h.profile, segmentID, excludeIDs)
 		if err != nil {
@@ -584,12 +593,14 @@ func (h *UploadAssignHandler) assignSegment(ctx context.Context, fileID uuid.UUI
 		); err != nil {
 			return 0, fmt.Errorf("api: assignSegment: insert chunk_assignment: %w", err)
 		}
+		inserted++
 	}
 
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("api: assignSegment: commit: %w", err)
 	}
 	committed = true
+	metrics.StorageChunkAssignmentsTotal.Add(float64(inserted))
 
 	return 0, nil
 }
