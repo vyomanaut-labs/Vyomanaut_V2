@@ -141,8 +141,9 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "vyomanaut_scoring_provider_score",
-          "legendFormat": ""
+          "expr": "sum(rate(vyomanaut_scoring_provider_score_bucket[$__rate_interval])) by (le)",
+          "legendFormat": "",
+          "format": "heatmap"
         }
       ],
       "fieldConfig": {
@@ -365,7 +366,7 @@
         {
           "refId": "A",
           "expr": "rate(vyomanaut_daemon_chunks_stored_total{desk=~\"$desk\"}[5m])",
-          "legendFormat": "{{desk}}"
+          "legendFormat": "{{desk}} ({{phone}})"
         }
       ],
       "fieldConfig": {
@@ -395,7 +396,7 @@
         {
           "refId": "A",
           "expr": "rate(vyomanaut_daemon_audit_responses_sent_total{desk=~\"$desk\"}[5m])",
-          "legendFormat": "{{desk}}"
+          "legendFormat": "{{desk}} ({{phone}})"
         }
       ],
       "fieldConfig": {
@@ -425,7 +426,7 @@
         {
           "refId": "A",
           "expr": "histogram_quantile(0.95, sum by (le, desk) (rate(vyomanaut_daemon_audit_response_latency_milliseconds_bucket{desk=~\"$desk\"}[5m])))",
-          "legendFormat": "{{desk}}"
+          "legendFormat": "{{desk}} ({{phone}})"
         }
       ],
       "fieldConfig": {
@@ -455,7 +456,7 @@
         {
           "refId": "A",
           "expr": "histogram_quantile(0.95, sum by (le, desk) (rate(vyomanaut_daemon_vlog_append_latency_milliseconds_bucket{desk=~\"$desk\"}[5m])))",
-          "legendFormat": "{{desk}}"
+          "legendFormat": "{{desk}} ({{phone}})"
         }
       ],
       "fieldConfig": {
@@ -485,7 +486,7 @@
         {
           "refId": "A",
           "expr": "increase(vyomanaut_daemon_content_hash_failures_total{desk=~\"$desk\"}[1h])",
-          "legendFormat": "{{desk}}"
+          "legendFormat": "{{desk}} ({{phone}})"
         }
       ],
       "fieldConfig": {
@@ -528,7 +529,7 @@
         {
           "refId": "A",
           "expr": "rate(vyomanaut_daemon_heartbeat_sent_total{desk=~\"$desk\"}[5m])",
-          "legendFormat": "{{desk}}"
+          "legendFormat": "{{desk}} ({{phone}})"
         }
       ],
       "fieldConfig": {
@@ -558,7 +559,7 @@
         {
           "refId": "A",
           "expr": "vyomanaut_daemon_ram_constrained{desk=~\"$desk\"}",
-          "legendFormat": "{{desk}}"
+          "legendFormat": "{{desk}} ({{phone}})"
         }
       ],
       "fieldConfig": {
@@ -588,7 +589,7 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${VYOMANAUT_PROMETHEUS_DATASOURCE_UID}"
+        "uid": "VYOMANAUT_PROMETHEUS_DATASOURCE_UID"
       },
       "description": "[Added, Stage 3 final test] End-to-end wall-clock time per repair job \u2014 created_at to completed_at, queue wait plus execution, from vyomanaut_repair_job_duration_seconds (internal/repair/queue.go's MarkJobComplete). Coordinator-side and singular in this demo (no `desk` label \u2014 there is one coordinator), unlike the per-desk daemon histograms above. The morning run's repair cycle had to be read off two separate 'Repair queue depth' screenshots and eyeballed at roughly 8-9 minutes for a 132-job backlog; this panel gives the real per-job number directly. A job that never completes (as in the evening run, where nothing was ever real enough to repair from) produces no observation at all here rather than a misleadingly low one \u2014 absence of data on this panel during an active incident is itself informative.",
       "gridPos": {
@@ -635,12 +636,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "rate(vyomanaut_storage_chunk_assignments_total[1m])",
+          "expr": "sum(rate(vyomanaut_storage_chunk_assignments_total{job=\"vyomanaut-microservice\"}[1m]))",
           "legendFormat": "assigned (bookkeeping)"
         },
         {
           "refId": "B",
-          "expr": "sum(rate(vyomanaut_daemon_chunks_stored_total[1m]))",
+          "expr": "sum(rate(vyomanaut_daemon_chunks_stored_total{job=\"vyomanaut-providers\"}[1m]))",
           "legendFormat": "stored (confirmed)"
         }
       ],
@@ -670,7 +671,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "increase(vyomanaut_storage_chunk_assignments_total[$__range])\n  - sum(increase(vyomanaut_daemon_chunks_stored_total[$__range]))",
+          "expr": "sum(increase(vyomanaut_storage_chunk_assignments_total{job=\"vyomanaut-microservice\"}[$__range]))\n  - sum(increase(vyomanaut_daemon_chunks_stored_total{job=\"vyomanaut-providers\"}[$__range]))",
           "legendFormat": "assigned - stored (cumulative)"
         }
       ],
