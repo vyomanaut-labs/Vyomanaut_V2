@@ -7,6 +7,42 @@
 //
 // internal/metrics has zero internal/ imports by design — see window.go's
 // doc comment and IC §9 (A2/Option A: this package is an importable leaf).
+//
+// [Confirmed, C6 dry run] Being one leaf package cuts both ways: cmd/provider
+// imports it for daemon.go's collectors (handler_upload.go, handler_audit.go,
+// main.go) and cmd/microservice imports it for microservice.go's collectors
+// (audit_dispatch.go and others). Every promauto.New*() call in this package
+// runs unconditionally at package init, on the DEFAULT Prometheus registerer
+// — there is no per-binary split. So importing either half of this package
+// registers ALL of it, in both binaries: every provider daemon also exposes
+// microservice.go's coordinator-only metrics (repair, audit-issued, escrow,
+// cluster, storage-assignment), stuck at their zero value since the code
+// that updates them never runs inside cmd/provider; symmetrically, the
+// coordinator exposes every daemon-only metric (chunks stored, audit
+// responses, vLog latency, content-hash failures, heartbeats, RAM
+// constrained) stuck at zero under its own desk label ("COORDINATOR" in
+// targets/microservice.json).
+//
+// This is invisible until a dashboard panel queries one of these metrics
+// without aggregating it down or filtering by job: Prometheus happily
+// returns the real series plus one dead, always-zero series per target on
+// the WRONG job, each carrying that target's own desk/instance labels. The
+// Grafana panels affected by this were fixed to either sum() the metric away
+// entirely (coordinator-only panels with no per-desk intent) or add an
+// explicit job="vyomanaut-providers"/"vyomanaut-microservice" filter
+// (per-desk panels, and the $desk template variable itself, which was
+// built on a daemon-only metric and so silently offered "COORDINATOR" as a
+// selectable desk). The dead series themselves are still there on both
+// binaries' /metrics output — this only stops them from reaching a panel.
+//
+// The clean fix is a separate prometheus.Registry per binary (promauto.With
+// per collector, registering only what that binary actually updates) rather
+// than the shared default registerer. That is a larger change than this dry
+// run's timeline allows and touches both cmd/provider's and
+// cmd/microservice's wiring, not just this package — worth a decision, not
+// something to take unilaterally this close to a run. Filed the same way as
+// the unused StartMicroserviceMetricsServer note in prometheus.yml: real
+// tech debt, not a blocker.
 package metrics
 
 import (
