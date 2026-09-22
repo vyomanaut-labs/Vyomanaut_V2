@@ -1,39 +1,38 @@
 [
     {
         "targets": ["10.35.114.132:9091"],
-        "labels": { "desk": "Comp Lab PC C13" }
+        "labels": { "desk": "Comp Lab PC C13", "phone": "+911234567890" }
     },
     {
         "targets": ["10.35.114.116:9091"],
-        "labels": { "desk": "Comp Lab PC C26" }
+        "labels": { "desk": "Comp Lab PC C26", "phone": "+911234567891" }
     },
     {
         "targets": ["10.35.114.31:9091"],
-        "labels": { "desk": "Comp Lab PC C37" }
+        "labels": { "desk": "Comp Lab PC C37", "phone": "+911234567892" }
     },
     {
         "targets": ["10.35.114.103:9091"],
-        "labels": { "desk": "Comp Lab PC C21" }
+        "labels": { "desk": "Comp Lab PC C21", "phone": "+911234567893" }
     },
     {
         "targets": ["10.35.114.36:9091"],
-        "labels": { "desk": "Comp Lab PC C36" }
+        "labels": { "desk": "Comp Lab PC C36", "phone": "+911234567894" }
     },
     {
         "targets": ["10.35.114.12:9091"],
-        "labels": { "desk": "Comp Lab PC 15 F" }
+        "labels": { "desk": "Comp Lab PC 15 F", "phone": "+911234567895" }
     },
     {
         "targets": ["10.35.114.99:9091"],
-        "labels": { "desk": "Comp Lab PC 15 E" }
+        "labels": { "desk": "Comp Lab PC 15 E", "phone": "+911234567896" }
     },
     {
         "targets": ["10.35.114.167:9091"],
-        "labels": { "desk": "Comp Lab PC C16" }
+        "labels": { "desk": "Comp Lab PC C16", "phone": "+911234567897" }
     },
     {
         "targets": ["10.35.114.238:9091"],
-        "labels": { "desk": "Comp Lab PC C32" }
+        "labels": { "desk": "Comp Lab PC C32", "phone": "+911234567898" }
     }
-    
 ]
