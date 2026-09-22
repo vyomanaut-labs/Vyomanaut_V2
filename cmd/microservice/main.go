@@ -440,6 +440,12 @@ func runMicroservice(ctx context.Context, cfg startupConfig) (*app, error) {
 	readinessEvaluator := api.NewReadinessEvaluator(db, profile, cache, clusterMembership, api.StubRelayNodeCounter{}, effectiveDepartureThreshold)
 	go startReadinessMonitorLoop(ctx, readinessEvaluator)
 
+	// [Fixed — Grafana panel audit, C6] vyomanaut_cluster_replica_count was
+	// registered (internal/metrics/microservice.go) but never fed — third
+	// consumer of the same clusterMembership value step 6 already resolved,
+	// alongside readinessEvaluator above and clusterRouter below.
+	go startClusterReplicaCountLoop(ctx, clusterMembership)
+
 	// ── Microservice signing key + admin key (shared across steps 8-16) ────
 	jwtPub, jwtPriv, err := loadOrGenerateMicroserviceSigningKey(profile.RequireSecretsManager, cfg.MicroserviceSigningSeedHex)
 	if err != nil {

@@ -39,7 +39,9 @@ import (
 	"time"
 
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/api"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/cluster"
 	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/config"
+	"github.com/vyomanaut-labs/Vyomanaut_V2/internal/metrics"
 )
 
 // readinessEvaluationCycle is IC §3.4's 60-second re-evaluation cadence.
@@ -101,6 +103,54 @@ func startReadinessMonitorLoop(ctx context.Context, evaluator *api.ReadinessEval
 			return
 		case <-ticker.C:
 			refresh()
+		}
+	}
+}
+
+// clusterReplicaCountReportCycle is how often startClusterReplicaCountLoop
+// re-reads Membership.HealthyCount() and republishes it to Prometheus.
+// Matches readinessEvaluationCycle: both are cheap, in-memory reads on the
+// stub Membership implementations (SoloMembership/GossipCluster both return
+// a constant), so there is no cost reason to poll faster or slower than the
+// readiness loop already does.
+const clusterReplicaCountReportCycle = 60 * time.Second
+
+// startClusterReplicaCountLoop keeps vyomanaut_cluster_replica_count fed
+// from the same cluster.Membership main.go already constructs for the
+// readiness evaluator (waitForGossipQuorum's return value) and already
+// passes to cluster.NewRouter — this loop is a third consumer of that same
+// value, not a new construction path.
+//
+// [Fixed — Grafana panel audit, C6] The metric itself has existed since
+// this file's own package doc's step 6 (ARCH §18, NFR-025) but nothing
+// ever called Set on it: the "Microservice replica count" dashboard panel
+// read genuine registered-but-never-updated silence, indistinguishable
+// from "no data because this demo runs one instance" until traced back to
+// the metric's own call sites. It is not expected-empty — SoloMembership
+// legitimately reports 1 healthy replica in demo mode (ADR-031), and the
+// panel should show a flat line at 1, not nothing.
+//
+// Reports under the "healthy" state label only. Membership has no signal
+// for a "degraded" replica today (see internal/cluster/membership.go — the
+// interface is HealthyCount() int alone), so this loop does not also
+// Set("degraded", 0): that would assert a monitored-and-found-clean state
+// for something never actually observed. A "degraded" series appears only
+// once GossipCluster (LTS) exposes something to genuinely feed it.
+func startClusterReplicaCountLoop(ctx context.Context, membership cluster.Membership) {
+	ticker := time.NewTicker(clusterReplicaCountReportCycle)
+	defer ticker.Stop()
+
+	report := func() {
+		metrics.ClusterReplicaCount.WithLabelValues("healthy").Set(float64(membership.HealthyCount()))
+	}
+
+	report() // prime the gauge immediately, same reasoning as startReadinessMonitorLoop's refresh()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			report()
 		}
 	}
 }
