@@ -1,40 +1,51 @@
 # Vyomanaut_V2
 
-Welcome to Vyomanaut🚀✨.
+Welcome to Vyomanaut 🚀✨
 
-This is where the `Version 2` of the ambitious and exhilarating project is being developed.
+This is where **Version 2** of the project is built.
 
-> **The Core Idea:** Distributed cloud storage network for India powered by over a billion devices.
+> **The core idea:** A distributed cloud storage network for India, powered by the idle disks of ordinary computers.
 
-**Note:** If you want to understand *why* it's being built this way, the thinking lives in the [Research repo](https://github.com/vyomanaut-labs/Vyomanaut_Research). If you want to see where it all started, that's [V1](https://github.com/vyomanaut-labs/Vyomanaut).
+---
+
+## Links
+
+- 🎥 **YouTube:** [youtube.com/@vyomanaut-labs](https://www.youtube.com/@vyomanaut-labs)
+- 💼 **LinkedIn:** [linkedin.com/company/vyomanaut-labs](https://www.linkedin.com/company/vyomanaut-labs)
+- 📄 **Demo report (VLD-001):** [Read it on Google Drive](https://drive.google.com/drive/folders/1tCk9fueHt9Np4GcJYck9dJC2D98Lb1Y6?usp=drive_link)
+- 🌱 **Vyomanaut V1:** [where this idea started](https://github.com/vyomanaut-labs/Vyomanaut)
 
 ---
 
 ## What is Vyomanaut?
 
-A distributed storage network where your files are split, encrypted, and spread across independent providers — none of whom can read your data, and all of whom get paid for storing it reliably.
+Vyomanaut is a network where your files are split, encrypted, and spread across many independent providers.
 
-No central server holds your keys. No single provider holds your file. The math guarantees reconstruction even if a third of the network disappears overnight.
+- No provider can read your data.
+- No single provider holds your whole file.
+- No central server holds your keys.
+- Providers get paid for storing your data reliably.
 
-V1 proved the concept. V2 is the real thing.
+Even if a third of the network disappears overnight, the math still lets you get your file back.
 
 ---
 
 ## What's different in V2?
 
-V1 failed. In delivering the what the project targeted.
+V1 did not deliver what the project aimed for. It failed because of:
 
-**It failed due to:**
+- too little research into the architecture
+- shortcuts taken during the build
+- slow transfers, wasteful storage, and weak peer discovery
 
-- Lack of research in architecture
-- Structural compromises made during build
-- Inefficient transfer speed, storage, and peer discovery
+V2 is a ground-up redesign that learns from those mistakes. It is built on:
 
-But it paved the way for V2 which learnt from it's predecessor. Also personally it added a great skill boost so I could believe in V2.
+- 41 research papers
+- a formal data model
+- a complete cryptography specification
+- a detailed build plan
 
-V2 is a ground-up redesign with 41 research papers behind it, a formal data model, a complete cryptographic specification, and a build plan detailed enough to leave nothing to chance. The erasure coding, the audit system, the payment rails, the P2P layer — every piece has a governing document and every governing document has a reason.
-
-The [Research repo](https://github.com/masamasaowl/Vyomanaut_Research) holds all of that: architecture, data model, interface contracts, API spec, ADRs, and the research summaries that shaped every major decision.
+Every part of the system (erasure coding, audits, payments, the peer-to-peer layer) has a clear reason to exist.
 
 ---
 
@@ -42,20 +53,37 @@ The [Research repo](https://github.com/masamasaowl/Vyomanaut_Research) holds all
 
 🏗️ **Active build**
 
-The full build plan runs M0 → M18 across 18 milestones and ~120 sessions. Each session is atomic: it produces passing tests before the next one begins.
+The build plan has 18 milestones (M0 to M18) and about 120 sessions. Each session is small and must pass its tests before the next one starts.
+
+The project has two versions:
+
+1. **DEMO:** shows the whole system working, end to end.
+2. **LTS:** the long-term version, built after the demo.
+
+### Demo results
+
+The demo has been tested on 10 real machines (9 providers and 1 coordinator) in a campus lab. In that test:
+
+- Files from 3 MiB to 200 MiB were encrypted, split, and stored across the providers.
+- Every fragment the coordinator assigned was confirmed as stored.
+- More than 73,000 storage audits ran, and no stored fragment failed an integrity check.
+- The payment ledger was exact to the paisa.
+- Repair started automatically when a provider left.
+
+The full story, with numbers and limits, is in the [demo report](https://drive.google.com/drive/folders/1tCk9fueHt9Np4GcJYck9dJC2D98Lb1Y6?usp=drive_link).
 
 ---
 
 ## Repository layout
 
-```go
-cmd/            → microservice, provider, client binaries
-internal/       → all business logic (crypto, erasure, audit, payment, p2p, ...)
-migrations/     → schema generator + SQL migrations
+```
+cmd/            → coordinator, provider, and client programs
+internal/       → all the main logic (crypto, erasure coding, audit, payment, p2p, ...)
+migrations/     → database schema generator and SQL migrations
 deployments/    → dev docker-compose, production configs, Grafana dashboards
 scripts/        → CI checks, benchmarks, integration tests
-runbooks/       → operational playbooks
-docs/           → system design documents (authoritative source in Research repo)
+runbooks/       → operational guides
+docs/           → design documents
 ```
 
 ---
@@ -68,11 +96,12 @@ cd Vyomanaut_V2
 docker-compose -f deployments/dev/docker-compose.yml up
 ```
 
-Demo mode spins up a 5-provider network on your laptop. Full upload → audit → repair cycle in under 30 minutes.
+Demo mode starts a 5-provider network on your laptop. You can see a full upload → audit → repair cycle in under 30 minutes.
+
+Follow the guides based on your OS to run it locally: [Guide](./guides/)
 
 ---
 
-## Related
+## Follow the project
 
-- **[Vyomanaut V1](https://github.com/vyomanaut-labs/Vyomanaut)** — where this idea was born
-- **[Vyomanaut Research](https://github.com/vyomanaut-labs/Vyomanaut_Research)** — the system design, ADRs, and 41 papers behind V2
+Watch the demos on [YouTube](https://www.youtube.com/@vyomanaut-labs) and follow updates on [LinkedIn](https://www.linkedin.com/company/vyomanaut-labs).
